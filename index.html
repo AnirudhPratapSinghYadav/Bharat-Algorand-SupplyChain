@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agri-Trust | Industrial Risk Monitor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #6366f1;
+            --bg: #030712;
+            --panel: rgba(17, 24, 39, 0.7);
+            --border: rgba(255, 255, 255, 0.1);
+        }
+        body { 
+            font-family: 'Outfit', sans-serif; 
+            background-color: var(--bg);
+            color: #f3f4f6;
+            background-image: radial-gradient(circle at 50% -20%, #1e1b4b 0%, transparent 70%);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .glass {
+            background: var(--panel);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--border);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.8);
+        }
+        .shimmer {
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.05), transparent);
+            background-size: 200% 100%;
+            animation: shimmer 2s infinite linear;
+        }
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+        .pulse-red { animation: pulse-red 2s infinite; }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        .hazard-strip {
+            background: repeating-linear-gradient(45deg, #f59e0b, #f59e0b 10px, #000 10px, #000 20px);
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        const App = () => {
+            const [shipments, setShipments] = useState([]);
+            const [liveFeed, setLiveFeed] = useState([]);
+            const [stats, setStats] = useState({});
+            const [loading, setLoading] = useState(true);
+            const [isFinalizing, setIsFinalizing] = useState(false);
+            const [wallet, setWallet] = useState(null); 
+            const [activeTab, setActiveTab] = useState('global');
+            const [searchId, setSearchId] = useState('');
+            const [verificationResult, setVerificationResult] = useState(null);
+
+            const API_BASE = "";
+
+            const fetchData = async () => {
+                try {
+                    const [resShip, resFeed, resStats] = await Promise.all([
+                        fetch(`${API_BASE}/sync-ledger`),
+                        fetch(`${API_BASE}/live-feed`),
+                        fetch(`${API_BASE}/stats`)
+                    ]);
+                    const dataShip = await resShip.json();
+                    const dataFeed = await resFeed.json();
+                    const dataStats = await resStats.json();
+                    setShipments(dataShip || []);
+                    setLiveFeed(dataFeed.events || []);
+                    setStats(dataStats || {});
+                    setLoading(false);
+                } catch (err) { console.error("Fetch failed", err); }
+            };
+
+            useEffect(() => {
+                fetchData();
+                const interval = setInterval(fetchData, 3000);
+                return () => clearInterval(interval);
+            }, []);
+
+            const connectWallet = () => setWallet("ZV7W...R4P9");
+
+            const triggerAudit = async (shipId) => {
+                setIsFinalizing(true);
+                try {
+                    const resp = await fetch(`${API_BASE}/run-jury`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ shipment_id: shipId })
+                    });
+                    const result = await resp.json();
+                    if (result.on_chain_tx_id) {
+                        alert(`Verified on Algorand! Confirmed Round: ${result.confirmed_round}`);
+                    }
+                } finally {
+                    setIsFinalizing(false);
+                    fetchData();
+                }
+            };
+
+            const verifyShipment = async (id) => {
+                if (!id) return;
+                try {
+                    const resp = await fetch(`${API_BASE}/verify/${id}`);
+                    const result = await resp.json();
+                    setVerificationResult(result);
+                } catch (err) { console.error("Verify failed", err); }
+            };
+
+            const supplierShipments = useMemo(() => shipments, [shipments]);
+
+            return (
+                <div className="max-w-7xl mx-auto px-4 py-8">
+                    <header className="flex justify-between items-center mb-10">
+                        <div className="flex items-center gap-4">
+                            <div className="w-10 h-10 bg-indigo-600 rounded-lg flex items-center justify-center font-bold text-xl cursor-pointer" onClick={() => window.location.reload()}>A</div>
+                            <div>
+                                <h1 className="text-2xl font-black tracking-tighter uppercase">Agri-Trust</h1>
+                                <p className="text-indigo-400 text-xs font-bold tracking-widest uppercase">Industrial Risk Monitor</p>
+                            </div>
+                        </div>
+                        
+                        <div className="flex items-center gap-6">
+                            <nav className="flex bg-gray-900/50 p-1 rounded-xl border border-white/5">
+                                {['global', 'supplier', 'verify'].map(t => (
+                                    <button 
+                                        key={t}
+                                        onClick={() => { setActiveTab(t); setVerificationResult(null); }}
+                                        className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${activeTab === t ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'text-gray-500 hover:text-gray-400'}`}
+                                    >
+                                        {t.toUpperCase()}
+                                    </button>
+                                ))}
+                            </nav>
+                            <button 
+                                onClick={connectWallet}
+                                className={`px-5 py-2.5 rounded-xl font-bold text-sm transition-all ${wallet ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-indigo-600 hover:bg-indigo-500 text-white'}`}
+                            >
+                                {wallet ? `Connected: ${wallet}` : 'Connect Pera Wallet'}
+                            </button>
+                        </div>
+                    </header>
+
+                    <section className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                        <StatCard label="Total Scans" value={stats.total_scans || "0"} sub="AI Validated" />
+                        <StatCard label="Live Anomalies" value={stats.verified_anomalies || "0"} sub="On-Chain Flag" color="text-red-400" />
+                        <StatCard label="Escrow Locked" value={`${stats.contract_algo || "0"} ALGO`} sub="Smart Contract #72" />
+                        <StatCard label="Avg Risk Index" value="22%" sub="Global Fleet" />
+                    </section>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                        <aside className="lg:col-span-3">
+                            <div className="glass rounded-2xl p-5 h-full border-l-4 border-indigo-600">
+                                <h3 className="text-sm font-bold tracking-widest text-indigo-400 uppercase mb-4 flex items-center gap-2">
+                                    <span className="w-2 h-2 bg-indigo-500 rounded-full animate-ping"></span>
+                                    Live Intel Stream
+                                </h3>
+                                <div className="space-y-4">
+                                    {liveFeed.slice(0, 8).map((e, i) => (
+                                        <div key={i} className="border-b border-white/5 pb-3">
+                                            <p className="text-[13px] leading-tight font-medium mb-1">{e.event}</p>
+                                            <div className="flex justify-between items-center text-[10px] mono uppercase">
+                                                <span className={e.tier === 'critical' ? 'text-red-400' : 'text-emerald-400'}>{e.tier}</span>
+                                                <span className="text-gray-500">{new Date(e.ts).toLocaleTimeString()}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </aside>
+
+                        <main className="lg:col-span-9 space-y-6">
+                            {activeTab === 'global' && (
+                                <div className="glass rounded-2xl overflow-hidden">
+                                    <table className="w-full text-left">
+                                        <thead>
+                                            <tr className="bg-white/5 border-b border-white/10 text-[11px] font-bold tracking-widest text-gray-400 uppercase">
+                                                <th className="px-6 py-4">Shipment Unit</th>
+                                                <th className="px-6 py-4">Route</th>
+                                                <th className="px-6 py-4">Status</th>
+                                                <th className="px-6 py-4 text-right">Audit</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-white/5">
+                                            {shipments.map(s => (
+                                                <tr key={s.id} className="hover:bg-white/5 transition-colors group">
+                                                    <td className="px-6 py-4">
+                                                        <div className="mono text-indigo-300 text-sm font-bold">{s.id}</div>
+                                                    </td>
+                                                    <td className="px-6 py-4">
+                                                        <div className="text-xs font-bold">{s.origin} → {s.destination}</div>
+                                                    </td>
+                                                    <td className="px-6 py-4">
+                                                        <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase border ${s.status === 'In_Transit' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-500 pulse-red'}`}>
+                                                            {s.status}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-6 py-4 text-right">
+                                                        <button 
+                                                            disabled={isFinalizing || s.status !== 'In_Transit'}
+                                                            onClick={() => triggerAudit(s.id)}
+                                                            className="px-4 py-2 bg-indigo-600/10 hover:bg-indigo-600 border border-indigo-600/20 text-indigo-400 hover:text-white rounded-lg text-xs font-bold uppercase disabled:opacity-30"
+                                                        >
+                                                            {isFinalizing ? 'Hashing...' : 'Analyze'}
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+
+                            {activeTab === 'supplier' && (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    {supplierShipments.map(s => (
+                                        <div key={s.id} className="glass rounded-2xl overflow-hidden border-t-2 border-indigo-500 p-6">
+                                            <div className="flex justify-between items-center mb-6">
+                                                <h4 className="mono font-bold text-indigo-300">{s.id}</h4>
+                                                <span className="text-[10px] font-black uppercase bg-indigo-500 px-2 py-1 rounded">Supplier Dash</span>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-4 mb-6">
+                                                <Gauge label="Temperature" value={`${s.telemetry?.temp || 0}°C`} sub="Core Unit" color={s.telemetry?.temp > 35 ? 'text-amber-400' : 'text-emerald-400'} />
+                                                <Gauge label="Humidity" value={`${s.telemetry?.humidity || 0}%`} sub="Environmental" />
+                                                <Gauge label="Vibration" value={`${s.telemetry?.vibration || 0}G`} sub="Axial Load" />
+                                                <Gauge label="GPS Lock" value="ACTIVE" sub="Satellite" color="text-indigo-400" />
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                            {activeTab === 'verify' && (
+                                <div className="max-w-3xl mx-auto space-y-8">
+                                    <div className="glass rounded-2xl p-8 text-center">
+                                        <h2 className="text-3xl font-black mb-4 tracking-tighter uppercase text-white">Public Ledger Query</h2>
+                                        <div className="flex gap-2">
+                                            <input 
+                                                type="text" 
+                                                value={searchId}
+                                                onChange={(e) => setSearchId(e.target.value)}
+                                                placeholder="Enter Shipment ID (e.g. SHIP_001)" 
+                                                className="bg-gray-900 border border-white/10 rounded-xl px-6 py-4 flex-grow outline-none focus:border-indigo-500 transition-all mono text-indigo-300" 
+                                            />
+                                            <button 
+                                                onClick={() => verifyShipment(searchId)}
+                                                className="bg-indigo-600 px-8 py-4 rounded-xl font-bold uppercase"
+                                            >
+                                                Query
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {verificationResult && (
+                                        <div className="glass rounded-2xl p-8 border-t-4 border-emerald-500">
+                                            <div className="flex justify-between items-start mb-8">
+                                                <div>
+                                                    <div className="text-[10px] font-black text-emerald-400 uppercase">On-Chain Proof</div>
+                                                    <h3 className="text-2xl font-black mono text-white">{verificationResult.shipment_id}</h3>
+                                                </div>
+                                                <div className="text-right">
+                                                    <div className="text-sm font-bold text-gray-300">ALGORAND TESTNET</div>
+                                                </div>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-8 mb-8">
+                                                <VerifyField label="Ledger Status" value={verificationResult.on_chain_status} bold={true} color="text-emerald-400" />
+                                                <VerifyField label="Verified Hash" value={verificationResult.latest_verdict?.tx_id ? verificationResult.latest_verdict.tx_id.slice(0, 16) + '...' : 'N/A'} mono={true} />
+                                                <VerifyField label="Contract ID" value={verificationResult.app_id} mono={true} />
+                                                <VerifyField label="Confirmed Round" value={verificationResult.latest_verdict?.confirmed_round || 'N/A'} />
+                                            </div>
+                                            <button onClick={() => window.print()} className="w-full py-4 bg-white text-black rounded-xl font-bold uppercase hover:bg-gray-200 transition-all">Download Audit Certificate</button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </main>
+                    </div>
+
+                    {isFinalizing && (
+                        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm">
+                            <div className="w-16 h-16 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-6 shadow-[0_0_30px_rgba(79,70,229,0.3)]"></div>
+                            <h2 className="text-2xl font-black tracking-widest text-indigo-300 uppercase animate-pulse">Algorand Finality...</h2>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const VerifyField = ({ label, value, mono = false, bold = false, color = "text-white" }) => (
+            <div>
+                <div className="text-[10px] font-black tracking-widest text-gray-500 uppercase mb-1">{label}</div>
+                <div className={`${mono ? 'mono' : ''} ${bold ? 'font-black text-lg' : 'font-medium text-sm'} ${color}`}>{value || '—'}</div>
+            </div>
+        );
+
+        const StatCard = ({ label, value, sub, color = "text-white" }) => (
+            <div className="glass p-5 rounded-2xl relative overflow-hidden">
+                <h4 className="text-[10px] font-black tracking-widest text-gray-500 uppercase mb-1">{label}</h4>
+                <div className={`text-2xl font-black tracking-tighter ${color}`}>{value}</div>
+                <div className="text-[10px] font-bold text-gray-500 uppercase mt-1">{sub}</div>
+            </div>
+        );
+
+        const Gauge = ({ label, value, sub, color = "text-white" }) => (
+            <div className="bg-white/5 p-4 rounded-xl border border-white/10">
+                <div className="text-[9px] font-black tracking-widest text-gray-500 uppercase mb-1">{label}</div>
+                <div className={`text-lg font-black tracking-tighter ${color}`}>{value}</div>
+                <div className="text-[9px] font-bold text-gray-500 uppercase">{sub}</div>
+            </div>
+        );
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
