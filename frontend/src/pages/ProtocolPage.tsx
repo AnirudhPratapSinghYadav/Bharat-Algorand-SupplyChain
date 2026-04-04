@@ -44,6 +44,7 @@ export default function ProtocolPage() {
           tx_id?: string;
           round?: number;
           type?: string;
+          action?: string;
           action_plain?: string;
           method_name?: string;
           lora_url?: string;
@@ -168,7 +169,7 @@ export default function ProtocolPage() {
                   {txns.data.transactions.map((t) => (
                     <tr key={t.tx_id} style={{ borderTop: '1px solid #e2e8f0' }}>
                       <td style={{ padding: '10px 12px' }}>{t.round ?? '—'}</td>
-                      <td style={{ padding: '10px 12px' }}>{t.action_plain || t.method_name || t.type || '—'}</td>
+                      <td style={{ padding: '10px 12px' }}>{t.action || t.action_plain || t.method_name || t.type || '—'}</td>
                       <td style={{ padding: '10px 12px', fontFamily: 'monospace', fontSize: '0.78rem' }}>
                         {t.tx_id ? `${t.tx_id.slice(0, 8)}…` : '—'}
                       </td>

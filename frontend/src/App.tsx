@@ -19,11 +19,14 @@ import { LandingPage } from './components/landing/LandingPage';
 import { WitnessPanel } from './components/WitnessPanel';
 import { WeatherCourt } from './components/WeatherCourt';
 import { CustodyChain } from './components/CustodyChain';
+import { ShipmentDestinationWeatherRow } from './components/DestinationWeather';
+import { JuryRiskHistoryChart } from './components/JuryRiskHistoryChart';
 
 const CITIES = ['Mumbai', 'Chennai', 'Delhi', 'Singapore', 'Dubai', 'Rotterdam'] as const;
 
 type DashboardTxn = {
     tx_id?: string;
+    action?: string;
     action_plain?: string;
     method_name?: string;
     round?: number;
@@ -127,6 +130,7 @@ function MainApp() {
         total_scans: number;
         verified_anomalies: number;
         contract_algo?: number;
+        total_shipments?: number;
         active_shipments?: number;
         total_settled?: number;
         total_disputed?: number;
@@ -719,6 +723,13 @@ function MainApp() {
         return { bg: '#f3f4f6', color: '#6b7280', border: '#e5e7eb' };
     };
 
+    const cardAccentBorder = (stage: string): string | undefined => {
+        if (stage === 'Disputed' || stage === 'Delayed_Disaster') return '3px solid #dc2626';
+        if (stage === 'Settled') return '3px solid #16a34a';
+        if (stage === 'In_Transit') return '3px solid #2563eb';
+        return undefined;
+    };
+
     /* ══════════════════════════════════════════════════════════════
        LANDING (marketing)
     ══════════════════════════════════════════════════════════════ */
@@ -917,12 +928,16 @@ function MainApp() {
                     <div className="card" style={{ padding: '14px 18px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                             <Package size={15} color="#38bdf8" />
-                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Active Shipments</span>
+                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Shipments</span>
                         </div>
                         <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700 }}>
-                            {stats.active_shipments != null
-                                ? String(stats.active_shipments)
-                                : String(shipments.filter((s) => s.stage === 'In_Transit').length)}
+                            {String(
+                                stats.total_shipments != null && stats.total_shipments > 0
+                                    ? stats.total_shipments
+                                    : stats.active_shipments != null
+                                      ? stats.active_shipments
+                                      : shipments.length,
+                            )}
                         </div>
                         {shipments.length === 0 ? (
                             <p style={{ fontSize: '0.68rem', color: '#94a3b8', margin: '8px 0 0' }}>Register your first shipment below</p>
@@ -991,7 +1006,7 @@ function MainApp() {
                                     color: '#cbd5e1',
                                 }}
                             >
-                                <span>{t.action_plain || t.method_name || 'Transaction'}</span>
+                                <span>{t.action || t.action_plain || t.method_name || 'Transaction'}</span>
                                 <span style={{ color: '#64748b' }}>
                                     {t.timestamp ? timeAgo(t.timestamp) : t.round != null ? `Round ${t.round}` : '—'}
                                 </span>
@@ -1010,6 +1025,8 @@ function MainApp() {
                     </ul>
                 )}
             </section>
+
+            {!isLoading ? <JuryRiskHistoryChart /> : null}
 
             {!isLoading && focusVaultShip && (
                 <section className="card" style={{ marginTop: 16, padding: '18px 20px' }} aria-label="Escrow for selected shipment">
@@ -1160,7 +1177,11 @@ function MainApp() {
                     const riskBandPct = risk !== null ? Math.min(100, Math.max(0, risk)) : 0;
 
                     return (
-                        <div key={ship.shipment_id} className={`card${cardFlagged ? ' card-flagged' : ''}`} style={{ textAlign: 'left' }}>
+                        <div
+                            key={ship.shipment_id}
+                            className={`card${cardFlagged ? ' card-flagged' : ''}`}
+                            style={{ textAlign: 'left', borderLeft: cardAccentBorder(ship.stage) }}
+                        >
                             {/* Header */}
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
                                 <div>
@@ -1194,6 +1215,14 @@ function MainApp() {
                                     </div>
                                 </div>
                             </div>
+
+                            <ShipmentDestinationWeatherRow destination={ship.destination} />
+
+                            {ship.stage === 'Settled' ? (
+                                <div style={{ fontSize: '0.72rem', color: '#15803d', fontWeight: 600, marginBottom: 8 }}>
+                                    Certificate minted — settlement confirmed on Algorand
+                                </div>
+                            ) : null}
 
                             {fundsMicro > 0 && (
                                 <div style={{ marginBottom: 10, fontSize: '0.8rem', color: '#64748b' }}>

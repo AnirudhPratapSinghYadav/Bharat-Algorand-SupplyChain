@@ -84,6 +84,15 @@ def _build_navitrust_arc4_name_map() -> Dict[str, str]:
 
 ARC4_SELECTOR_TO_METHOD = _build_navitrust_arc4_name_map()
 
+# Human-readable labels for Recent Activity / protocol tables
+METHOD_ACTION_LABELS = {
+    "register_shipment": "Shipment registered",
+    "record_verdict": "Verdict recorded",
+    "settle_shipment": "Shipment settled",
+    "fund_shipment": "Escrow funded",
+    "get_shipment": "Shipment lookup",
+}
+
 
 def decode_method_name(selector_hex: str) -> str:
     """Plain English method from 8-char hex selector (or prefix)."""
@@ -142,10 +151,30 @@ def _tx_type_plain(tx_type: Optional[str]) -> str:
         "appl": "Application call",
         "pay": "Payment",
         "axfer": "Asset transfer",
-        "acfg": "Asset configuration",
+        "acfg": "Certificate minted",
         "keyreg": "Key registration",
     }
     return mapping.get(tx_type, tx_type.replace("_", " ").title())
+
+
+def decode_tx_action(tx: dict) -> str:
+    """Plain-English action for indexer transaction objects (top-level or inner)."""
+    tt = tx.get("tx-type") or ""
+    if tt == "appl":
+        sel = _indexer_tx_selector_hex(tx)
+        if sel:
+            mn = decode_method_name(sel)
+            if mn.startswith("app_call"):
+                return "Blockchain action"
+            return METHOD_ACTION_LABELS.get(mn, mn.replace("_", " ").title())
+        return "Blockchain action"
+    if tt == "pay":
+        return "Payment"
+    if tt == "acfg":
+        return "Certificate minted"
+    if tt == "axfer":
+        return "Asset transfer"
+    return _tx_type_plain(tt)
 
 try:
     algorand = (
@@ -545,6 +574,27 @@ def build_fund_shipment_txns_b64(payer_address: str, shipment_id: str, micro_alg
     return [base64.b64encode(encoding.msgpack_encode(t)).decode("ascii") for t in built.transactions]
 
 
+def fund_shipment_oracle_microalgo(shipment_id: str, micro_algo: int) -> Optional[dict]:
+    """
+    Oracle signs and submits pay + fund_shipment atomic group (demo seed / ops).
+    """
+    if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
+        logger.warning("fund_shipment_oracle: missing oracle, APP_ID, or not NaviTrust")
+        return None
+    if micro_algo < 500_000:
+        raise ValueError("Minimum funding is 500000 microAlgo")
+    pk = algosdk_mnemonic.to_private_key(ORACLE_MNEMONIC.strip())
+    addr = address_from_private_key(pk)
+    b64s = build_fund_shipment_txns_b64(addr, shipment_id, micro_algo)
+    txns = [encoding.msgpack_decode(base64.b64decode(b)) for b in b64s]
+    stxns = [t.sign(pk) for t in txns]
+    algod = algorand.client.algod
+    txid = algod.send_transactions(stxns)
+    conf = wait_for_confirmation(algod, txid, 25)
+    rnd = conf.get("confirmed-round") if isinstance(conf, dict) else None
+    return {"tx_id": txid, "confirmed_round": rnd, "lora_url": lora_tx_url(txid)}
+
+
 def indexer_recent_app_txns(limit: int = 20) -> List[dict]:
     if not APP_ID:
         return []
@@ -569,6 +619,13 @@ def indexer_recent_app_txns(limit: int = 20) -> List[dict]:
             else:
                 method_name = ""
                 action_plain = _tx_type_plain(tt)
+            action = decode_tx_action(tx)
+            inner = tx.get("inner-txns") or []
+            if inner and action == "Blockchain action":
+                for itx in inner:
+                    if isinstance(itx, dict) and itx.get("tx-type") == "acfg":
+                        action = "Certificate minted"
+                        break
             rt = tx.get("round-time")
             ts_iso = ""
             if rt is not None:
@@ -589,6 +646,7 @@ def indexer_recent_app_txns(limit: int = 20) -> List[dict]:
                     "method_selector_hex": sel or "",
                     "method_name": method_name,
                     "action_plain": action_plain,
+                    "action": action,
                 }
             )
         return result

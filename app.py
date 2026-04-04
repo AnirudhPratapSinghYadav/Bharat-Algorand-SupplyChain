@@ -60,6 +60,8 @@ _CORS_EXTRA = os.environ.get("CORS_EXTRA_ORIGINS", "")
 _CORS_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
     "https://navitrustapp.vercel.app",
 ]
 if _CORS_EXTRA:
@@ -161,7 +163,7 @@ def _status_db_matches_chain(db_s: str, chain_s: str) -> bool:
     return _status_is_flagged(db_s) and _status_is_flagged(chain_s)
 RISK_THRESHOLD_AUTHORIZE = 80
 
-print(f"[BOOT] GEMINI_API_KEY loaded: {'YES (' + GEMINI_API_KEY[:8] + '...)' if GEMINI_API_KEY else 'NO'}")
+print(f"[BOOT] GEMINI_API_KEY loaded: {'YES' if GEMINI_API_KEY else 'NO'}")
 print(f"[BOOT] OPENAI_API_KEY loaded: {'YES (fallback ready)' if OPENAI_API_KEY else 'NO (deterministic fallback only)'}")
 print(f"[BOOT] APP_ID={APP_ID} | NETWORK={ALGO_NETWORK}")
 
@@ -235,12 +237,12 @@ def init_db():
                 pass
         conn.commit()
 
-    # Demo seed: SHIP_* aligns with seed_blockchain.py + Lora verification
+    # Demo seed rows — align with seed_blockchain.py (Navi-Trust judge demo)
     with get_db() as conn:
         for sid, orig, dest, lat, lon, dlat, dlon in [
-            ("SHIP_001", "Jawaharlal Nehru Port (IN)", "Singapore", 18.94, 72.95, 1.2897, 103.8501),
-            ("SHIP_002", "Chennai", "Colombo", 13.08, 80.27, 6.9271, 79.8612),
-            ("SHIP_003", "Mumbai", "Dubai", 19.07, 72.87, 25.2048, 55.2708),
+            ("SHIP_MUMBAI_001", "Mumbai", "Dubai", 19.07, 72.87, 25.276, 55.296),
+            ("SHIP_CHEN_002", "Chennai", "Rotterdam", 13.08, 80.27, 51.924, 4.477),
+            ("SHIP_DELHI_003", "Delhi", "Singapore", 28.61, 77.21, 1.352, 103.819),
         ]:
             conn.execute(
                 "INSERT OR IGNORE INTO shipments (id, origin, destination, current_lat, current_lon, status) VALUES (?, ?, ?, ?, ?, ?)",
@@ -251,7 +253,7 @@ def init_db():
                 (dlat, dlon, sid),
             )
         conn.commit()
-        logger.info("DB seed verified (SHIP_001, SHIP_002, SHIP_003)")
+        logger.info("DB seed verified (SHIP_MUMBAI_001, SHIP_CHEN_002, SHIP_DELHI_003)")
 
 # ─── Off-chain Logistics Events ───────────────────────────────────
 LOGISTICS_EVENTS: List[dict] = []
@@ -944,6 +946,20 @@ class SettlementArbiterAgent:
 # ═══════════════════════════════════════════════════════════════════
 
 
+# Open-Meteo city lookup for public GET /weather/{city} (dashboard cards)
+CITY_COORDS_WEATHER = {
+    "Dubai": (25.276, 55.296),
+    "Rotterdam": (51.924, 4.477),
+    "Singapore": (1.352, 103.819),
+    "Mumbai": (19.076, 72.877),
+    "Chennai": (13.082, 80.270),
+    "Delhi": (28.614, 77.209),
+    "Amsterdam": (52.370, 4.895),
+    "London": (51.507, -0.127),
+    "Colombo": (6.9271, 79.8612),
+}
+
+
 def fetch_weather(lat: float, lon: float) -> Optional[WeatherData]:
     try:
         r = requests.get(
@@ -966,6 +982,68 @@ def fetch_weather(lat: float, lon: float) -> Optional[WeatherData]:
     except Exception as e:
         logger.debug("Open-Meteo failed: %s", e)
         return WeatherData(temperature=22.0, precipitation=0.0, weather_code=0)
+
+
+@app.get("/weather/{city}")
+async def get_weather_by_city(city: str):
+    """Live destination weather (Open-Meteo, no API key)."""
+    key = (city or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="City required")
+    # Allow "Dubai" or "dubai"
+    coords = None
+    for name, ll in CITY_COORDS_WEATHER.items():
+        if name.lower() == key.lower():
+            coords = ll
+            key = name
+            break
+    if not coords:
+        raise HTTPException(status_code=404, detail=f"City {city!r} not in supported list")
+    lat, lon = coords
+    try:
+        r = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "current": "temperature_2m,precipitation,weather_code,wind_speed_10m",
+                "timezone": "auto",
+            },
+            timeout=6,
+        )
+        r.raise_for_status()
+        c = r.json().get("current") or {}
+        code = int(c.get("weather_code", 0))
+        if code == 0:
+            desc = "Clear sky"
+        elif code <= 3:
+            desc = "Partly cloudy"
+        elif code <= 49:
+            desc = "Foggy"
+        elif code <= 67:
+            desc = "Rain"
+        elif code <= 77:
+            desc = "Snow"
+        elif code <= 82:
+            desc = "Showers"
+        elif code <= 99:
+            desc = "Thunderstorm"
+        else:
+            desc = "Unknown"
+        precip = float(c.get("precipitation") or 0)
+        wind = float(c.get("wind_speed_10m") or 0)
+        return {
+            "city": key,
+            "temp_c": float(c.get("temperature_2m", 0)),
+            "precipitation_mm": precip,
+            "wind_kmh": wind,
+            "description": desc,
+            "is_risky": precip > 5 or wind > 50,
+            "fetched_at": c.get("time"),
+            "source": "open-meteo.com",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Weather unavailable: {e}") from e
 
 
 def get_events_for(shipment_id: str) -> List[dict]:
@@ -1479,22 +1557,78 @@ def submit_mitigation(req: SubmitMitigationRequest):
     }
 
 
+def _risk_history_normalize_verdict(v: dict) -> str:
+    raw = str(v.get("verdict") or "").upper()
+    if raw in ("APPROVED", "DISPUTE"):
+        return "DISPUTE"
+    if raw in ("REJECTED", "SETTLE"):
+        return "SETTLE"
+    if raw == "HOLD":
+        return "HOLD"
+    return raw or "UNKNOWN"
+
+
 @app.get("/risk-history")
 async def get_risk_history():
-    """Risk score time-series for analytics graph — all verdicts across shipments."""
-    history = []
+    """AI jury / verdict history for dashboard chart (audit trail + on-chain NAVI verdict JSON)."""
+    points: List[dict] = []
+    seen: set[tuple] = set()
     for ship_id, verdicts in AUDIT_TRAIL.items():
         for v in verdicts:
-            ts = v.get("timestamp", "")
             score = v.get("sentinel_score")
-            if score is not None and ts:
-                history.append({
-                    "time": ts,
-                    "score": score,
-                    "shipment": ship_id,
-                })
-    history.sort(key=lambda x: x["time"])
-    return {"points": history[-60:]}
+            if score is None:
+                continue
+            ts = str(v.get("timestamp") or "")
+            verb = _risk_history_normalize_verdict(v)
+            key = (ship_id, int(score), verb, ts)
+            if key in seen:
+                continue
+            seen.add(key)
+            points.append(
+                {
+                    "shipment_id": ship_id,
+                    "score": int(score),
+                    "verdict": verb,
+                    "timestamp": ts,
+                }
+            )
+    if APP_ID and chain.use_navitrust():
+        try:
+            for sid, _st in chain.list_shipment_statuses_from_boxes():
+                full = chain.read_shipment_full(sid)
+                vd = (full.get("verdict") or "").strip()
+                if not vd:
+                    continue
+                try:
+                    j = json.loads(vd)
+                    verb = str(j.get("verdict", "")).upper()
+                    if verb not in ("DISPUTE", "SETTLE", "HOLD"):
+                        continue
+                    sc = int(j.get("score", full.get("risk_score") or 0))
+                    key = (sid, sc, verb, vd[:80])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    points.append(
+                        {
+                            "shipment_id": sid,
+                            "score": sc,
+                            "verdict": verb,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.debug("risk-history chain merge: %s", e)
+    # Dedupe same shipment + score + verdict (audit + on-chain merge)
+    uniq: dict[tuple, dict] = {}
+    for p in points:
+        k = (p.get("shipment_id"), p.get("score"), p.get("verdict"))
+        uniq[k] = p
+    points = list(uniq.values())
+    points.sort(key=lambda p: p.get("timestamp") or "")
+    return {"points": points[-15:]}
 
 
 @app.get("/stats")
@@ -1524,10 +1658,36 @@ def get_stats():
         except Exception as e:
             logger.warning(f"Could not fetch contract balance: {e}")
 
+    active_shipments = 0
+    total_settled_k = 0
+    total_disputed_k = 0
+    total_shipments_count = 0
+    if APP_ID and chain.use_navitrust():
+        try:
+            pairs = chain.list_shipment_statuses_from_boxes()
+            total_shipments_count = len(pairs)
+            for _sid, st in pairs:
+                if st == chain.STATUS_IN_TRANSIT:
+                    active_shipments += 1
+                elif st == chain.STATUS_SETTLED:
+                    total_settled_k += 1
+                elif st == chain.STATUS_DISPUTED:
+                    total_disputed_k += 1
+        except Exception:
+            g = chain.global_stats_navitrust()
+            total_shipments_count = int(g.get("total_shipments") or 0)
+            total_settled_k = int(g.get("total_settled") or 0)
+            total_disputed_k = int(g.get("total_disputed") or 0)
+            active_shipments = max(0, total_shipments_count - total_settled_k - total_disputed_k)
+
     return {
         "total_scans": total_verdicts,
         "verified_anomalies": total_anomalies,
         "contract_algo": round(contract_algo, 2) if contract_algo is not None else None,
+        "total_shipments": total_shipments_count,
+        "active_shipments": active_shipments,
+        "total_settled": total_settled_k,
+        "total_disputed": total_disputed_k,
     }
 
 
@@ -1668,17 +1828,7 @@ async def bootstrap():
         "lora_application_url": f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else "",
         "oracle_address": chain.oracle_address_string(),
     }
-    total_v = sum(len(v) for v in AUDIT_TRAIL.values())
-    total_a = sum(1 for vs in AUDIT_TRAIL.values() for v in vs if v.get("verdict") == "APPROVED")
-    contract_algo = None
-    if APP_ID:
-        try:
-            app_addr = get_application_address(APP_ID)
-            bal = algorand.account.get_information(app_addr).amount
-            contract_algo = float(bal.algo) if hasattr(bal, "algo") else None
-        except Exception:
-            pass
-    stats = {"total_scans": total_v, "verified_anomalies": total_a, "contract_algo": round(contract_algo, 4) if contract_algo is not None else None}
+    stats = get_stats()
     risk_pts = []
     for sid, vs in AUDIT_TRAIL.items():
         for v in vs:
@@ -1778,6 +1928,32 @@ def _navibot_chain_context(focus_id: Optional[str]) -> dict:
         ctx["shipment_id"] = focus_id
         ctx["on_chain"] = chain.read_shipment_full(focus_id)
         ctx["recent_verdict_history"] = AUDIT_TRAIL.get(focus_id, [])[-5:]
+    try:
+        rows = build_sync_ledger_shipments()
+        ctx["all_shipments"] = []
+        for r in rows[:24]:
+            sid = r.get("shipment_id")
+            if not sid:
+                continue
+            full = chain.read_shipment_full(sid)
+            ctx["all_shipments"].append(
+                {
+                    "shipment_id": sid,
+                    "origin": r.get("origin"),
+                    "destination": r.get("destination"),
+                    "status": r.get("stage"),
+                    "risk_score": full.get("risk_score"),
+                    "funds_algo": round((full.get("funds_microalgo") or 0) / 1_000_000.0, 4),
+                    "verdict_json_preview": (full.get("verdict") or "")[:500],
+                }
+            )
+    except Exception as e:
+        logger.debug("navibot all_shipments context: %s", e)
+        ctx["all_shipments"] = []
+    try:
+        ctx["stats"] = get_stats()
+    except Exception:
+        ctx["stats"] = {}
     return ctx
 
 
@@ -1872,8 +2048,8 @@ def _navibot_risk_fallback_text(facts: dict) -> str:
 
 
 def _elevenlabs_tts(text: str) -> Optional[str]:
-    key = os.environ.get("ELEVENLABS_API_KEY")
-    voice = os.environ.get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
+    key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip().strip('"').strip("'")
+    voice = (os.environ.get("ELEVENLABS_VOICE_ID") or "EXAVITQu4vr4xnSDxMaL").strip().strip('"').strip("'")
     if not key or not (text or "").strip():
         return None
     snippet = text.strip()[:500]
@@ -2032,6 +2208,14 @@ def list_app_transactions(limit: int = 20):
     return {"transactions": chain.indexer_recent_app_txns(lim), "app_id": APP_ID}
 
 
+@app.get("/protocol/display-global-state")
+def protocol_display_global_state():
+    """Filtered global state for /protocol (supply-chain fields only)."""
+    if not APP_ID:
+        return {"fields": {}, "app_id": 0}
+    return {"fields": chain.get_display_global_state(APP_ID), "app_id": APP_ID}
+
+
 @app.post("/navibot")
 async def navibot_chat(req: NavibotRequest, request: Request):
     """Always returns 200 + JSON. Never surfaces raw stack traces to the client."""
@@ -2095,8 +2279,10 @@ async def navibot_chat(req: NavibotRequest, request: Request):
         else:
             sys_prompt = (
                 "You are NaviBot for Navi-Trust on Algorand. Explain shipment status clearly in at most 2 short sentences. "
-                "Use ONLY facts from CHAIN_CONTEXT_JSON. If data is missing, say it is not on-chain yet—do not invent "
-                "tx ids, balances, or statuses. You may suggest Verify or Lora for public proof.\n\n"
+                "Use ONLY facts from CHAIN_CONTEXT_JSON (including all_shipments and stats). "
+                "Demo shipments are often SHIP_MUMBAI_001 (in transit), SHIP_CHEN_002 (disputed), SHIP_DELHI_003 (settled)—use them when relevant. "
+                "Tell users which dashboard button applies (Run AI jury, Settle shipment, View certificate, View dispute)—you never execute transactions. "
+                "If data is missing, say it is not on-chain yet—do not invent tx ids, balances, or statuses.\n\n"
                 f"CHAIN_CONTEXT_JSON:\n{json.dumps(ctx, default=str)[:8000]}"
             )
             try:
@@ -2113,7 +2299,11 @@ async def navibot_chat(req: NavibotRequest, request: Request):
             if not text:
                 text = _openai_chat(sys_prompt + "\n\n" + user_blob) or ""
             if not text:
-                text = "AI unavailable. Showing system data: open Verify for on-chain shipment proof."
+                text = (
+                    "Ask me about a demo shipment — for example SHIP_MUMBAI_001 (in transit), "
+                    "SHIP_CHEN_002 (disputed), or SHIP_DELHI_003 (settled). "
+                    "Use Verify for public on-chain proof without a wallet."
+                )
                 used_fallback = True
 
         action = _navibot_action_hint(q, ctx)
@@ -2461,6 +2651,14 @@ def verify_shipment(shipment_id: str):
     verdict_tx = (latest or {}).get("tx_id")
     funds_micro = int(full.get("funds_microalgo") or 0) if isinstance(full, dict) else 0
     cert_id = full.get("certificate_asa") if isinstance(full, dict) else None
+    on_chain_risk = int(full.get("risk_score") or 0) if isinstance(full, dict) else 0
+    chain_verdict_text = ""
+    if isinstance(full, dict) and full.get("verdict"):
+        try:
+            jv = json.loads(full["verdict"])
+            chain_verdict_text = str(jv.get("reasoning", ""))[:800]
+        except Exception:
+            chain_verdict_text = str(full["verdict"])[:800]
 
     return {
         "shipment_id": shipment_id,
@@ -2477,6 +2675,8 @@ def verify_shipment(shipment_id: str):
         "latest_verdict": latest,
         "funds_locked_microalgo": funds_micro,
         "certificate_asa_id": cert_id,
+        "on_chain_risk_score": on_chain_risk,
+        "chain_verdict_reasoning": chain_verdict_text,
         "explorer_url": full.get("lora_url") or f"{LORA_TESTNET_APP}/{APP_ID}",
         "lora_verdict_tx_url": chain.lora_tx_url(verdict_tx) if verdict_tx else None,
     }

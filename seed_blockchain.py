@@ -1,12 +1,9 @@
 """
-seed_blockchain.py — Fund contract MBR, idempotently register demo shipments (SHIP_*),
-sync SQLite rows, and optionally reset off-chain demo state.
+Idempotent Navi-Trust testnet demo seed: 3 judge-story shipments on-chain + SQLite + audit trail.
 
-NaviTrust: register_shipment(id, supplier, route). Legacy: add_shipment(id).
+Run:  python seed_blockchain.py
 
-Usage:
-  python seed_blockchain.py              # Normal seed
-  python seed_blockchain.py --reset      # Reset SQLite + audit trail + events, then seed chain
+Requires .env: ORACLE_MNEMONIC (or DEPLOYER_MNEMONIC), APP_ID, NaviTrust deployed.
 """
 
 from __future__ import annotations
@@ -16,7 +13,9 @@ import logging
 import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
 
+import requests
 from algokit_utils import AlgorandClient, AlgoAmount, PaymentParams
 from algosdk.logic import get_application_address
 from dotenv import load_dotenv
@@ -26,81 +25,75 @@ import algorand_client as chain
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.join(os.path.dirname(__file__) or ".", "shipments.db")
-VERDICT_PATH = os.path.join(os.path.dirname(__file__) or ".", "audit_trail.json")
-EVENTS_PATH = os.path.join(os.path.dirname(__file__) or ".", "offchain_events.json")
+ROOT = os.path.dirname(os.path.abspath(__file__)) or "."
+DB_PATH = os.path.join(ROOT, "shipments.db")
+AUDIT_PATH = os.path.join(ROOT, "audit_trail.json")
 
-# Demo catalog — plan: SHIP_* idempotent seeding (PROD_* kept as optional aliases below).
-DEMO_SHIPMENTS = [
+LORA_TX = "https://lora.algokit.io/testnet/transaction"
+LORA_APP = "https://lora.algokit.io/testnet/application"
+LORA_ASSET = "https://lora.algokit.io/testnet/asset"
+
+VERDICT_CHEN = (
+    '{"verdict":"DISPUTE","score":87,"reasoning":"Active storm system over Arabian Sea '
+    'with 12mm precipitation and 78km/h winds at destination port. Weather risk exceeds '
+    'safe threshold for cargo delivery confirmation.","sentry_flag":true,"auditor_passed":false}'
+)
+
+VERDICT_DELHI = (
+    '{"verdict":"SETTLE","score":18,"reasoning":"Clear weather at Singapore port, 0mm precipitation, '
+    '12km/h winds. Compliance check passed. Safe to release escrow to supplier.",'
+    '"sentry_flag":false,"auditor_passed":true}'
+)
+
+DEMO_ROWS = [
     {
-        "id": "SHIP_001",
-        "origin": "Jawaharlal Nehru Port (IN)",
-        "destination": "Singapore",
-    },
-    {
-        "id": "SHIP_002",
-        "origin": "Chennai",
-        "destination": "Colombo",
-    },
-    {
-        "id": "SHIP_003",
+        "id": "SHIP_MUMBAI_001",
         "origin": "Mumbai",
         "destination": "Dubai",
+        "lat": 19.076,
+        "lon": 72.877,
+        "dlat": 25.276,
+        "dlon": 55.296,
+        "route": "Mumbai,India|Dubai,UAE",
+        "fund_micro": 2_000_000,
+        "verdict_json": None,
+        "risk": None,
+        "settle": False,
+    },
+    {
+        "id": "SHIP_CHEN_002",
+        "origin": "Chennai",
+        "destination": "Rotterdam",
+        "lat": 13.082,
+        "lon": 80.270,
+        "dlat": 51.924,
+        "dlon": 4.477,
+        "route": "Chennai,India|Rotterdam,Netherlands",
+        "fund_micro": 3_000_000,
+        "verdict_json": VERDICT_CHEN,
+        "risk": 87,
+        "settle": False,
+    },
+    {
+        "id": "SHIP_DELHI_003",
+        "origin": "Delhi",
+        "destination": "Singapore",
+        "lat": 28.614,
+        "lon": 77.209,
+        "dlat": 1.352,
+        "dlon": 103.819,
+        "route": "Delhi,India|Singapore,Singapore",
+        "fund_micro": 2_000_000,
+        "verdict_json": VERDICT_DELHI,
+        "risk": 18,
+        "settle": True,
     },
 ]
 
-LEGACY_ALIASES = [
-    {"id": "PROD_001", "origin": "Mumbai", "destination": "Singapore"},
-    {"id": "PROD_002", "origin": "Chennai", "destination": "Colombo"},
-    {"id": "PROD_003", "origin": "Mumbai", "destination": "Dubai"},
-]
 
-
-def reset_offchain():
-    """Reset SQLite statuses, verdict history, and off-chain logistics events."""
-    logger.info("=== RESETTING OFF-CHAIN STATE FOR DEMO ===")
-
-    if os.path.exists(DB_PATH):
-        conn = sqlite3.connect(DB_PATH)
-        updated = conn.execute(
-            "UPDATE shipments SET status = 'In_Transit' WHERE status != 'In_Transit'"
-        ).rowcount
-        conn.commit()
-        conn.close()
-        logger.info("SQLite: reset %s shipment(s) back to In_Transit", updated)
-    else:
-        logger.info("SQLite: shipments.db not found (backend will create schema)")
-
-    with open(VERDICT_PATH, "w", encoding="utf-8") as f:
-        json.dump({}, f)
-    logger.info("Audit trail cleared")
-
-    with open(EVENTS_PATH, "w", encoding="utf-8") as f:
-        json.dump([], f)
-    logger.info("Logistics events cleared")
-
-    logger.info("Off-chain reset complete. Restart uvicorn to reload in-memory caches if running.\n")
-
-
-def _ensure_db_rows(rows: list[dict], supplier_addr: str) -> None:
-    if not os.path.exists(DB_PATH):
-        logger.info("shipments.db missing — run backend once or create DB manually; skipping SQLite upsert")
-        return
-    conn = sqlite3.connect(DB_PATH)
-    for r in rows:
-        conn.execute(
-            """
-            INSERT INTO shipments (id, origin, destination, current_lat, current_lon, status)
-            VALUES (?, ?, ?, 0.0, 0.0, 'In_Transit')
-            ON CONFLICT(id) DO UPDATE SET
-                origin = excluded.origin,
-                destination = excluded.destination
-            """,
-            (r["id"], r["origin"], r["destination"]),
-        )
-    conn.commit()
-    conn.close()
-    logger.info("SQLite: upserted %s demo shipment row(s)", len(rows))
+def _box_seeded(shipment_id: str) -> bool:
+    st = chain.read_shipment_status(shipment_id)
+    return st not in ("Unregistered", "Unknown")
 
 
 def _fund_contract_mbr(algorand: AlgorandClient, deployer_addr: str, app_address: str) -> None:
@@ -108,10 +101,8 @@ def _fund_contract_mbr(algorand: AlgorandClient, deployer_addr: str, app_address
     app_bal = float(algorand.account.get_information(app_address).amount.algo)
     logger.info("Deployer balance : %s ALGO", deployer_bal)
     logger.info("Contract balance : %s ALGO", app_bal)
-
     mbr_needed = max(0, 0.5 - app_bal)
     fund_amount = min(mbr_needed, deployer_bal - 0.15) if mbr_needed > 0 else 0
-
     if fund_amount > 0.01:
         logger.info("Funding contract with %.3f ALGO for box MBR...", fund_amount)
         try:
@@ -129,71 +120,224 @@ def _fund_contract_mbr(algorand: AlgorandClient, deployer_addr: str, app_address
         logger.info("Contract already funded — skipping MBR payment.")
 
 
-def _register_one(ship_id: str, route: str, supplier: str) -> None:
-    st = chain.read_shipment_status(ship_id)
-    if st not in ("Unregistered", "Unknown"):
-        logger.info("  SKIP %s (on-chain status=%s)", ship_id, st)
+def _merge_audit(updates: dict[str, list]) -> None:
+    data: dict = {}
+    if os.path.isfile(AUDIT_PATH):
+        try:
+            with open(AUDIT_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    now = datetime.now(timezone.utc).isoformat()
+    for sid, entries in updates.items():
+        for e in entries:
+            e = dict(e)
+            e.setdefault("timestamp", now)
+            data.setdefault(sid, [])
+            data[sid].append(e)
+    with open(AUDIT_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    logger.info("Merged %s shipment key(s) into audit_trail.json", len(updates))
+
+
+def _sqlite_upsert_demo_rows() -> None:
+    if not os.path.isfile(DB_PATH):
+        logger.warning("shipments.db not found — start the API once to create schema, then re-run seed")
         return
-    try:
-        if chain.use_navitrust():
-            chain.register_navitrust(ship_id, supplier, route)
-        else:
-            chain.register_legacy(ship_id, supplier)
-        logger.info("  OK   %s", ship_id)
-    except Exception as e:
-        msg = str(e).lower()
-        if "exists" in msg or "already" in msg or "assert" in msg:
-            logger.info("  SKIP %s (already on-chain)", ship_id)
-        else:
-            logger.warning("  FAIL %s: %s", ship_id, str(e)[:200])
+    conn = sqlite3.connect(DB_PATH)
+    for r in DEMO_ROWS:
+        conn.execute(
+            """
+            INSERT INTO shipments (id, origin, destination, current_lat, current_lon, status)
+            VALUES (?, ?, ?, ?, ?, 'In_Transit')
+            ON CONFLICT(id) DO UPDATE SET
+                origin = excluded.origin,
+                destination = excluded.destination,
+                current_lat = excluded.current_lat,
+                current_lon = excluded.current_lon
+            """,
+            (r["id"], r["origin"], r["destination"], r["lat"], r["lon"]),
+        )
+        conn.execute(
+            "UPDATE shipments SET dest_lat = ?, dest_lon = ? WHERE id = ?",
+            (r["dlat"], r["dlon"], r["id"]),
+        )
+    conn.commit()
+    conn.close()
+    logger.info("SQLite: upserted 3 demo shipment rows")
 
 
-def seed():
+def _stats_check(app_id: int) -> None:
+    bases = [
+        os.environ.get("NAVITRUST_STATS_URL", "").strip(),
+        "http://127.0.0.1:12445",
+        "http://127.0.0.1:8000",
+    ]
+    for base in bases:
+        if not base:
+            continue
+        base = base.rstrip("/")
+        try:
+            stats = requests.get(f"{base}/stats", timeout=5).json()
+            logger.info("Stats from API (%s): %s", base, stats)
+            ts = int(stats.get("total_shipments") or 0)
+            if ts >= 3:
+                logger.info("Stats OK: total_shipments=%s", ts)
+            else:
+                logger.warning(
+                    "Stats total_shipments=%s (expected >= 3 after seed). Is the API using the same APP_ID=%s?",
+                    ts,
+                    app_id,
+                )
+            return
+        except Exception as e:
+            logger.debug("stats check %s: %s", base, e)
+    logger.warning("Could not GET /stats from NAVITRUST_STATS_URL, :12445, or :8000 — skip assert")
+
+
+def main() -> None:
     load_dotenv()
-
     mnemonic = os.getenv("ORACLE_MNEMONIC") or os.getenv("DEPLOYER_MNEMONIC")
     app_id = int(os.getenv("APP_ID", "0") or os.getenv("VITE_APP_ID", "0"))
 
     if not mnemonic or not app_id:
         logger.error("Set ORACLE_MNEMONIC or DEPLOYER_MNEMONIC and APP_ID in .env")
-        return
+        sys.exit(1)
+
+    if not chain.use_navitrust():
+        logger.error("NaviTrust ARC56 not found — this seed requires NaviTrust.")
+        sys.exit(1)
 
     algorand = AlgorandClient.testnet()
     deployer = algorand.account.from_mnemonic(mnemonic=mnemonic)
+    oracle_addr = deployer.address
     app_address = get_application_address(app_id)
 
-    logger.info("Oracle / deployer : %s", deployer.address)
-    logger.info("APP_ID            : %s", app_id)
-    logger.info("App address       : %s", app_address)
-    logger.info("Mode              : %s", "NaviTrust" if chain.use_navitrust() else "Legacy AgriSupplyChainEscrow")
-    logger.info(
-        "Lora (application): https://lora.algokit.io/testnet/application/%s",
-        app_id,
-    )
+    logger.info("Oracle : %s", oracle_addr)
+    logger.info("APP_ID : %s", app_id)
+    logger.info("Lora app: %s/%s", LORA_APP, app_id)
 
-    _fund_contract_mbr(algorand, deployer.address, app_address)
+    _fund_contract_mbr(algorand, oracle_addr, app_address)
 
-    rows = list(DEMO_SHIPMENTS)
-    if os.getenv("SEED_LEGACY_PROD_ALIASES", "").strip() in ("1", "true", "yes"):
-        rows = rows + LEGACY_ALIASES
+    summary: dict[str, dict] = {}
+    audit_merge: dict[str, list] = {}
 
-    _ensure_db_rows(rows, deployer.address)
+    for spec in DEMO_ROWS:
+        sid = spec["id"]
+        if _box_seeded(sid):
+            logger.info("%s already seeded on-chain — skipping chain steps", sid)
+            summary[sid] = {"skipped": True}
+            continue
 
-    supplier = deployer.address
-    for r in rows:
-        ship_id = r["id"]
-        route = f"{r['origin']} → {r['destination']}"
-        logger.info("Registering %s ...", ship_id)
-        _register_one(ship_id, route, supplier)
+        route = spec["route"]
+        logger.info("=== Register %s ===", sid)
+        reg = chain.register_navitrust(sid, oracle_addr, route)
+        reg_tx = reg.get("tx_id")
+        summary[sid] = {"register_tx": reg_tx, "fund_tx": None, "verdict_tx": None, "settle_tx": None, "cert_asa": None}
 
-    logger.info("\n--- On-chain read-back (algod) ---")
-    for r in rows:
-        sid = r["id"]
-        full = chain.read_shipment_full(sid)
-        logger.info("  %s => status=%s funds=%s", sid, full.get("status"), full.get("funds_microalgo"))
+        logger.info("=== Fund %s (%s microAlgo) ===", sid, spec["fund_micro"])
+        fund = chain.fund_shipment_oracle_microalgo(sid, spec["fund_micro"])
+        if not fund:
+            logger.error("Fund failed for %s", sid)
+            sys.exit(1)
+        summary[sid]["fund_tx"] = fund.get("tx_id")
+
+        if spec["verdict_json"] and spec["risk"] is not None:
+            logger.info("=== record_verdict %s ===", sid)
+            rv = chain.record_verdict_chain(sid, spec["verdict_json"], int(spec["risk"]))
+            if not rv:
+                logger.error("record_verdict failed for %s", sid)
+                sys.exit(1)
+            summary[sid]["verdict_tx"] = rv.get("tx_id")
+            vnote = json.loads(spec["verdict_json"])
+            audit_merge[sid] = [
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "sentinel_score": int(spec["risk"]),
+                    "verdict": str(vnote.get("verdict", "UNKNOWN")).upper(),
+                    "reasoning_narrative": str(vnote.get("reasoning", ""))[:800],
+                    "summary": str(vnote.get("reasoning", ""))[:200],
+                    "tx_id": rv.get("tx_id"),
+                }
+            ]
+
+        if spec["settle"]:
+            logger.info("=== settle_shipment %s ===", sid)
+            st = chain.settle_shipment_chain(sid)
+            if not st:
+                logger.error("settle_shipment failed for %s", sid)
+                sys.exit(1)
+            summary[sid]["settle_tx"] = st.get("tx_id")
+            summary[sid]["cert_asa"] = st.get("certificate_asa_id")
+            audit_merge.setdefault(sid, []).append(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "sentinel_score": int(spec["risk"] or 0),
+                    "verdict": "SETTLE",
+                    "reasoning_narrative": "Shipment settled on-chain; escrow released to supplier.",
+                    "summary": "Settled",
+                    "tx_id": st.get("tx_id"),
+                }
+            )
+
+    if audit_merge:
+        _merge_audit(audit_merge)
+
+    _sqlite_upsert_demo_rows()
+
+    print()
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print(" SEED COMPLETE — Navi-Trust Testnet")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print(f" App: {LORA_APP}/{app_id}")
+    print()
+
+    def _line(label: str, tid: str | None) -> str:
+        if not tid:
+            return f"    {label}: (n/a)"
+        return f"    {label}: {LORA_TX}/{tid}"
+
+    mumbai = summary.get("SHIP_MUMBAI_001", {})
+    chen = summary.get("SHIP_CHEN_002", {})
+    delhi = summary.get("SHIP_DELHI_003", {})
+
+    if not mumbai.get("skipped"):
+        print("  SHIP_MUMBAI_001  In_Transit  2 ALGO locked")
+        print(_line("Register", mumbai.get("register_tx")))
+        print(_line("Fund", mumbai.get("fund_tx")))
+    else:
+        print("  SHIP_MUMBAI_001  (already on-chain)")
+
+    print()
+    if not chen.get("skipped"):
+        print("  SHIP_CHEN_002    Disputed    3 ALGO locked")
+        print(_line("Register", chen.get("register_tx")))
+        print(_line("Fund", chen.get("fund_tx")))
+        print(_line("Verdict", chen.get("verdict_tx")))
+    else:
+        print("  SHIP_CHEN_002    (already on-chain)")
+
+    print()
+    cert = delhi.get("cert_asa")
+    if not delhi.get("skipped"):
+        print(f"  SHIP_DELHI_003   Settled     Certificate return value: {cert}")
+        print(_line("Register", delhi.get("register_tx")))
+        print(_line("Fund", delhi.get("fund_tx")))
+        print(_line("Verdict", delhi.get("verdict_tx")))
+        print(_line("Settle", delhi.get("settle_tx")))
+        if cert and int(cert) > 0:
+            print(f"    Cert:   {LORA_ASSET}/{cert}")
+    else:
+        print("  SHIP_DELHI_003   (already on-chain)")
+
+    print(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+    _stats_check(app_id)
 
 
 if __name__ == "__main__":
     if "--reset" in sys.argv:
-        reset_offchain()
-    seed()
+        logger.info("--reset ignored for idempotent seed (boxes cannot be deleted here).")
+    main()
