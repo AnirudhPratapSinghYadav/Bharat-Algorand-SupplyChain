@@ -5,11 +5,10 @@ import algosdk from "algosdk";
 import axios from 'axios';
 import {
     Shield, Activity, Cloud, AlertTriangle, ExternalLink,
-    CheckCircle, Play, Terminal, X, Truck, Eye, Package,
-    History, Zap, ArrowRight, Lock, BarChart3, Users, Coins, Wifi,
+    CheckCircle, Play, X, Truck, Eye, Package,
+    History, Zap, ArrowRight, Lock, Coins, Wifi,
     User, LogOut, Download, ClipboardCopy,
 } from 'lucide-react';
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 
 import { BACKEND_URL, FALLBACK_APP_ID, API_TIMEOUT } from './constants/api';
 import VerifyPage from './pages/VerifyPage';
@@ -17,12 +16,29 @@ import ProtocolPage from './pages/ProtocolPage';
 import NaviBotPage from './pages/NaviBotPage';
 import { NaviBotPanel } from './components/NaviBotPanel';
 import { LandingPage } from './components/landing/LandingPage';
-import { ChainVerificationHub } from './components/verification/ChainVerificationHub';
 import { WitnessPanel } from './components/WitnessPanel';
-import { RiskPrediction } from './components/RiskPrediction';
 import { WeatherCourt } from './components/WeatherCourt';
 import { CustodyChain } from './components/CustodyChain';
-import { OracleStake } from './components/OracleStake';
+
+const CITIES = ['Mumbai', 'Chennai', 'Delhi', 'Singapore', 'Dubai', 'Rotterdam'] as const;
+
+type DashboardTxn = {
+    tx_id?: string;
+    action_plain?: string;
+    method_name?: string;
+    round?: number;
+    lora_url?: string;
+    timestamp?: string;
+};
+
+function timeAgo(iso: string): string {
+    const t = new Date(iso).getTime();
+    const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)} hours ago`;
+    return `${Math.floor(s / 86400)} days ago`;
+}
 
 const peraWallet = new PeraWalletConnect({ chainId: 416002 });
 
@@ -103,21 +119,31 @@ function MainApp() {
     const [shipments, setShipments] = useState<Shipment[]>([]);
     const [appId, setAppId] = useState<number | null>(null);
     const [juryRunning, setJuryRunning] = useState<string | null>(null);
-    const [juryPhase, setJuryPhase] = useState<0 | 1>(0); // 0: AI verdict, 1: Algorand finality
     const [juryResult, setJuryResult] = useState<JuryResult | null>(null);
     const [auditTrail, setAuditTrail] = useState<AuditTrailData | null>(null);
     const [selectedShipment, setSelectedShipment] = useState<Shipment | null>(null);
     const [txId, setTxId] = useState<string | null>(null);
-    const [isTriggering, setIsTriggering] = useState(false);
-    const [stats, setStats] = useState<{ total_scans: number; verified_anomalies: number; contract_algo?: number }>({ total_scans: 0, verified_anomalies: 0 });
-    const [globalKpis, setGlobalKpis] = useState<{ total_settlements: number }>({ total_settlements: 0 });
+    const [stats, setStats] = useState<{
+        total_scans: number;
+        verified_anomalies: number;
+        contract_algo?: number;
+        active_shipments?: number;
+        total_settled?: number;
+        total_disputed?: number;
+    }>({ total_scans: 0, verified_anomalies: 0 });
+    const [recentTxns, setRecentTxns] = useState<DashboardTxn[]>([]);
+    const [registerModal, setRegisterModal] = useState(false);
+    const [regForm, setRegForm] = useState({
+        shipment_id: '',
+        origin: 'Mumbai',
+        destination: 'Dubai',
+        supplier: '',
+    });
+    const [registerBusy, setRegisterBusy] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
     const [paymentReceipt, setPaymentReceipt] = useState<any>(null);
     const [isPaying, setIsPaying] = useState<string | null>(null);
-    const [riskHistory, setRiskHistory] = useState<{ time: string; score: number; shipment: string }[]>([]);
     const [boxStatuses, setBoxStatuses] = useState<Record<string, string>>({});
-    const [liveFeed, setLiveFeed] = useState<{ event: string; tier: string; ts: string }[]>([]);
-    const [supplierTrustScore, setSupplierTrustScore] = useState<number | null>(null);
     const [mitigateModal, setMitigateModal] = useState<{ shipmentId: string } | null>(null);
     const [mitigateText, setMitigateText] = useState('');
     const [mitigateSubmitting, setMitigateSubmitting] = useState(false);
@@ -128,6 +154,20 @@ function MainApp() {
     const [activityFeed, setActivityFeed] = useState<ConfirmedActivity[]>([]);
     const [oracleAddress, setOracleAddress] = useState<string | null>(null);
     const [chainHealth, setChainHealth] = useState(false);
+    const [juryAgentIdx, setJuryAgentIdx] = useState(0);
+
+    const refreshRecentTxns = useCallback(() => {
+        axios
+            .get(`${BACKEND_URL}/transactions`, { params: { limit: 5 }, timeout: 8000 })
+            .then((r) => setRecentTxns(Array.isArray(r.data?.transactions) ? r.data.transactions : []))
+            .catch(() => setRecentTxns([]));
+    }, []);
+
+    useEffect(() => {
+        if (registerModal && accountAddress) {
+            setRegForm((f) => ({ ...f, supplier: f.supplier || accountAddress }));
+        }
+    }, [registerModal, accountAddress]);
 
     /* ── Backend / algod health (dashboard navbar) ───────────── */
     useEffect(() => {
@@ -168,21 +208,6 @@ function MainApp() {
     useEffect(() => {
         axios.get(`${BACKEND_URL}/config`).then((r) => setAppId(r.data?.app_id ?? null)).catch(() => {});
     }, []);
-
-    /* ── Global KPIs from blockchain (Total On-Chain Settlements) ─ */
-    useEffect(() => {
-        axios.get(`${BACKEND_URL}/global-kpis`, { timeout: 3000 })
-            .then((r) => setGlobalKpis({ total_settlements: r.data?.total_settlements ?? 0 }))
-            .catch(() => setGlobalKpis({ total_settlements: 0 }));
-    }, [accountAddress]);
-
-    /* ── Supplier: fetch On-Chain Trust Score ─ */
-    useEffect(() => {
-        if (!accountAddress || role !== 'supplier') return;
-        axios.get(`${BACKEND_URL}/supplier-trust-score`, { params: { wallet: accountAddress } })
-            .then((r) => setSupplierTrustScore(r.data?.score ?? 100))
-            .catch(() => setSupplierTrustScore(100));
-    }, [accountAddress, role]);
 
     /* ── Supplier: live telemetry fluctuation every 3s (generative monitoring) ─ */
     useEffect(() => {
@@ -286,20 +311,12 @@ function MainApp() {
                         data.forEach((s: any) => { st[s.shipment_id] = s.stage || ''; });
                         setBoxStatuses(st);
                     }
-                    if (d.risk_history?.points?.length > 0) {
-                        setRiskHistory(d.risk_history.points.map((p: any) => ({
-                            time: new Date(p.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                            score: p.score,
-                            shipment: p.shipment,
-                        })));
-                    }
                 } else {
                     // Fallback: parallel fetch
-                    const [configRes, statsRes, shipmentsRes, riskRes] = await Promise.allSettled([
+                    const [configRes, statsRes, shipmentsRes] = await Promise.allSettled([
                         axios.get(`${BACKEND_URL}/config`, opts),
                         axios.get(`${BACKEND_URL}/stats`, opts),
                         axios.get(`${BACKEND_URL}/shipments`, opts),
-                        axios.get(`${BACKEND_URL}/risk-history`, opts),
                     ]);
                     if (configRes.status === 'fulfilled') {
                         setAppId(configRes.value.data.app_id);
@@ -317,13 +334,6 @@ function MainApp() {
                         setShipments([]);
                         setBoxStatuses({});
                     }
-                    if (riskRes.status === 'fulfilled' && riskRes.value.data.points?.length > 0) {
-                        setRiskHistory(riskRes.value.data.points.map((p: any) => ({
-                            time: new Date(p.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                            score: p.score,
-                            shipment: p.shipment,
-                        })));
-                    }
                 }
             } catch {
                 setShipments([]);
@@ -340,25 +350,24 @@ function MainApp() {
 
     /* ── Ledger sync (5s) provides box status via /sync-ledger — single source of truth ── */
 
-    /* ── Live feed + risk history (dashboard only — not on public landing) ─ */
     useEffect(() => {
         if (!accountAddress) return;
-        let cancelled = false;
-        const poll = async () => {
-            try {
-                const res = await axios.get(`${BACKEND_URL}/live-feed`, { timeout: 4000 });
-                if (!cancelled) setLiveFeed(res.data.events || []);
-                const riskRes = await axios.get(`${BACKEND_URL}/risk-history`, { timeout: 3000 }).catch(() => ({ data: { points: [] } }));
-                if (!cancelled && riskRes.data?.points?.length) setRiskHistory(riskRes.data.points.map((p: any) => ({
-                    time: new Date(p.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                    score: p.score,
-                    shipment: p.shipment,
-                })));
-            } catch { /* silent */ }
+        refreshRecentTxns();
+    }, [accountAddress, isLoading, refreshRecentTxns, lastConfirmedTx?.txId]);
+
+    useEffect(() => {
+        if (!juryRunning) {
+            setJuryAgentIdx(0);
+            return;
+        }
+        setJuryAgentIdx(0);
+        const t1 = window.setTimeout(() => setJuryAgentIdx(1), 1000);
+        const t2 = window.setTimeout(() => setJuryAgentIdx(2), 2200);
+        return () => {
+            window.clearTimeout(t1);
+            window.clearTimeout(t2);
         };
-        poll();
-        return () => { cancelled = true; };
-    }, [accountAddress]);
+    }, [juryRunning]);
 
     /* ── Wallet ─────────────────────────────────────────────── */
     const handleConnectWallet = () => {
@@ -388,49 +397,27 @@ function MainApp() {
     /* ── Run Jury ───────────────────────────────────────────── */
     const handleRunJury = async (shipmentId: string) => {
         setJuryRunning(shipmentId);
-        setJuryPhase(0);
-        const phaseTimer = setTimeout(() => setJuryPhase(1), 3000);
         const safetyTimer = setTimeout(() => {
             setJuryRunning(null);
-            setJuryPhase(0);
         }, 20000);
         try {
             const res = await axios.post(`${BACKEND_URL}/run-jury`, { shipment_id: shipmentId }, { timeout: 15000 });
             setJuryResult(res.data);
 
-            const score = res.data?.sentinel?.risk_score;
-            if (typeof score === 'number') {
-                const riskRes = await axios.get(`${BACKEND_URL}/risk-history`).catch(() => ({ data: { points: [] } }));
-                if (riskRes.data?.points?.length > 0) {
-                    setRiskHistory(riskRes.data.points.map((p: any) => ({
-                        time: new Date(p.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                        score: p.score,
-                        shipment: p.shipment,
-                    })));
-                } else {
-                    setRiskHistory(prev => [
-                        ...prev.slice(-19),
-                        { time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), score, shipment: shipmentId },
-                    ]);
-                }
-            }
-
             const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
             setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
             axios.get(`${BACKEND_URL}/stats`).then(r => setStats(r.data)).catch(() => {});
+            refreshRecentTxns();
         } catch (e: any) {
             setJuryRunning(null);
-            setJuryPhase(0);
             const detail = e.response?.data?.detail ?? e.message ?? 'Unknown error';
             const msg = typeof detail === 'string' && detail.includes('already flagged')
                 ? 'This shipment is already settled on Algorand. No further action needed. Open Audit Trail to view the on-chain record.'
                 : 'Jury failed: ' + detail;
             alert(msg);
         } finally {
-            clearTimeout(phaseTimer);
             clearTimeout(safetyTimer);
             setJuryRunning(null);
-            setJuryPhase(0);
         }
     };
 
@@ -449,12 +436,61 @@ function MainApp() {
             setToast('Mitigation Logged On-Chain');
             const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
             setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
-            const trustRes = await axios.get(`${BACKEND_URL}/supplier-trust-score`, { params: { wallet: accountAddress } });
-            setSupplierTrustScore(trustRes.data?.score ?? null);
         } catch {
             setToast('Failed to submit mitigation');
         } finally {
             setMitigateSubmitting(false);
+        }
+    };
+
+    const handleRegisterShipment = async () => {
+        if (!regForm.shipment_id.trim() || !regForm.supplier.trim()) {
+            setToast('Shipment ID and supplier address are required.');
+            return;
+        }
+        setRegisterBusy(true);
+        try {
+            const regRes = await axios.post(`${BACKEND_URL}/register-shipment`, null, {
+                params: {
+                    shipment_id: regForm.shipment_id.trim(),
+                    origin: regForm.origin,
+                    destination: regForm.destination,
+                    supplier: regForm.supplier.trim(),
+                },
+                timeout: 120_000,
+            });
+            const tid = (regRes.data as { tx_id?: string })?.tx_id;
+            if (tid) {
+                recordConfirmedTx({ txId: tid, label: 'Shipment registered' });
+            }
+            setToast('Shipment registered.');
+            setRegisterModal(false);
+            setRegForm((f) => ({ ...f, shipment_id: '' }));
+            const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
+            setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
+            axios.get(`${BACKEND_URL}/stats`).then((r) => setStats(r.data)).catch(() => {});
+            refreshRecentTxns();
+        } catch (e: unknown) {
+            const err = e as { response?: { data?: { detail?: string } } };
+            setToast(typeof err.response?.data?.detail === 'string' ? err.response.data.detail : 'Registration failed');
+        } finally {
+            setRegisterBusy(false);
+        }
+    };
+
+    const handleSettleShipment = async (shipmentId: string) => {
+        try {
+            const r = await axios.post(`${BACKEND_URL}/settle`, { shipment_id: shipmentId }, { timeout: 120_000 });
+            const txId = (r.data as { tx_id?: string })?.tx_id;
+            if (txId) recordConfirmedTx({ txId, label: 'Settlement completed' });
+            setToast('Settlement submitted.');
+            const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
+            setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
+            axios.get(`${BACKEND_URL}/stats`).then((x) => setStats(x.data)).catch(() => {});
+            refreshRecentTxns();
+        } catch (e: unknown) {
+            const err = e as { response?: { data?: { detail?: string } } };
+            setToast(typeof err.response?.data?.detail === 'string' ? err.response.data.detail : 'Settlement failed');
         }
     };
 
@@ -485,42 +521,6 @@ function MainApp() {
             } else {
                 alert("Audit trail fetch failed");
             }
-        }
-    };
-
-    /* ── Trigger Disaster (Pera Wallet) ─────────────────────── */
-    const handleTriggerDisaster = async (ship: Shipment) => {
-        if (!accountAddress) { alert("Connect Pera Wallet first!"); return; }
-        if (!appId) { alert("APP_ID not loaded."); return; }
-        setIsTriggering(true);
-        try {
-            const algodClient = new algosdk.Algodv2('', ALGOD_SERVER, '');
-            const params = await algodClient.getTransactionParams().do();
-            const method = new algosdk.ABIMethod({
-                name: "report_disaster_delay", args: [{ type: "string" }], returns: { type: "void" },
-            });
-            const atc = new algosdk.AtomicTransactionComposer();
-            atc.addMethodCall({
-                appID: appId, method, methodArgs: [ship.shipment_id], sender: accountAddress,
-                suggestedParams: { ...params, fee: 2000, flatFee: true },
-                signer: async (txGroups) => {
-                    const mapped = txGroups.map((tx) => ({ txn: tx, signers: [accountAddress] }));
-                    return await peraWallet.signTransaction([mapped]);
-                },
-            });
-            const result = await atc.execute(algodClient, 3);
-            const tid0 = result.txIDs[0];
-            if (tid0) {
-                recordConfirmedTx({ txId: tid0, label: 'On-chain disaster report' });
-            }
-            const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
-            setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
-            axios.get(`${BACKEND_URL}/stats`).then(r => setStats(r.data)).catch(() => {});
-        } catch (e: any) {
-            setIsTriggering(false);
-            alert("Transaction failed: " + (e.message || "Unknown error"));
-        } finally {
-            setIsTriggering(false);
         }
     };
 
@@ -635,15 +635,16 @@ function MainApp() {
             const ok = await sendSignedBlobsAndConfirm(blobs, {
                 label: 'Escrow — fund shipment',
                 amountMicro: res.data.micro_algo ?? 500_000,
-            }, async () => {
+            }, async (ctx) => {
                 setPaymentReceipt({
                     kind: 'fund',
                     shipment_id: shipmentId,
                     micro_algo: res.data.micro_algo,
-                    lora_app: `https://lora.algokit.io/testnet/application/${appId}`,
+                    tx_id: ctx.txId,
                 });
                 const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => ({ data: [] }));
                 setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
+                refreshRecentTxns();
             });
             if (!ok) return;
         } catch (e: unknown) {
@@ -710,9 +711,6 @@ function MainApp() {
     };
 
     /* ── Helpers ─────────────────────────────────────────────── */
-    const agentColor = (agent: string) =>
-        agent === 'Logistics Sentry' ? '#d97706' : agent === 'Compliance Auditor' ? '#2563eb' : '#16a34a';
-
     const stageStyle = (stage: string) => {
         if (stage === 'In_Transit') return { bg: '#eff6ff', color: '#2563eb', border: '#bfdbfe' };
         if (stage === 'Delayed_Disaster' || stage === 'Disputed') return { bg: '#fef2f2', color: '#dc2626', border: '#fecaca' };
@@ -742,15 +740,13 @@ function MainApp() {
                     </div>
                     <div>
                         <h1 className="dash-title">Navi-Trust</h1>
-                        {appId && <span className="dash-app-meta">APP_ID: {appId} &middot; Algorand Testnet</span>}
-                        <div style={{ marginTop: 4, fontSize: '0.75rem', fontWeight: 600 }}>
-                            {chainHealth ? (
-                                <span style={{ color: '#34d399' }}>● Algorand Testnet</span>
-                            ) : (
-                                <span style={{ color: '#fbbf24' }}>● Connecting…</span>
-                            )}
-                        </div>
                     </div>
+                </div>
+
+                <div style={{ flex: 1, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+                    <span style={{ fontSize: '0.8rem', fontWeight: 600, color: chainHealth ? '#34d399' : '#f87171' }}>
+                        ● Algorand Testnet
+                    </span>
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -780,7 +776,7 @@ function MainApp() {
                             </div>
                             <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#34d399', flexShrink: 0 }} />
                             <span className="dash-wallet-addr">
-                                {accountAddress.substring(0, 5)}...{accountAddress.substring(accountAddress.length - 5)}
+                                {accountAddress.substring(0, 4)}...{accountAddress.substring(accountAddress.length - 5)}
                             </span>
                         </div>
                         <button type="button" onClick={disconnectWallet} className="dash-disconnect">
@@ -799,43 +795,9 @@ function MainApp() {
             {/* ── Role Subtitle ──────────────────────────────── */}
             <p className="dash-subtitle">
                 {role === 'stakeholder'
-                    ? 'Stakeholder View — Monitor shipments, authorize agentic settlements, verify on-chain status'
-                    : 'Supplier View — Track your shipments, report logistics events'}
+                    ? 'Stakeholder — monitor shipments, run the AI jury, and settle on-chain when ready.'
+                    : 'Supplier — track your shipments and log mitigations.'}
             </p>
-
-            {/* ── Live Logistics Feed Ticker ─────────────────── */}
-            {liveFeed.length > 0 && (
-                <div className="ticker-wrap" style={{ marginTop: 12 }}>
-                    <div style={{ fontSize: '0.65rem', color: 'rgba(255,255,255,0.6)', marginBottom: 4, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                        Live logistics feed <span style={{ fontWeight: 500, color: 'rgba(251,191,36,0.9)' }}>(off-chain demo stream)</span>
-                    </div>
-                    <div className="ticker-content" style={{ width: 'max-content' }}>
-                        {[...liveFeed, ...liveFeed].map((item: any, i: number) => (
-                            <span key={`${item.ts || item.event || ''}-${i}`} className={`ticker-item ${item.tier || 'medium'}`}>
-                                {item.event}
-                            </span>
-                        ))}
-                    </div>
-                </div>
-            )}
-
-            {/* ── Blocking overlay: Waiting for Algorand Finality ─ */}
-            {isTriggering && (
-                <div style={{
-                    position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: 'rgba(15,23,42,0.9)', backdropFilter: 'blur(6px)',
-                }}>
-                    <div style={{ textAlign: 'center', color: '#fff' }}>
-                        <div style={{
-                            width: 48, height: 48, borderRadius: '50%', margin: '0 auto 16px',
-                            border: '3px solid rgba(96,165,250,0.3)', borderTopColor: '#60a5fa',
-                            animation: 'spin 0.8s linear infinite',
-                        }} />
-                        <div style={{ fontSize: '1rem', fontWeight: 600, marginBottom: 4 }}>Waiting for Algorand Finality (Consensus)…</div>
-                        <div style={{ fontSize: '0.8rem', color: 'rgba(255,255,255,0.7)' }}>Do not close or refresh — transaction confirming</div>
-                    </div>
-                </div>
-            )}
 
             {/* ── Last transaction + confirming state ───────── */}
             {(confirmingTxLabel || lastConfirmedTx) && (
@@ -880,18 +842,19 @@ function MainApp() {
                                         href={`https://lora.algokit.io/testnet/transaction/${lastConfirmedTx.txId}`}
                                         target="_blank"
                                         rel="noreferrer"
-                                        className="primary-btn"
                                         style={{
                                             display: 'inline-flex',
                                             alignItems: 'center',
-                                            gap: 6,
+                                            gap: 4,
                                             textDecoration: 'none',
-                                            fontSize: '0.8rem',
-                                            padding: '8px 14px',
+                                            fontSize: '0.78rem',
+                                            fontWeight: 600,
+                                            color: '#7dd3fc',
+                                            padding: '4px 0',
                                             whiteSpace: 'nowrap',
                                         }}
                                     >
-                                        <ExternalLink size={14} /> View on Lora
+                                        View on Lora ↗
                                     </a>
                                     <button
                                         type="button"
@@ -920,7 +883,7 @@ function MainApp() {
                             >
                                 <div>
                                     <span style={{ color: '#64748b' }}>Transaction</span>{' '}
-                                    <code style={{ color: '#e2e8f0' }}>{shortTxId(lastConfirmedTx.txId)}</code>
+                                    <span style={{ color: '#e2e8f0', fontFamily: 'ui-monospace, monospace' }}>{shortTxId(lastConfirmedTx.txId)}</span>
                                 </div>
                                 <div>
                                     <span style={{ color: '#64748b' }}>Status</span>{' '}
@@ -939,15 +902,7 @@ function MainApp() {
                 </div>
             )}
 
-            <ChainVerificationHub
-                wallet={accountAddress ?? ''}
-                appId={appId}
-                lastTxId={lastConfirmedTx?.txId ?? null}
-                proofAssetIds={[]}
-                focusShipmentId={selectedShipment?.shipment_id ?? focusVaultShip?.shipment_id ?? null}
-            />
-
-            {/* ── NETWORK INTELLIGENCE RIBBON ──────────────── */}
+            {/* ── Four stat cards + recent on-chain activity ──────────────── */}
             {isLoading ? (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginTop: 16 }}>
                     {[0, 1, 2, 3].map(i => (
@@ -958,188 +913,103 @@ function MainApp() {
                     ))}
                 </div>
             ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginTop: 16 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginTop: 16 }}>
                     <div className="card" style={{ padding: '14px 18px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                             <Package size={15} color="#38bdf8" />
                             <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Active Shipments</span>
                         </div>
                         <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700 }}>
-                            {String(shipments.filter(s => s.stage === 'In_Transit').length).padStart(2, '0')}
-                            <span className="dash-kpi-label" style={{ fontSize: '0.75rem', fontWeight: 400, marginLeft: 6 }}>/ {shipments.length}</span>
+                            {stats.active_shipments != null
+                                ? String(stats.active_shipments)
+                                : String(shipments.filter((s) => s.stage === 'In_Transit').length)}
+                        </div>
+                        {shipments.length === 0 ? (
+                            <p style={{ fontSize: '0.68rem', color: '#94a3b8', margin: '8px 0 0' }}>Register your first shipment below</p>
+                        ) : null}
+                    </div>
+                    <div className="card" style={{ padding: '14px 18px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                            <CheckCircle size={15} color="#059669" />
+                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Total Settled</span>
+                        </div>
+                        <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700 }}>
+                            {String(stats.total_settled ?? 0)}
+                        </div>
+                    </div>
+                    <div className="card" style={{ padding: '14px 18px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                            <AlertTriangle size={15} color="#dc2626" />
+                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Total Disputed</span>
+                        </div>
+                        <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700 }}>
+                            {String(stats.total_disputed ?? 0)}
                         </div>
                     </div>
                     <div className="card" style={{ padding: '14px 18px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                             <Wifi size={15} color="#4ade80" />
-                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Blockchain Status</span>
+                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Blockchain</span>
                         </div>
-                        <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#16a34a', display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span className="blink-dot" /> Testnet (Online)
+                        <div style={{ fontSize: '1.05rem', fontWeight: 700, color: chainHealth ? '#34d399' : '#f87171' }}>
+                            {chainHealth ? 'Testnet online' : 'Offline'}
                         </div>
                     </div>
-                    {role === 'stakeholder' ? (
-                        <>
-                        <div className="card" style={{ padding: '14px 18px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                                <AlertTriangle size={15} color="#dc2626" />
-                                <span style={{ fontSize: '0.7rem', color: '#9ca3af', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Total Claims</span>
-                            </div>
-                            <div style={{ fontSize: '1.65rem', fontWeight: 700, color: '#dc2626' }}>
-                                {String(stats.verified_anomalies).padStart(2, '0')}
-                                <span style={{ fontSize: '0.75rem', fontWeight: 400, color: '#9ca3af', marginLeft: 6 }}>approved / {stats.total_scans} scans</span>
-                            </div>
-                        </div>
-                        <div className="card" style={{ padding: '14px 18px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                                <Shield size={15} color="#059669" />
-                                <span style={{ fontSize: '0.7rem', color: '#9ca3af', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>On-Chain Settlements</span>
-                            </div>
-                            <div style={{ fontSize: '1.65rem', fontWeight: 700, color: '#059669' }}>
-                                {String(globalKpis.total_settlements).padStart(2, '0')}
-                                <span style={{ fontSize: '0.65rem', color: '#10b981', marginLeft: 4 }}>ledger</span>
-                            </div>
-                        </div>
-                        </>
-                    ) : (
-                        <div className="card" style={{ padding: '14px 18px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                                <Shield size={15} color="#16a34a" />
-                                <span style={{ fontSize: '0.7rem', color: '#9ca3af', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>On-Chain Trust Score</span>
-                            </div>
-                            <div style={{ fontSize: '1.65rem', fontWeight: 700, color: '#16a34a' }}>
-                                {supplierTrustScore != null ? String(supplierTrustScore).padStart(2, '0') : '—'}
-                                <span style={{ fontSize: '0.75rem', fontWeight: 400, color: '#9ca3af', marginLeft: 4 }}>%</span>
-                            </div>
-                            <div style={{ fontSize: '0.65rem', color: '#9ca3af', marginTop: 4 }}>Verified via Algorand Box Storage</div>
-                        </div>
-                    )}
-                    {role === 'stakeholder' ? (
-                        <div className="card" style={{ padding: '14px 18px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                                <Coins size={15} color="#6b7280" />
-                                <span style={{ fontSize: '0.7rem', color: '#9ca3af', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Tokens Locked</span>
-                            </div>
-                            <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700 }}>
-                                {stats.contract_algo != null ? stats.contract_algo.toLocaleString() : '—'} <span className="dash-kpi-label" style={{ fontSize: '0.75rem', fontWeight: 400 }}>ALGO</span>
-                                {stats.contract_algo != null && <span style={{ fontSize: '0.65rem', color: '#4ade80', marginLeft: 4 }}>live</span>}
-                            </div>
-                        </div>
-                    ) : (
-                        <div className="card" style={{ padding: '14px 18px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                                <BarChart3 size={15} color="#94a3b8" />
-                                <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Active Scans</span>
-                            </div>
-                            <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700 }}>
-                                {String(stats.total_scans).padStart(2, '0')}
-                                <span className="dash-kpi-label" style={{ fontSize: '0.75rem', fontWeight: 400, marginLeft: 6 }}>total</span>
-                            </div>
-                        </div>
-                    )}
                 </div>
             )}
 
-            {/* ── RISK PROBABILITY GRAPH (Stakeholder only) ── */}
-            {role === 'stakeholder' && !isLoading && (
-                <div id="risk-analytics-graph" className="card" style={{ marginTop: 16, padding: '18px 22px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-                        <div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                <Activity size={16} color="#38bdf8" />
-                                <span className="dash-chart-title" style={{ fontWeight: 700, fontSize: '0.95rem' }}>Risk Probability Graph</span>
-                            </div>
-                            <span style={{ fontSize: '0.72rem', color: '#9ca3af' }}>Predictive analytics from Logistics Sentry — real-time risk scores</span>
-                        </div>
-                        <div style={{
-                            fontSize: '0.68rem', fontWeight: 600, padding: '3px 10px', borderRadius: 12,
-                            background: '#eff6ff', color: '#2563eb', border: '1px solid #bfdbfe',
-                        }}>
-                            LIVE
-                        </div>
+            <section className="card" style={{ marginTop: 16, padding: '16px 18px' }} aria-label="Recent activity">
+                <div style={{ fontWeight: 700, fontSize: '0.9rem', marginBottom: 12 }}>Recent activity</div>
+                {isLoading ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: '0.85rem', color: '#94a3b8' }}>
+                        <div
+                            style={{
+                                width: 20,
+                                height: 20,
+                                borderRadius: '50%',
+                                border: '2px solid rgba(125,211,252,0.25)',
+                                borderTopColor: '#7dd3fc',
+                                animation: 'spin 0.8s linear infinite',
+                            }}
+                        />
+                        Loading from Algorand…
                     </div>
-                    {riskHistory.length === 0 ? (
-                        <div style={{
-                            height: 180, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            background: '#f9fafb', borderRadius: 8, border: '1px dashed #e5e7eb',
-                        }}>
-                            <span style={{ fontSize: '0.82rem', color: '#9ca3af' }}>
-                                Run a settlement analysis to see risk data points
-                            </span>
-                        </div>
-                    ) : (
-                        <ResponsiveContainer width="100%" height={200}>
-                            <AreaChart data={riskHistory} margin={{ top: 5, right: 10, left: -10, bottom: 0 }}>
-                                <defs>
-                                    <linearGradient id="riskGrad" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="5%" stopColor="#2563eb" stopOpacity={0.25} />
-                                        <stop offset="95%" stopColor="#2563eb" stopOpacity={0} />
-                                    </linearGradient>
-                                </defs>
-                                <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                                <XAxis dataKey="time" tick={{ fontSize: 11, fill: '#9ca3af' }} axisLine={false} tickLine={false} />
-                                <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: '#9ca3af' }} axisLine={false} tickLine={false} />
-                                <Tooltip
-                                    contentStyle={{ borderRadius: 8, border: '1px solid #e5e7eb', fontSize: '0.8rem' }}
-                                    formatter={(value: number) => [`${value}/100`, 'Risk Score']}
-                                    labelFormatter={(label: string) => `Scan: ${label}`}
-                                />
-                                <Area
-                                    type="monotone"
-                                    dataKey="score"
-                                    stroke="#2563eb"
-                                    strokeWidth={2.5}
-                                    fill="url(#riskGrad)"
-                                    dot={{ r: 4, fill: '#2563eb', strokeWidth: 2, stroke: '#fff' }}
-                                    activeDot={{ r: 6, fill: '#dc2626', stroke: '#fff', strokeWidth: 2 }}
-                                />
-                            </AreaChart>
-                        </ResponsiveContainer>
-                    )}
-                </div>
-            )}
-
-            {role === 'supplier' && !isLoading && <RiskPrediction />}
-            {!isLoading && <OracleStake />}
-
-            {!isLoading && (
-                <section className="dash-insights" aria-label="Recent activity">
-                    <div className="dash-insights-heading">Recent activity</div>
-                    <div className="dash-insights-grid">
-                        <div className="card dash-insight-card">
-                            <div className="dash-insight-label">
-                                <Package size={14} color="#38bdf8" aria-hidden />
-                                Last shipment update
-                            </div>
-                            <div className="dash-insight-body">
-                                {displayedShipments[0]
-                                    ? `${displayedShipments[0].shipment_id} · ${displayedShipments[0].stage.replace(/_/g, ' ')}`
-                                    : 'No shipments in view — data appears when the ledger has active rows.'}
-                            </div>
-                        </div>
-                        <div className="card dash-insight-card">
-                            <div className="dash-insight-label">
-                                <Shield size={14} color="#34d399" aria-hidden />
-                                Last settlement signal
-                            </div>
-                            <div className="dash-insight-body">
-                                {role === 'stakeholder'
-                                    ? `${globalKpis.total_settlements} on-chain settlement${globalKpis.total_settlements === 1 ? '' : 's'} indexed`
-                                    : `${stats.total_scans} verification scan${stats.total_scans === 1 ? '' : 's'} on record`}
-                            </div>
-                        </div>
-                        <div className="card dash-insight-card">
-                            <div className="dash-insight-label">
-                                <Wifi size={14} color="#94a3b8" aria-hidden />
-                                System message
-                            </div>
-                            <div className="dash-insight-body">
-                                {liveFeed[0]?.event ?? 'All systems operational. Monitoring active shipments.'}
-                            </div>
-                        </div>
-                    </div>
-                </section>
-            )}
+                ) : recentTxns.length === 0 ? (
+                    <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: 0 }}>No recent transactions yet.</p>
+                ) : (
+                    <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        {recentTxns.map((t) => (
+                            <li
+                                key={t.tx_id ?? `tx-${t.round}`}
+                                style={{
+                                    display: 'flex',
+                                    flexWrap: 'wrap',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: 8,
+                                    fontSize: '0.82rem',
+                                    color: '#cbd5e1',
+                                }}
+                            >
+                                <span>{t.action_plain || t.method_name || 'Transaction'}</span>
+                                <span style={{ color: '#64748b' }}>
+                                    {t.timestamp ? timeAgo(t.timestamp) : t.round != null ? `Round ${t.round}` : '—'}
+                                </span>
+                                {t.lora_url ? (
+                                    <a
+                                        href={t.lora_url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        style={{ color: '#7dd3fc', fontSize: '0.76rem', fontWeight: 600 }}
+                                    >
+                                        ↗ Lora
+                                    </a>
+                                ) : null}
+                            </li>
+                        ))}
+                    </ul>
+                )}
+            </section>
 
             {!isLoading && focusVaultShip && (
                 <section className="card" style={{ marginTop: 16, padding: '18px 20px' }} aria-label="Escrow for selected shipment">
@@ -1147,9 +1017,8 @@ function MainApp() {
                         <div style={{ fontWeight: 700, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 8 }}>
                             <Truck size={16} color="#38bdf8" /> Escrow (NaviTrust)
                         </div>
-                        <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: 4 }}>
-                            Shipment <code style={{ color: '#e2e8f0' }}>{focusVaultShip.shipment_id}</code> — funds from chain boxes.
-                            Deposit = Payment + <code style={{ color: '#e2e8f0' }}>fund_shipment</code> (min 0.5 ALGO).
+                            <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: 4 }}>
+                            Shipment <span style={{ color: '#e2e8f0', fontFamily: 'ui-monospace, monospace' }}>{focusVaultShip.shipment_id}</span> — escrow balance from the chain. Minimum deposit 0.5 ALGO per fund.
                         </div>
                     </div>
                     <div
@@ -1210,9 +1079,7 @@ function MainApp() {
                                 Recent deposits (your wallet)
                             </div>
                             <div style={{ maxHeight: 120, overflowY: 'auto', fontSize: '0.78rem', color: '#cbd5e1' }}>
-                                <span style={{ color: '#64748b' }}>
-                                    Use the Ledger verification hub above for your wallet’s app calls and Lora links after you fund escrow.
-                                </span>
+                                <span style={{ color: '#64748b' }}>After you deposit, a confirmation banner appears with a Lora link.</span>
                             </div>
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
                                 <button
@@ -1224,26 +1091,6 @@ function MainApp() {
                                 >
                                     <Lock size={14} /> {isPaying === focusVaultShip.shipment_id ? 'Signing…' : 'Deposit 0.5 ALGO'}
                                 </button>
-                                {appId ? (
-                                    <a
-                                        href={`https://lora.algokit.io/testnet/application/${appId}`}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        style={{
-                                            flex: '1 1 100%',
-                                            textAlign: 'center',
-                                            fontSize: '0.78rem',
-                                            color: '#7dd3fc',
-                                            textDecoration: 'none',
-                                            display: 'inline-flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'center',
-                                            gap: 6,
-                                        }}
-                                    >
-                                        <ExternalLink size={14} /> View app on Lora (APP_ID {appId})
-                                    </a>
-                                ) : null}
                             </div>
                         </div>
                     </div>
@@ -1283,142 +1130,43 @@ function MainApp() {
                         className="card"
                         style={{
                             gridColumn: '1 / -1',
-                            padding: '22px 20px',
+                            padding: '28px 22px',
                             background: 'rgba(15,23,42,0.35)',
                             border: '1px solid rgba(148,163,184,0.25)',
+                            textAlign: 'center',
                         }}
                     >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-                            <Activity size={22} color="#38bdf8" />
-                            <div>
-                                <div style={{ fontWeight: 700, fontSize: '0.95rem', color: '#f1f5f9' }}>Dashboard activity</div>
-                                <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: 2 }}>
-                                    No shipment rows yet — here is your live session instead.
-                                </div>
-                            </div>
-                        </div>
-                        <div
-                            style={{
-                                display: 'grid',
-                                gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-                                gap: 16,
-                            }}
-                        >
-                            <div style={{ padding: 14, borderRadius: 10, background: 'rgba(30,41,59,0.6)', border: '1px solid rgba(148,163,184,0.2)' }}>
-                                <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                                    <History size={12} style={{ verticalAlign: 'middle', marginRight: 6 }} />
-                                    Recent activity
-                                </div>
-                                {activityFeed.length ? (
-                                    <ul style={{ margin: '10px 0 0', paddingLeft: 18, fontSize: '0.8rem', color: '#cbd5e1', lineHeight: 1.5 }}>
-                                        {activityFeed.slice(0, 6).map((a) => (
-                                            <li key={a.id} style={{ marginBottom: 8 }}>
-                                                <span style={{ color: '#e2e8f0' }}>{a.label}</span>
-                                                <div style={{ fontSize: '0.72rem', color: '#64748b' }}>
-                                                    <code>{shortTxId(a.txId)}</code>
-                                                    {' · '}
-                                                    <a
-                                                        href={`https://lora.algokit.io/testnet/transaction/${a.txId}`}
-                                                        target="_blank"
-                                                        rel="noreferrer"
-                                                        style={{ color: '#7dd3fc' }}
-                                                    >
-                                                        Lora
-                                                    </a>
-                                                </div>
-                                            </li>
-                                        ))}
-                                    </ul>
-                                ) : (
-                                    <p style={{ margin: '10px 0 0', fontSize: '0.8rem', color: '#64748b', lineHeight: 1.5 }}>
-                                        Confirm any TestNet transaction (escrow fund, disaster report, jury) and it will appear here with a Lora link.
-                                    </p>
-                                )}
-                            </div>
-                            <div style={{ padding: 14, borderRadius: 10, background: 'rgba(30,41,59,0.6)', border: '1px solid rgba(148,163,184,0.2)' }}>
-                                <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                                    Last transaction
-                                </div>
-                                {lastConfirmedTx ? (
-                                    <div style={{ marginTop: 10, fontSize: '0.82rem', color: '#e2e8f0' }}>
-                                        <div style={{ fontWeight: 600 }}>{lastConfirmedTx.label}</div>
-                                        {lastConfirmedTx.amountMicro != null ? (
-                                            <div style={{ marginTop: 4, color: '#94a3b8' }}>
-                                                {(lastConfirmedTx.amountMicro / 1e6).toFixed(4)} ALGO
-                                            </div>
-                                        ) : null}
-                                        <div style={{ marginTop: 6, fontSize: '0.72rem', color: '#64748b' }}>
-                                            <code>{shortTxId(lastConfirmedTx.txId)}</code>
-                                            {' · '}
-                                            <span style={{ color: '#6ee7b7' }}>Confirmed</span>
-                                        </div>
-                                        <a
-                                            href={`https://lora.algokit.io/testnet/transaction/${lastConfirmedTx.txId}`}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                            style={{
-                                                display: 'inline-flex',
-                                                alignItems: 'center',
-                                                gap: 4,
-                                                marginTop: 8,
-                                                fontSize: '0.75rem',
-                                                color: '#7dd3fc',
-                                                fontWeight: 600,
-                                            }}
-                                        >
-                                            <ExternalLink size={12} /> View on Lora
-                                        </a>
-                                    </div>
-                                ) : confirmingTxLabel ? (
-                                    <div style={{ margin: '10px 0 0', fontSize: '0.8rem', color: '#fde68a', display: 'flex', alignItems: 'center', gap: 8 }}>
-                                        <span className="blink-dot" />
-                                        <span>Confirming: {confirmingTxLabel}</span>
-                                    </div>
-                                ) : (
-                                    <p style={{ margin: '10px 0 0', fontSize: '0.8rem', color: '#64748b' }}>None yet — your next signed txn will show here.</p>
-                                )}
-                            </div>
-                            <div style={{ padding: 14, borderRadius: 10, background: 'rgba(30,41,59,0.6)', border: '1px solid rgba(148,163,184,0.2)' }}>
-                                <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                                    System status
-                                </div>
-                                <ul style={{ margin: '10px 0 0', paddingLeft: 18, fontSize: '0.8rem', color: '#cbd5e1', lineHeight: 1.65 }}>
-                                    <li>
-                                        <span style={{ color: '#64748b' }}>Network:</span> TestNet online
-                                    </li>
-                                    <li>
-                                        <span style={{ color: '#64748b' }}>Wallet:</span> connected
-                                    </li>
-                                    <li>
-                                        <span style={{ color: '#64748b' }}>NaviTrust app:</span>{' '}
-                                        {appId ? `#${appId}` : 'loading…'}
-                                    </li>
-                                </ul>
-                            </div>
-                        </div>
-                        <p style={{ margin: '18px 0 0', fontSize: '0.78rem', color: '#64748b', textAlign: 'center', lineHeight: 1.5 }}>
-                            Shipment cards appear when the API returns registered shipments from the ledger sync.
+                        <Package size={32} color="#38bdf8" style={{ marginBottom: 12 }} />
+                        <div style={{ fontWeight: 700, fontSize: '1rem', color: '#f1f5f9', marginBottom: 8 }}>No shipments registered yet.</div>
+                        <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: '0 0 18px', maxWidth: 400, marginLeft: 'auto', marginRight: 'auto' }}>
+                            Register a shipment on Algorand to see it here.
                         </p>
+                        <button type="button" className="primary-btn" onClick={() => setRegisterModal(true)}>
+                            Register shipment
+                        </button>
                     </div>
                 ) : null}
                 {displayedShipments.map((ship) => {
                     const jury = ship.last_jury;
                     const risk = jury?.sentinel?.risk_score ?? null;
-                    const riskClass = risk !== null ? (risk > 80 ? 'status-red' : risk > 50 ? 'status-yellow' : 'status-green') : '';
                     const sc = stageStyle(ship.stage);
                     const isRunning = juryRunning === ship.shipment_id;
 
-                    const isFlagged = !!(ship.last_jury?.trigger_contract && ship.last_jury?.on_chain_tx_id);
+                    const hasVerdictTx = !!(jury?.on_chain_tx_id);
+                    const verdictFlagged = !!jury?.trigger_contract;
                     const awaitingOffChainSync = !(ship.origin && ship.origin !== 'N/A' && ship.destination && ship.destination !== 'N/A');
+                    const cardFlagged = ship.stage === 'Disputed' || ship.stage === 'Delayed_Disaster';
+                    const fundsMicro = ship.funds_locked_microalgo ?? 0;
+                    const riskBandPct = risk !== null ? Math.min(100, Math.max(0, risk)) : 0;
 
                     return (
-                        <div key={ship.shipment_id} className={`card${isFlagged ? ' card-flagged' : ''}`} style={{ textAlign: 'left' }}>
+                        <div key={ship.shipment_id} className={`card${cardFlagged ? ' card-flagged' : ''}`} style={{ textAlign: 'left' }}>
                             {/* Header */}
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
                                 <div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                         <Package size={15} color="#2563eb" />
-                                        <code style={{ fontSize: '0.8rem' }}>{ship.shipment_id}</code>
+                                        <span style={{ fontSize: '0.8rem', fontFamily: 'ui-monospace, monospace' }}>{ship.shipment_id}</span>
                                     </div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, fontSize: '0.875rem', color: '#374151' }}>
                                         {(ship.origin && ship.origin !== 'N/A' && ship.destination && ship.destination !== 'N/A') ? (
@@ -1438,36 +1186,37 @@ function MainApp() {
                                     </div>
                                 </div>
                                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-                                    <span style={{
-                                        fontSize: '0.55rem', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
-                                        color: '#34d399', border: '1px solid rgba(52,211,153,0.45)', padding: '2px 8px', borderRadius: 6,
-                                    }}>
-                                        On-chain · shipment stage
-                                    </span>
                                     <div style={{
                                         padding: '3px 10px', borderRadius: 20, fontSize: '0.7rem', fontWeight: 600,
                                         background: sc.bg, color: sc.color, border: `1px solid ${sc.border}`, whiteSpace: 'nowrap',
                                     }}>
                                         {ship.stage.replace('_', ' ')}
                                     </div>
-                                    {ship.last_jury?.confirmed_round && (
-                                        <div style={{ fontSize: '0.6rem', color: '#10b981', fontWeight: 500 }}>
-                                            Ledger: Block #{ship.last_jury.confirmed_round}
-                                        </div>
-                                    )}
                                 </div>
                             </div>
 
-                            <div style={{ marginBottom: 12, padding: 12, borderRadius: 8, background: 'rgba(30,41,59,0.35)', fontSize: '0.78rem', color: '#94a3b8' }}>
-                                Coordinates: {ship.lat.toFixed(3)}, {ship.lon.toFixed(3)}
-                                {ship.dest_lat != null && ship.dest_lon != null
-                                    ? ` → ${ship.dest_lat.toFixed(3)}, ${ship.dest_lon.toFixed(3)}`
-                                    : ''}
-                            </div>
+                            {fundsMicro > 0 && (
+                                <div style={{ marginBottom: 10, fontSize: '0.8rem', color: '#64748b' }}>
+                                    Funds locked:{' '}
+                                    <span style={{ fontWeight: 600, color: '#0f172a' }}>{(fundsMicro / 1e6).toFixed(2)} ALGO</span>
+                                </div>
+                            )}
+
+                            {risk !== null && (
+                                <div style={{ marginBottom: 12 }}>
+                                    <div style={{ fontSize: '0.7rem', color: '#64748b', marginBottom: 4 }}>AI jury risk</div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                        <span style={{ fontWeight: 700, fontSize: '0.9rem', color: '#0f172a' }}>{risk} / 100</span>
+                                        <div style={{ flex: 1, maxWidth: 140, height: 4, borderRadius: 2, background: '#e5e7eb', overflow: 'hidden' }}>
+                                            <div style={{ width: `${riskBandPct}%`, height: '100%', background: risk > 80 ? '#dc2626' : risk > 50 ? '#d97706' : '#16a34a' }} />
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
 
                             {/* Stats: Live Sensor Feed (Supplier) or Weather (Stakeholder) */}
-                            <div style={{ fontSize: '0.55rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#a78bfa', marginBottom: 8 }}>
-                                Off-chain · telemetry, weather, and logistics event log (DB / demo generators — verify settlements in Ledger hub above)
+                            <div style={{ fontSize: '0.65rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#94a3b8', marginBottom: 8 }}>
+                                Telemetry &amp; weather
                             </div>
                             <div style={{ display: 'flex', gap: 16, marginBottom: 14, flexWrap: 'wrap' }}>
                                 {role === 'supplier' ? (
@@ -1501,15 +1250,101 @@ function MainApp() {
                                         <Zap size={13} /> {ship.logistics_events.length} logged
                                     </div>
                                 </div>
-                                {risk !== null && (
-                                    <div>
-                                        <div style={{ color: '#9ca3af', fontSize: '0.7rem', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Risk</div>
-                                        <div className={`status-badge ${riskClass}`} style={{ fontSize: '0.8rem', padding: '2px 8px' }}>
-                                            <Activity size={12} /> {risk}%
-                                        </div>
-                                    </div>
-                                )}
                             </div>
+
+                            {isRunning && role === 'stakeholder' && (
+                                <div
+                                    style={{
+                                        marginBottom: 14,
+                                        padding: 14,
+                                        borderRadius: 10,
+                                        background: 'rgba(15,23,42,0.06)',
+                                        border: '1px solid rgba(148,163,184,0.35)',
+                                    }}
+                                >
+                                    <div style={{ fontWeight: 700, fontSize: '0.85rem', color: '#0f172a', marginBottom: 10 }}>Running AI jury…</div>
+                                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: '0.8rem', color: '#475569', lineHeight: 1.8 }}>
+                                        <li style={{ color: juryAgentIdx >= 0 ? '#0f172a' : '#94a3b8' }}>Sentry analyzing weather…</li>
+                                        <li style={{ color: juryAgentIdx >= 1 ? '#0f172a' : '#94a3b8' }}>Auditor checking chain…</li>
+                                        <li style={{ color: juryAgentIdx >= 2 ? '#0f172a' : '#94a3b8' }}>Arbiter deciding…</li>
+                                    </ul>
+                                </div>
+                            )}
+
+                            {role === 'stakeholder' && jury && !isRunning && (
+                                <div
+                                    style={{
+                                        marginBottom: 14,
+                                        padding: 14,
+                                        borderRadius: 10,
+                                        border: '1px solid #e5e7eb',
+                                        background: '#fafafa',
+                                    }}
+                                >
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                                        <span style={{ fontWeight: 700, color: '#0f172a' }}>
+                                            Risk score: {risk ?? '—'} / 100
+                                        </span>
+                                        {risk != null && (
+                                            <span
+                                                style={{
+                                                    fontSize: '0.65rem',
+                                                    fontWeight: 700,
+                                                    textTransform: 'uppercase',
+                                                    letterSpacing: '0.04em',
+                                                    padding: '2px 8px',
+                                                    borderRadius: 6,
+                                                    background: risk > 80 ? '#fef2f2' : risk > 50 ? '#fffbeb' : '#f0fdf4',
+                                                    color: risk > 80 ? '#b91c1c' : risk > 50 ? '#b45309' : '#15803d',
+                                                }}
+                                            >
+                                                {risk > 80 ? 'High risk' : risk > 50 ? 'Elevated' : 'Lower risk'}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div style={{ fontSize: '0.8rem', color: '#475569', lineHeight: 1.55, marginBottom: 8 }}>
+                                        <span style={{ marginRight: 6 }} aria-hidden>🛰</span>
+                                        <strong>Sentry:</strong> {jury.sentinel?.reasoning_narrative || jury.sentinel?.reasoning || '—'}
+                                    </div>
+                                    <div style={{ fontSize: '0.8rem', color: '#475569', lineHeight: 1.55, marginBottom: 8 }}>
+                                        <span style={{ marginRight: 6 }} aria-hidden>📋</span>
+                                        <strong>Auditor:</strong> {jury.auditor?.audit_report || jury.auditor?.blockchain_status || '—'}
+                                        {fundsMicro > 0 ? (
+                                            <span style={{ display: 'block', marginTop: 4, color: '#64748b' }}>
+                                                Funds locked: {(fundsMicro / 1e6).toFixed(2)} ALGO
+                                            </span>
+                                        ) : null}
+                                    </div>
+                                    <div style={{ fontSize: '0.8rem', color: '#475569', lineHeight: 1.55, marginBottom: 10 }}>
+                                        <span style={{ marginRight: 6 }} aria-hidden>⚖️</span>
+                                        <strong>Arbiter:</strong>{' '}
+                                        {jury.chief_justice?.judgment === 'RECORDED' || verdictFlagged
+                                            ? 'Verdict recorded on-chain'
+                                            : jury.chief_justice?.judgment || (verdictFlagged ? 'Flag shipment' : 'Hold / no flag')}
+                                        {jury.chief_justice?.reasoning_narrative ? (
+                                            <span style={{ display: 'block', marginTop: 6, fontStyle: 'italic' }}>
+                                                &ldquo;{jury.chief_justice.reasoning_narrative}&rdquo;
+                                            </span>
+                                        ) : null}
+                                    </div>
+                                    {jury.on_chain_tx_id ? (
+                                        <a
+                                            href={`https://lora.algokit.io/testnet/transaction/${jury.on_chain_tx_id}`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            style={{
+                                                display: 'inline-block',
+                                                fontSize: '0.78rem',
+                                                fontWeight: 600,
+                                                color: '#2563eb',
+                                                textDecoration: 'none',
+                                            }}
+                                        >
+                                            View verdict on Lora ↗
+                                        </a>
+                                    ) : null}
+                                </div>
+                            )}
 
                             <WitnessPanel shipmentId={ship.shipment_id} oracleAddress={oracleAddress} />
                             {role === 'stakeholder' && (
@@ -1521,22 +1356,6 @@ function MainApp() {
                                     walletAddress={accountAddress}
                                     canAdd={Boolean(accountAddress)}
                                 />
-                            )}
-
-                            {/* Jury reasoning preview — Stakeholder only */}
-                            {role === 'stakeholder' && jury && (
-                                <div style={{ marginBottom: 14 }}>
-                                    <div style={{ fontSize: '0.55rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#a78bfa', marginBottom: 6 }}>
-                                        Off-chain · AI jury narrative (settlement tx on-chain when authorized — see Lora link in modal / audit)
-                                    </div>
-                                    <div style={{ color: '#9ca3af', fontSize: '0.7rem', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>Latest Settlement Verdict</div>
-                                    <div className="log-entry" style={{ fontSize: '0.8rem' }}>
-                                        <strong style={{ color: '#d97706' }}>Logistics Sentry:</strong> {jury.sentinel?.reasoning_narrative || jury.sentinel?.reasoning}
-                                    </div>
-                                    <div className="log-entry" style={{ fontSize: '0.8rem' }}>
-                                        <strong style={{ color: '#2563eb' }}>Compliance Auditor:</strong> {jury.auditor?.audit_report || jury.auditor?.blockchain_status}
-                                    </div>
-                                </div>
                             )}
 
                             {/* Supplier: simple event summary instead of verdict */}
@@ -1556,27 +1375,76 @@ function MainApp() {
                             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', borderTop: '1px solid #f3f4f6', paddingTop: 12 }}>
                                 {role === 'stakeholder' && (
                                     <>
-                                        {isFlagged ? (
-                                            <button className="primary-btn" disabled
-                                                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minWidth: 110, fontSize: '0.8rem', background: '#9ca3af', cursor: 'not-allowed' }}
-                                                title="Settlement already recorded on Algorand. See Audit Trail.">
-                                                <CheckCircle size={13} /> Claim already filed
+                                        {ship.stage === 'Settled' ? (
+                                            <button
+                                                type="button"
+                                                className="primary-btn"
+                                                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minWidth: 120, fontSize: '0.8rem' }}
+                                                onClick={() => void handleViewAudit(ship.shipment_id)}
+                                            >
+                                                <CheckCircle size={13} /> View certificate
                                             </button>
-                                        ) : (
-                                            <button className="primary-btn" disabled={isRunning || awaitingOffChainSync}
-                                                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minWidth: 110, fontSize: '0.8rem', ...(awaitingOffChainSync && { background: '#9ca3af', cursor: 'not-allowed' }) }}
-                                                onClick={() => handleRunJury(ship.shipment_id)}
-                                                title={awaitingOffChainSync ? 'Awaiting off-chain metadata sync' : undefined}>
-                                                <Play size={13} /> {isRunning ? (juryPhase === 0 ? 'AI Arbiter generating verdict…' : 'Awaiting Algorand block finality…') : 'Authorize Settlement'}
+                                        ) : null}
+                                        {(ship.stage === 'Disputed' || ship.stage === 'Delayed_Disaster') ? (
+                                            <button
+                                                type="button"
+                                                className="primary-btn"
+                                                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minWidth: 120, fontSize: '0.8rem', background: '#b45309' }}
+                                                onClick={() => void handleViewAudit(ship.shipment_id)}
+                                            >
+                                                <AlertTriangle size={13} /> View dispute
                                             </button>
-                                        )}
-                                        {jury?.trigger_contract && (
-                                            <button className="primary-btn" disabled={isTriggering}
-                                                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, background: '#dc2626', minWidth: 110, fontSize: '0.8rem' }}
-                                                onClick={() => handleTriggerDisaster(ship)}>
-                                                <AlertTriangle size={13} /> {isTriggering ? 'Signing…' : 'Trigger'}
+                                        ) : null}
+                                        {ship.stage === 'In_Transit' && hasVerdictTx && verdictFlagged ? (
+                                            <button
+                                                type="button"
+                                                className="primary-btn"
+                                                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, minWidth: 120, fontSize: '0.8rem', background: '#b45309' }}
+                                                onClick={() => void handleViewAudit(ship.shipment_id)}
+                                            >
+                                                <AlertTriangle size={13} /> View dispute
                                             </button>
-                                        )}
+                                        ) : null}
+                                        {ship.stage === 'In_Transit' && !hasVerdictTx ? (
+                                            <button
+                                                type="button"
+                                                className="primary-btn"
+                                                disabled={isRunning || awaitingOffChainSync}
+                                                style={{
+                                                    flex: 1,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    gap: 6,
+                                                    minWidth: 120,
+                                                    fontSize: '0.8rem',
+                                                    ...(awaitingOffChainSync ? { background: '#9ca3af', cursor: 'not-allowed' } : {}),
+                                                }}
+                                                onClick={() => void handleRunJury(ship.shipment_id)}
+                                                title={awaitingOffChainSync ? 'Syncing shipment metadata' : undefined}
+                                            >
+                                                <Play size={13} /> {isRunning ? 'Running jury…' : 'Run AI jury'}
+                                            </button>
+                                        ) : null}
+                                        {ship.stage === 'In_Transit' && hasVerdictTx && !verdictFlagged ? (
+                                            <button
+                                                type="button"
+                                                className="primary-btn"
+                                                style={{
+                                                    flex: 1,
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    gap: 6,
+                                                    minWidth: 120,
+                                                    fontSize: '0.8rem',
+                                                    background: '#059669',
+                                                }}
+                                                onClick={() => void handleSettleShipment(ship.shipment_id)}
+                                            >
+                                                <CheckCircle size={13} /> Settle shipment
+                                            </button>
+                                        ) : null}
                                         {ship.stage !== 'Not_Registered' && ship.stage !== 'Settled' && (
                                             <button
                                                 type="button"
@@ -1587,7 +1455,8 @@ function MainApp() {
                                                     background: '#f0fdf4', color: '#16a34a', border: '1px solid #bbf7d0',
                                                     cursor: 'pointer', fontWeight: 600, whiteSpace: 'nowrap',
                                                 }}
-                                                onClick={() => handleFundEscrow(ship.shipment_id)}>
+                                                onClick={() => void handleFundEscrow(ship.shipment_id)}
+                                            >
                                                 <Coins size={12} /> {isPaying === ship.shipment_id ? 'Signing…' : 'Lock 0.5 ALGO'}
                                             </button>
                                         )}
@@ -1606,21 +1475,14 @@ function MainApp() {
                                         )}
                                     </>
                                 )}
-                                {role === 'stakeholder' && (
-                                    <>
-                                        <button style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: '0.8rem' }}
-                                            onClick={() => handleViewAudit(ship.shipment_id)}>
-                                            <History size={13} /> Audit Trail
-                                        </button>
-                                        {jury && (
-                                            <button style={{ fontSize: '0.8rem' }} onClick={() => {
-                                                setSelectedShipment(ship);
-                                                handleDownloadReport(ship);
-                                            }}>
-                                                Full Report
-                                            </button>
-                                        )}
-                                    </>
+                                {role === 'stakeholder' && ship.stage !== 'Settled' && (
+                                    <button
+                                        type="button"
+                                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: '0.8rem' }}
+                                        onClick={() => void handleViewAudit(ship.shipment_id)}
+                                    >
+                                        <History size={13} /> Audit trail
+                                    </button>
                                 )}
                             </div>
                         </div>
@@ -1634,74 +1496,65 @@ function MainApp() {
             ═══════════════════════════════════════════════════ */}
 
             {/* ── Jury Conversation Log ─────────────────────── */}
-            {juryResult && (
+            {juryResult && (() => {
+                const jr = juryResult as JuryResult & {
+                    sentinel?: { risk_score?: number; reasoning_narrative?: string; reasoning?: string };
+                    auditor?: { audit_report?: string; blockchain_status?: string };
+                    chief_justice?: { judgment?: string; reasoning_narrative?: string };
+                    on_chain_tx_id?: string;
+                    explorer_url?: string;
+                };
+                const rscore = jr.sentinel?.risk_score ?? null;
+                const rband = rscore != null ? (rscore > 80 ? 'HIGH RISK' : rscore > 50 ? 'ELEVATED' : 'LOWER RISK') : '';
+                return (
                 <div className="modal-backdrop">
-                    <div className="card" style={{ maxWidth: 700, width: '95%', textAlign: 'left', padding: 0, overflow: 'hidden' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 20px', borderBottom: '1px solid #e5e7eb' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                <Terminal size={18} color="#2563eb" />
-                                <h3 style={{ margin: 0, fontSize: '0.95rem' }}>Settlement Log &mdash; {juryResult.shipment_id}</h3>
+                    <div className="card" style={{ maxWidth: 520, width: '95%', textAlign: 'left', padding: '20px 22px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+                            <div>
+                                <h3 style={{ margin: 0, fontSize: '1rem' }}>AI jury result</h3>
+                                <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: 4, fontFamily: 'ui-monospace, monospace' }}>{jr.shipment_id}</div>
                             </div>
-                            <button onClick={() => setJuryResult(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
+                            <button type="button" onClick={() => setJuryResult(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 4 }}>
                                 <X size={18} color="#9ca3af" />
                             </button>
                         </div>
-                        {/* Terminal area stays dark for readability */}
-                        <div style={{
-                            background: '#0f172a', padding: 20, maxHeight: 400, overflowY: 'auto',
-                            fontFamily: "'JetBrains Mono', monospace", fontSize: '0.8rem', lineHeight: 1.7,
-                        }}>
-                            {juryResult.logistics_events_used > 0 && (
-                                <div style={{ color: '#fbbf24', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-                                    [SYSTEM] {juryResult.logistics_events_used} logistics event(s) ingested by Logistics Sentry
-                                </div>
-                            )}
-                            {juryResult.agent_dialogue.map((entry, i) => (
-                                <div key={i} style={{ marginBottom: 16 }}>
-                                    <div style={{ color: agentColor(entry.agent), fontWeight: 600 }}>{'>'} [{entry.agent.toUpperCase()}]</div>
-                                    <div style={{ color: '#cbd5e1', paddingLeft: 16, whiteSpace: 'pre-wrap' }}>{entry.message}</div>
-                                </div>
-                            ))}
-                            <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 12, marginTop: 8 }}>
-                                <span style={{ color: juryResult.trigger_contract ? '#ef4444' : '#4ade80', fontWeight: 700 }}>
-                                    VERDICT: {juryResult.trigger_contract ? 'SETTLEMENT AUTHORIZED — Smart contract trigger approved' : 'SETTLEMENT REJECTED — No action required'}
-                                </span>
-                                {(juryResult as any).chief_justice?.reasoning_narrative && (
-                                    <div style={{ marginTop: 10, padding: 10, background: 'rgba(255,255,255,0.06)', borderRadius: 6, fontSize: '0.8rem', color: '#cbd5e1', lineHeight: 1.5 }}>
-                                        <strong style={{ color: '#93c5fd' }}>Reasoning:</strong> {(juryResult as any).chief_justice.reasoning_narrative}
-                                    </div>
-                                )}
-                                {(juryResult as any).chief_justice?.mitigation_strategy && (
-                                    <div style={{ marginTop: 8, padding: 10, background: 'rgba(251,191,36,0.12)', borderRadius: 6, fontSize: '0.78rem', color: '#fde68a', lineHeight: 1.5 }}>
-                                        <strong>Mitigation:</strong> {(juryResult as any).chief_justice.mitigation_strategy}
-                                    </div>
-                                )}
-                                {((juryResult as any).explorer_url || (juryResult as any).on_chain_tx_id) && (
-                                    <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-                                        <span style={{ color: '#4ade80', display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: '0.75rem' }}>
-                                            <CheckCircle size={12} /> Verified by Algorand
-                                            {(juryResult as any).confirmed_round && (
-                                                <span style={{ color: '#93c5fd' }}> — Round {(juryResult as any).confirmed_round}</span>
-                                            )}
-                                        </span>
-                                        <a
-                                            href={(juryResult as any).explorer_url || `https://lora.algokit.io/testnet/transaction/${(juryResult as any).on_chain_tx_id}`}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                            style={{ display: 'block', color: '#93c5fd', fontSize: '0.75rem', textDecoration: 'none', marginTop: 4 }}
-                                        >
-                                            View on Lora Explorer <ExternalLink size={10} style={{ verticalAlign: 'middle' }} />
-                                        </a>
-                                    </div>
-                                )}
+                        <div style={{ padding: 16, borderRadius: 10, border: '1px solid #e5e7eb', background: '#fafafa', marginBottom: 16 }}>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                                <span style={{ fontWeight: 700, color: '#0f172a' }}>Risk score: {rscore ?? '—'} / 100</span>
+                                {rband ? (
+                                    <span style={{ fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.05em', color: '#b45309' }}>{rband}</span>
+                                ) : null}
                             </div>
+                            <div style={{ fontSize: '0.85rem', color: '#475569', lineHeight: 1.55, marginBottom: 10 }}>
+                                <strong>🛰 Sentry:</strong> {jr.sentinel?.reasoning_narrative || jr.sentinel?.reasoning || '—'}
+                            </div>
+                            <div style={{ fontSize: '0.85rem', color: '#475569', lineHeight: 1.55, marginBottom: 10 }}>
+                                <strong>📋 Auditor:</strong> {jr.auditor?.audit_report || jr.auditor?.blockchain_status || '—'}
+                            </div>
+                            <div style={{ fontSize: '0.85rem', color: '#475569', lineHeight: 1.55, marginBottom: 12 }}>
+                                <strong>⚖️ Arbiter:</strong> {jr.chief_justice?.judgment || (jr.trigger_contract ? 'Recorded on-chain' : 'No on-chain flag')}
+                                {jr.chief_justice?.reasoning_narrative ? (
+                                    <span style={{ display: 'block', marginTop: 6, fontStyle: 'italic' }}>
+                                        &ldquo;{jr.chief_justice.reasoning_narrative}&rdquo;
+                                    </span>
+                                ) : null}
+                            </div>
+                            {(jr.explorer_url || jr.on_chain_tx_id) ? (
+                                <a
+                                    href={jr.explorer_url || `https://lora.algokit.io/testnet/transaction/${jr.on_chain_tx_id}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    style={{ fontSize: '0.78rem', fontWeight: 600, color: '#2563eb', textDecoration: 'none' }}
+                                >
+                                    View verdict on Lora ↗
+                                </a>
+                            ) : null}
                         </div>
-                        <div style={{ padding: '12px 20px', borderTop: '1px solid #e5e7eb' }}>
-                            <button className="primary-btn" style={{ width: '100%' }} onClick={() => setJuryResult(null)}>Close</button>
-                        </div>
+                        <button type="button" className="primary-btn" style={{ width: '100%' }} onClick={() => setJuryResult(null)}>Close</button>
                     </div>
                 </div>
-            )}
+                );
+            })()}
 
             {/* ── Audit Trail Modal ─────────────────────────── */}
             {auditTrail && (
@@ -1829,6 +1682,62 @@ function MainApp() {
                 </div>
             )}
 
+            {/* ── Register shipment modal ─────────────────────── */}
+            {registerModal && (
+                <div className="modal-backdrop">
+                    <div className="card" style={{ maxWidth: 440, width: '95%', textAlign: 'left' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                            <h3 style={{ margin: 0, fontSize: '1rem' }}>Register shipment</h3>
+                            <button type="button" onClick={() => setRegisterModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>
+                                <X size={18} color="#9ca3af" />
+                            </button>
+                        </div>
+                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: 4 }}>Shipment ID</label>
+                        <input
+                            value={regForm.shipment_id}
+                            onChange={(e) => setRegForm((f) => ({ ...f, shipment_id: e.target.value }))}
+                            placeholder="e.g. SHIP_MUMBAI_001"
+                            style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #e5e7eb', marginBottom: 12, fontSize: '0.9rem' }}
+                        />
+                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: 4 }}>Origin</label>
+                        <select
+                            value={regForm.origin}
+                            onChange={(e) => setRegForm((f) => ({ ...f, origin: e.target.value }))}
+                            style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #e5e7eb', marginBottom: 12, fontSize: '0.9rem' }}
+                        >
+                            {CITIES.map((c) => (
+                                <option key={c} value={c}>{c}</option>
+                            ))}
+                        </select>
+                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: 4 }}>Destination</label>
+                        <select
+                            value={regForm.destination}
+                            onChange={(e) => setRegForm((f) => ({ ...f, destination: e.target.value }))}
+                            style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #e5e7eb', marginBottom: 12, fontSize: '0.9rem' }}
+                        >
+                            {CITIES.map((c) => (
+                                <option key={c} value={c}>{c}</option>
+                            ))}
+                        </select>
+                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: 4 }}>Supplier address</label>
+                        <input
+                            value={regForm.supplier}
+                            onChange={(e) => setRegForm((f) => ({ ...f, supplier: e.target.value }))}
+                            placeholder="Algorand address"
+                            style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #e5e7eb', marginBottom: 16, fontSize: '0.85rem', fontFamily: 'ui-monospace, monospace' }}
+                        />
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                            <button type="button" onClick={() => setRegisterModal(false)} style={{ padding: '10px 16px' }}>
+                                Cancel
+                            </button>
+                            <button type="button" className="primary-btn" disabled={registerBusy} onClick={() => void handleRegisterShipment()}>
+                                {registerBusy ? 'Registering…' : 'Register on Algorand'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* ── Submit Mitigation Modal (Supplier) ─────────── */}
             {mitigateModal && (
                 <div className="modal-backdrop">
@@ -1842,7 +1751,7 @@ function MainApp() {
                             </button>
                         </div>
                         <div style={{ fontSize: '0.85rem', color: '#6b7280', marginBottom: 8 }}>
-                            Shipment <code>{mitigateModal.shipmentId}</code> — describe the resolution (e.g. &ldquo;Rebooted backup generator, temperature stabilizing&rdquo;):
+                            Shipment <span style={{ fontFamily: 'ui-monospace, monospace' }}>{mitigateModal.shipmentId}</span> — describe the resolution (e.g. &ldquo;Rebooted backup generator, temperature stabilizing&rdquo;):
                         </div>
                         <textarea
                             value={mitigateText}
@@ -1888,17 +1797,25 @@ function MainApp() {
                         </div>
 
                         <div style={{ padding: 14, background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0', marginBottom: 14, fontSize: '0.85rem', color: '#166534' }}>
-                            Payment group signed and broadcast. Escrow for <code>{paymentReceipt.shipment_id}</code> is updated when the round confirms.
-                            {(paymentReceipt.micro_algo != null) && (
-                                <div style={{ marginTop: 8 }}>Amount: {(paymentReceipt.micro_algo as number) / 1e6} ALGO (micro-units: {paymentReceipt.micro_algo})</div>
-                            )}
+                            Escrow deposit confirmed for{' '}
+                            <span style={{ fontFamily: 'ui-monospace, monospace' }}>{paymentReceipt.shipment_id}</span>
+                            {paymentReceipt.micro_algo != null ? (
+                                <span style={{ display: 'block', marginTop: 8 }}>
+                                    Amount: {(paymentReceipt.micro_algo as number) / 1e6} ALGO
+                                </span>
+                            ) : null}
                         </div>
 
-                        {paymentReceipt.lora_app && (
-                            <a href={paymentReceipt.lora_app} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 600, color: '#2563eb', fontSize: '0.85rem', marginBottom: 12 }}>
-                                <ExternalLink size={14} /> Open app on Lora
+                        {paymentReceipt.tx_id ? (
+                            <a
+                                href={`https://lora.algokit.io/testnet/transaction/${paymentReceipt.tx_id}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{ display: 'inline-block', fontWeight: 600, color: '#2563eb', fontSize: '0.8rem', marginBottom: 12 }}
+                            >
+                                View on Lora ↗
                             </a>
-                        )}
+                        ) : null}
 
                         <button type="button" className="primary-btn" style={{ width: '100%', marginTop: 14 }} onClick={() => setPaymentReceipt(null)}>Close</button>
                     </div>

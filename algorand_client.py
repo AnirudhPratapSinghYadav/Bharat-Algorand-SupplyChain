@@ -6,11 +6,13 @@ Uses artifacts/NaviTrust.arc56.json when present, else AgriSupplyChainEscrow.arc
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from algokit_utils import AlgorandClient, AppClientMethodCallParams
@@ -52,6 +54,98 @@ STATUS_IN_TRANSIT = "In_Transit"
 STATUS_LEGACY_FLAGGED = "Delayed_Disaster"
 STATUS_DISPUTED = "Disputed"
 STATUS_SETTLED = "Settled"
+
+# Global-state keys shown on /protocol (hide legacy badge / pact fields).
+NAVITRUST_DISPLAY_KEYS = frozenset(
+    {"total_shipments", "total_settled", "total_disputed", "oracle_address"}
+)
+
+
+def _arc4_method_selector_hex(signature: str) -> str:
+    """First 4 bytes of SHA-512/256 of ARC-4 method signature string."""
+    return hashlib.new("sha512_256", signature.encode()).digest()[:4].hex()
+
+
+def _build_navitrust_arc4_name_map() -> Dict[str, str]:
+    """Map 8-char hex selector -> method name for NaviTrust ARC-4 methods."""
+    specs = [
+        ("register_shipment", ["string", "address", "string"]),
+        ("fund_shipment", ["string", "pay"]),
+        ("record_verdict", ["string", "string", "uint64"]),
+        ("settle_shipment", ["string"]),
+        ("get_shipment", ["string"]),
+    ]
+    out: Dict[str, str] = {}
+    for name, types in specs:
+        sig = f"{name}({','.join(types)})"
+        out[_arc4_method_selector_hex(sig)] = name
+    return out
+
+
+ARC4_SELECTOR_TO_METHOD = _build_navitrust_arc4_name_map()
+
+
+def decode_method_name(selector_hex: str) -> str:
+    """Plain English method from 8-char hex selector (or prefix)."""
+    h = (selector_hex or "").strip().lower().replace("0x", "")
+    if len(h) >= 8:
+        h8 = h[:8]
+        return ARC4_SELECTOR_TO_METHOD.get(h8, f"app_call ({h8})")
+    return "app_call"
+
+
+def get_display_global_state(app_id: int) -> Dict[str, Any]:
+    """Supply-chain-relevant global state only (filters legacy contract clutter)."""
+    if not app_id:
+        return {}
+    try:
+        info = algorand.client.algod.application_info(app_id)
+        gs = info.get("params", {}).get("global-state", [])
+        result: Dict[str, Any] = {}
+        for kv in gs:
+            key = base64.b64decode(kv.get("key", "")).decode("utf-8", errors="ignore")
+            if key not in NAVITRUST_DISPLAY_KEYS:
+                continue
+            val = kv.get("value") or {}
+            if val.get("type") == 2:
+                result[key] = int(val.get("uint", 0))
+            else:
+                raw_b = val.get("bytes", "")
+                if raw_b:
+                    result[key] = base64.b64decode(raw_b).decode("utf-8", errors="ignore")
+                else:
+                    result[key] = ""
+        return result
+    except Exception as e:
+        logger.warning("get_display_global_state: %s", e)
+        return {}
+
+
+def _indexer_tx_selector_hex(tx: dict) -> Optional[str]:
+    at = tx.get("application-transaction")
+    if not isinstance(at, dict):
+        return None
+    args = at.get("application-args") or []
+    if not args:
+        return None
+    try:
+        raw = base64.b64decode(args[0])
+        return raw[:4].hex() if len(raw) >= 4 else None
+    except Exception:
+        return None
+
+
+def _tx_type_plain(tx_type: Optional[str]) -> str:
+    if not tx_type:
+        return "Transaction"
+    mapping = {
+        "appl": "Application call",
+        "pay": "Payment",
+        "axfer": "Asset transfer",
+        "acfg": "Asset configuration",
+        "keyreg": "Key registration",
+    }
+    return mapping.get(tx_type, tx_type.replace("_", " ").title())
 
 try:
     algorand = (
@@ -105,6 +199,10 @@ def verify_oracle_setup() -> Optional[str]:
         logger.info("Oracle verify skipped (pytest)")
         return None
 
+    if os.environ.get("SKIP_ORACLE_VERIFY", "").strip().lower() in ("1", "true", "yes"):
+        logger.warning("SKIP_ORACLE_VERIFY is set — skipping oracle startup check (not for production)")
+        return None
+
     mnemonic_str = (os.environ.get("ORACLE_MNEMONIC") or os.environ.get("DEPLOYER_MNEMONIC") or "").strip()
     if not mnemonic_str or len(mnemonic_str.split()) != 25:
         raise RuntimeError(
@@ -114,7 +212,7 @@ def verify_oracle_setup() -> Optional[str]:
     try:
         pk = algosdk_mnemonic.to_private_key(mnemonic_str)
         addr = address_from_private_key(pk)
-        info = algorand.client.algod.account_information(addr)
+        info = algorand.client.algod.account_info(addr)
         amt = int(info.get("amount", 0))
         balance = amt / 1_000_000.0
         print(f"✅ Oracle: {addr[:12]}... | {balance:.2f} ALGO")
@@ -463,15 +561,34 @@ def indexer_recent_app_txns(limit: int = 20) -> List[dict]:
                     note = base64.b64decode(tx["note"]).decode("utf-8", errors="replace")
                 except Exception:
                     pass
+            tt = tx.get("tx-type") or ""
+            sel = _indexer_tx_selector_hex(tx)
+            if tt == "appl" and sel:
+                method_name = decode_method_name(sel)
+                action_plain = method_name
+            else:
+                method_name = ""
+                action_plain = _tx_type_plain(tt)
+            rt = tx.get("round-time")
+            ts_iso = ""
+            if rt is not None:
+                try:
+                    ts_iso = datetime.fromtimestamp(int(rt), tz=timezone.utc).isoformat()
+                except (TypeError, ValueError, OSError):
+                    ts_iso = ""
             result.append(
                 {
                     "tx_id": tx.get("id"),
-                    "type": tx.get("tx-type"),
+                    "type": tt,
                     "sender": tx.get("sender"),
                     "amount": (tx.get("payment-transaction") or {}).get("amount", 0),
                     "note": note[:500],
                     "round": tx.get("confirmed-round") or tx.get("confirmed_round"),
+                    "timestamp": ts_iso,
                     "lora_url": f"{LORA_TESTNET_TX}/{tx.get('id')}" if tx.get("id") else "",
+                    "method_selector_hex": sel or "",
+                    "method_name": method_name,
+                    "action_plain": action_plain,
                 }
             )
         return result
