@@ -181,7 +181,8 @@ function MainApp() {
         tx_id?: string;
         supplier_paid_algo?: number;
     } | null>(null);
-    const [supplierRep, setSupplierRep] = useState<{ score: number; source?: string } | null>(null);
+    const [supplierRepLoading, setSupplierRepLoading] = useState(false);
+    const [supplierRep, setSupplierRep] = useState<{ score: number | null; source?: string } | null>(null);
 
     const refreshRecentTxns = useCallback(() => {
         axios
@@ -239,12 +240,19 @@ function MainApp() {
     useEffect(() => {
         if (role !== 'supplier' || !accountAddress) {
             setSupplierRep(null);
+            setSupplierRepLoading(false);
             return;
         }
+        setSupplierRepLoading(true);
         axios
             .get(`${BACKEND_URL}/supplier/${encodeURIComponent(accountAddress)}/reputation`)
-            .then((r) => setSupplierRep({ score: Number(r.data?.score ?? 55), source: r.data?.source }))
-            .catch(() => setSupplierRep({ score: 55, source: 'demo' }));
+            .then((r) => {
+                const raw = r.data?.score;
+                const score = typeof raw === 'number' && !Number.isNaN(raw) ? raw : null;
+                setSupplierRep({ score, source: typeof r.data?.source === 'string' ? r.data.source : undefined });
+            })
+            .catch(() => setSupplierRep({ score: null, source: 'request_failed' }))
+            .finally(() => setSupplierRepLoading(false));
     }, [role, accountAddress]);
 
     useEffect(() => {
@@ -518,15 +526,19 @@ function MainApp() {
         }
         setRegisterBusy(true);
         try {
-            const regRes = await axios.post(`${BACKEND_URL}/register-shipment`, null, {
-                params: {
+            const regRes = await axios.post(
+                `${BACKEND_URL}/register-shipment`,
+                {
                     shipment_id: regForm.shipment_id.trim(),
                     origin: regForm.origin,
                     destination: regForm.destination,
-                    supplier: regForm.supplier.trim(),
+                    supplier_address: regForm.supplier.trim(),
                 },
-                timeout: 120_000,
-            });
+                {
+                    headers: { 'Content-Type': 'application/json' },
+                    timeout: 120_000,
+                },
+            );
             const tid = (regRes.data as { tx_id?: string })?.tx_id;
             if (tid) {
                 recordConfirmedTx({ txId: tid, label: 'Shipment registered' });
@@ -539,8 +551,18 @@ function MainApp() {
             axios.get(`${BACKEND_URL}/stats`).then((r) => setStats(r.data)).catch(() => {});
             refreshRecentTxns();
         } catch (e: unknown) {
-            const err = e as { response?: { data?: { detail?: string } } };
-            setToast(typeof err.response?.data?.detail === 'string' ? err.response.data.detail : 'Registration failed');
+            const err = e as { response?: { data?: { detail?: unknown } } };
+            const d = err.response?.data?.detail;
+            let msg = 'Registration failed.';
+            if (typeof d === 'string') {
+                msg = d;
+            } else if (d && typeof d === 'object' && 'fraud_report' in d) {
+                const fr = (d as { fraud_report?: { verdict?: string } }).fraud_report;
+                msg = `Fraud check blocked registration (${fr?.verdict ?? 'review'}). Try another supplier or route.`;
+            } else if (Array.isArray(d)) {
+                msg = d.map((x: { msg?: string }) => x.msg || '').filter(Boolean).join(' ') || msg;
+            }
+            setToast(msg);
         } finally {
             setRegisterBusy(false);
         }
@@ -916,48 +938,58 @@ function MainApp() {
                         {accountAddress.slice(0, 8)}…{accountAddress.slice(-6)}
                     </div>
                     <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#cbd5e1', marginBottom: 8 }}>On-chain reputation score</div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-                        <div
-                            style={{
-                                flex: 1,
-                                height: 10,
-                                borderRadius: 5,
-                                background: 'rgba(30,41,59,0.9)',
-                                overflow: 'hidden',
-                            }}
-                        >
+                    {supplierRepLoading ? (
+                        <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: 12 }}>Loading from indexer…</div>
+                    ) : typeof supplierRep?.score === 'number' ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
                             <div
                                 style={{
-                                    width: `${Math.min(100, supplierRep?.score ?? 55)}%`,
-                                    height: '100%',
+                                    flex: 1,
+                                    height: 10,
                                     borderRadius: 5,
-                                    background:
-                                        (supplierRep?.score ?? 55) >= 70
-                                            ? '#22c55e'
-                                            : (supplierRep?.score ?? 55) >= 40
-                                              ? '#f59e0b'
-                                              : '#ef4444',
+                                    background: 'rgba(30,41,59,0.9)',
+                                    overflow: 'hidden',
                                 }}
-                            />
+                            >
+                                <div
+                                    style={{
+                                        width: `${Math.min(100, supplierRep.score)}%`,
+                                        height: '100%',
+                                        borderRadius: 5,
+                                        background:
+                                            supplierRep.score >= 70
+                                                ? '#22c55e'
+                                                : supplierRep.score >= 40
+                                                  ? '#f59e0b'
+                                                  : '#ef4444',
+                                    }}
+                                />
+                            </div>
+                            <span
+                                style={{
+                                    fontWeight: 800,
+                                    fontSize: '1.1rem',
+                                    color:
+                                        supplierRep.score >= 70 ? '#4ade80' : supplierRep.score >= 40 ? '#fbbf24' : '#f87171',
+                                }}
+                            >
+                                {supplierRep.score} / 100
+                            </span>
                         </div>
-                        <span
-                            style={{
-                                fontWeight: 800,
-                                fontSize: '1.1rem',
-                                color:
-                                    (supplierRep?.score ?? 55) >= 70
-                                        ? '#4ade80'
-                                        : (supplierRep?.score ?? 55) >= 40
-                                          ? '#fbbf24'
-                                          : '#f87171',
-                            }}
-                        >
-                            {supplierRep?.score ?? 55} / 100
-                        </span>
-                    </div>
-                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: 12 }}>
-                        Verified in Algorand box storage
-                        {supplierRep?.source ? ` · ${supplierRep.source}` : null}
+                    ) : (
+                        <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginBottom: 12, lineHeight: 1.5 }}>
+                            No reputation box on-chain for this wallet yet (normal until a settlement updates it).{' '}
+                            {supplierRep?.source === 'no_app' || !appId
+                                ? 'Set APP_ID in the API .env and restart the server to read live boxes.'
+                                : null}
+                        </div>
+                    )}
+                    <div style={{ fontSize: '0.72rem', color: '#64748b', marginBottom: 12 }}>
+                        {supplierRep?.source === 'algorand_box_storage'
+                            ? 'Verified in Algorand box storage'
+                            : supplierRep?.source
+                              ? `Source: ${supplierRep.source}`
+                              : null}
                     </div>
                     {appId ? (
                         <a
@@ -1177,14 +1209,16 @@ function MainApp() {
                                 fontSize: '1.65rem',
                                 fontWeight: 700,
                                 color:
-                                    (supplierRep?.score ?? 55) >= 70
-                                        ? '#4ade80'
-                                        : (supplierRep?.score ?? 55) >= 40
-                                          ? '#fbbf24'
-                                          : '#f87171',
+                                    typeof supplierRep?.score === 'number'
+                                        ? supplierRep.score >= 70
+                                            ? '#4ade80'
+                                            : supplierRep.score >= 40
+                                              ? '#fbbf24'
+                                              : '#f87171'
+                                        : '#94a3b8',
                             }}
                         >
-                            {supplierRep?.score ?? 55}
+                            {supplierRepLoading ? '…' : typeof supplierRep?.score === 'number' ? supplierRep.score : '—'}
                         </div>
                     </div>
                 </div>

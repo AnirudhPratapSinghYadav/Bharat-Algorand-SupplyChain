@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from algokit_utils import AlgorandClient, AppClientMethodCallParams
+from algokit_utils.models.amount import AlgoAmount
+from algokit_utils.models.state import BoxReference
 from algosdk import encoding
 from algosdk import mnemonic as algosdk_mnemonic
 from algosdk.account import address_from_private_key
@@ -50,6 +52,31 @@ def lora_tx_url(tx_id: str | None) -> str:
         return ""
     return f"{LORA_TESTNET_TX}/{tx_id}"
 
+
+def fetch_transaction_note_json(tx_id: str) -> Optional[dict]:
+    """Decode top-level transaction `note` from indexer (e.g. NAVI_VERDICT JSON)."""
+    if not tx_id or not INDEXER_URL:
+        return None
+    try:
+        url = f"{INDEXER_URL.rstrip('/')}/v2/transactions/{tx_id.strip()}"
+        r = requests.get(url, timeout=12)
+        if r.status_code != 200:
+            return None
+        body = r.json()
+        tx = body.get("transaction") if isinstance(body, dict) else None
+        if not isinstance(tx, dict):
+            return None
+        note_b64 = tx.get("note")
+        if not note_b64:
+            return None
+        raw = base64.b64decode(note_b64)
+        if not raw.startswith(b"{"):
+            return None
+        return json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        logger.debug("fetch_transaction_note_json: %s", e)
+        return None
+
 STATUS_IN_TRANSIT = "In_Transit"
 STATUS_LEGACY_FLAGGED = "Delayed_Disaster"
 STATUS_DISPUTED = "Disputed"
@@ -74,6 +101,7 @@ def _build_navitrust_arc4_name_map() -> Dict[str, str]:
         ("record_verdict", ["string", "string", "uint64"]),
         ("settle_shipment", ["string"]),
         ("get_shipment", ["string"]),
+        ("get_global_stats", []),
     ]
     out: Dict[str, str] = {}
     for name, types in specs:
@@ -91,6 +119,7 @@ METHOD_ACTION_LABELS = {
     "settle_shipment": "Shipment settled",
     "fund_shipment": "Escrow funded",
     "get_shipment": "Shipment lookup",
+    "get_global_stats": "Global stats lookup",
 }
 
 
@@ -121,7 +150,11 @@ def get_display_global_state(app_id: int) -> Dict[str, Any]:
             else:
                 raw_b = val.get("bytes", "")
                 if raw_b:
-                    result[key] = base64.b64decode(raw_b).decode("utf-8", errors="ignore")
+                    raw = base64.b64decode(raw_b)
+                    if key == "oracle_address" and len(raw) == 32:
+                        result[key] = encoding.encode_address(raw)
+                    else:
+                        result[key] = raw.decode("utf-8", errors="ignore")
                 else:
                     result[key] = ""
         return result
@@ -307,9 +340,47 @@ def _decode_arc4_string(raw: bytes) -> str:
     return raw[2 : 2 + n].decode("utf-8", errors="replace").replace("\x00", "").strip()
 
 
-def _navi_status_box_name(shipment_id: str) -> bytes:
+def _navi_str_key_box_name(prefix: bytes, shipment_id: str) -> bytes:
+    """BoxMap(String, _) key encoding: prefix + u16_be(len) + utf8 id."""
     b = shipment_id.encode("utf-8")
-    return b"st_" + len(b).to_bytes(2, "big") + b
+    return prefix + len(b).to_bytes(2, "big") + b
+
+
+def _navi_status_box_name(shipment_id: str) -> bytes:
+    return _navi_str_key_box_name(b"st_", shipment_id)
+
+
+def _navi_rep_box_name(supplier_address: str) -> bytes:
+    """BoxMap(Account, _) key: prefix + 32-byte pubkey."""
+    return b"rp_" + encoding.decode_address(supplier_address)
+
+
+def navitrust_shipment_box_refs(shipment_id: str, include_supplier_rep: bool) -> list[BoxReference]:
+    """Box references for a shipment (string-keyed maps + optional supplier reputation box)."""
+    if not APP_ID:
+        return []
+    prefixes = (b"st_", b"sp_", b"by_", b"fn_", b"rk_", b"vd_", b"rt_", b"ce_")
+    refs = [BoxReference(APP_ID, _navi_str_key_box_name(pr, shipment_id)) for pr in prefixes]
+    if include_supplier_rep:
+        sup = read_navitrust_supplier_address(shipment_id)
+        if sup:
+            refs.append(BoxReference(APP_ID, _navi_rep_box_name(sup)))
+    return refs
+
+
+def read_navitrust_supplier_address(shipment_id: str) -> Optional[str]:
+    """Supplier Algorand address from sp_ box (32-byte ARC4 address)."""
+    if not APP_ID or not use_navitrust():
+        return None
+    try:
+        name = _navi_str_key_box_name(b"sp_", shipment_id)
+        box_resp = algorand.client.algod.application_box_by_name(APP_ID, name)
+        raw = base64.b64decode(box_resp["value"])
+        if len(raw) >= 32:
+            return encoding.encode_address(raw[:32])
+    except Exception:
+        pass
+    return None
 
 
 def read_shipment_status(shipment_id: str) -> str:
@@ -349,28 +420,37 @@ def read_shipment_full(shipment_id: str) -> dict[str, Any]:
     if not APP_ID or status in ("Unknown", "Unregistered", "Not_Found"):
         return out
     if use_navitrust():
-        try:
-            for prefix, key in (
-                ("fn_", "funds_microalgo"),
-                ("rk_", "risk_score"),
-                ("rt_", "route"),
-                ("vd_", "verdict"),
-            ):
-                b = shipment_id.encode("utf-8")
-                name = prefix.encode() + len(b).to_bytes(2, "big") + b
+        for prefix, key in (
+            ("fn_", "funds_microalgo"),
+            ("rk_", "risk_score"),
+            ("rt_", "route"),
+            ("vd_", "verdict"),
+            ("ce_", "certificate_asa"),
+        ):
+            try:
+                name = _navi_str_key_box_name(prefix.encode("utf-8"), shipment_id)
                 box_resp = algorand.client.algod.application_box_by_name(APP_ID, name)
                 raw = base64.b64decode(box_resp["value"])
-                if key in ("funds_microalgo", "risk_score"):
+                if key in ("funds_microalgo", "risk_score", "certificate_asa"):
                     if len(raw) == 8:
                         out[key] = int.from_bytes(raw, "big")
                 else:
                     out[key] = _decode_arc4_string(raw)
-        except Exception as e:
-            logger.debug("optional box read: %s", e)
+            except Exception as e:
+                logger.debug("box read %s: %s", key, e)
+        cert = out.get("certificate_asa")
+        if cert:
+            cid = int(cert)
+            out["lora_cert_url"] = f"https://lora.algokit.io/testnet/asset/{cid}"
     return out
 
 
-def record_verdict_chain(shipment_id: str, verdict_json: str, risk_score: int) -> Optional[dict]:
+def record_verdict_chain(
+    shipment_id: str,
+    verdict_json: str,
+    risk_score: int,
+    note: Optional[bytes] = None,
+) -> Optional[dict]:
     if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
         return None
     try:
@@ -381,6 +461,9 @@ def record_verdict_chain(shipment_id: str, verdict_json: str, risk_score: int) -
                 method="record_verdict",
                 args=[shipment_id, verdict_json[:3500], risk_score],
                 sender=deployer.address,
+                note=note[:1000] if note else None,
+                box_references=navitrust_shipment_box_refs(shipment_id, include_supplier_rep=False),
+                extra_fee=AlgoAmount(micro_algo=1000),
             )
         )
         tx_id = result.tx_ids[0] if result.tx_ids else None
@@ -427,6 +510,8 @@ def settle_shipment_chain(shipment_id: str) -> Optional[dict]:
                 method="settle_shipment",
                 args=[shipment_id],
                 sender=deployer.address,
+                box_references=navitrust_shipment_box_refs(shipment_id, include_supplier_rep=True),
+                extra_fee=AlgoAmount(micro_algo=4000),
             )
         )
         tx_id = result.tx_ids[0] if result.tx_ids else None
@@ -665,6 +750,13 @@ def global_stats_navitrust() -> dict:
     }
     if not APP_ID:
         return out
+    gs = get_display_global_state(APP_ID)
+    if gs and "total_shipments" in gs:
+        out["total_shipments"] = int(gs.get("total_shipments") or 0)
+        out["total_settled"] = int(gs.get("total_settled") or 0)
+        out["total_disputed"] = int(gs.get("total_disputed") or 0)
+        out["source"] = "algorand_global_state"
+        return out
     pairs = list_shipment_statuses_from_boxes()
     out["total_shipments"] = len(pairs)
     for _, st in pairs:
@@ -673,3 +765,34 @@ def global_stats_navitrust() -> dict:
         elif st == STATUS_DISPUTED:
             out["total_disputed"] += 1
     return out
+
+
+def read_supplier_reputation_on_chain(supplier_address: str) -> dict:
+    """Read supplier_reputation from rp_ + address box. score is null until a box exists (no fake defaults)."""
+    if not APP_ID or not use_navitrust():
+        return {
+            "address": supplier_address,
+            "score": None,
+            "source": "no_app",
+            "lora_url": "",
+        }
+    try:
+        name = _navi_rep_box_name(supplier_address)
+        box_resp = algorand.client.algod.application_box_by_name(APP_ID, name)
+        raw = base64.b64decode(box_resp["value"])
+        if len(raw) == 8:
+            score = int.from_bytes(raw, "big")
+            return {
+                "address": supplier_address,
+                "score": score,
+                "source": "algorand_box_storage",
+                "lora_url": f"{LORA_TESTNET_APP}/{APP_ID}",
+            }
+    except Exception:
+        pass
+    return {
+        "address": supplier_address,
+        "score": None,
+        "source": "no_box",
+        "lora_url": f"{LORA_TESTNET_APP}/{APP_ID}",
+    }

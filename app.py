@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 
 import requests
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -38,6 +38,7 @@ from models import (
     FundShipmentBuildBody,
     PredictDisputeBody,
     CustodyHandoffBody,
+    RegisterShipmentBody,
 )
 
 import custody_chain as navi_custody
@@ -1763,24 +1764,29 @@ def get_stats():
     }
 
 
-@app.post("/register-shipment")
-def register_shipment(
+def _register_shipment_core(
     shipment_id: str,
     origin: str,
     destination: str,
     supplier: str,
-    wallet_age_days: int = Query(default=30, ge=0, le=36500),
-    amount_algo: float = Query(default=1.0, ge=0.0, le=1e9),
-    delivery_days: int = Query(default=7, ge=1, le=365),
-    supplier_reputation: int = Query(default=50, ge=0, le=100),
-):
+    wallet_age_days: int = 30,
+    amount_algo: float = 1.0,
+    delivery_days: int = 7,
+    supplier_reputation: int = 50,
+) -> dict:
     """
-    On-board a new shipment via ATC.
-    Synchronizes DB and Algorand Testnet (NaviTrust register_shipment or legacy add_shipment).
-    Runs phantom-detector rules before persisting; blocked shipments return 403.
+    On-board a new shipment via ATC (DB row + on-chain register_shipment).
     """
-    if not DEPLOYER_MNEMONIC or not APP_ID:
-        raise HTTPException(status_code=500, detail="Missing oracle configuration (APP_ID / mnemonic).")
+    if not APP_ID:
+        raise HTTPException(
+            status_code=503,
+            detail="APP_ID is not configured. Set APP_ID in .env to your NaviTrust application id.",
+        )
+    if not chain.ORACLE_MNEMONIC:
+        raise HTTPException(
+            status_code=503,
+            detail="ORACLE_MNEMONIC (or DEPLOYER_MNEMONIC) is not set. The API must sign register_shipment with the deployer wallet.",
+        )
 
     shipment_data = {
         "origin": origin,
@@ -1822,11 +1828,19 @@ def register_shipment(
             pass
         raise HTTPException(status_code=403, detail={"fraud_report": fraud_report, "shipment_id": shipment_id})
 
+    row_existed = False
     with get_db() as conn:
-        conn.execute(
-            "INSERT INTO shipments (id, origin, destination, current_lat, current_lon, status) VALUES (?, ?, ?, ?, ?, ?)",
-            (shipment_id, origin, destination, 0.0, 0.0, STATUS_IN_TRANSIT),
-        )
+        row_existed = conn.execute("SELECT 1 FROM shipments WHERE id = ?", (shipment_id,)).fetchone() is not None
+        if row_existed:
+            conn.execute(
+                "UPDATE shipments SET origin = ?, destination = ?, status = ? WHERE id = ?",
+                (origin, destination, STATUS_IN_TRANSIT, shipment_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO shipments (id, origin, destination, current_lat, current_lon, status) VALUES (?, ?, ?, ?, ?, ?)",
+                (shipment_id, origin, destination, 0.0, 0.0, STATUS_IN_TRANSIT),
+            )
         conn.commit()
 
     if fraud_report.get("verdict") == "WARNING":
@@ -1861,13 +1875,53 @@ def register_shipment(
         }
     except Exception as e:
         logger.error("Registration failed: %s", e)
-        with get_db() as conn:
-            conn.execute("DELETE FROM shipments WHERE id = ?", (shipment_id,))
-            conn.commit()
+        if not row_existed:
+            with get_db() as conn:
+                conn.execute("DELETE FROM shipments WHERE id = ?", (shipment_id,))
+                conn.commit()
         raise HTTPException(
             status_code=502,
-            detail=f"On-chain registration failed (database row rolled back): {e!s}",
+            detail=f"On-chain registration failed: {e!s}. Check oracle balance, APP_ID, and contract method register_shipment.",
         ) from e
+
+
+@app.post("/register-shipment")
+def register_shipment(
+    body: Optional[RegisterShipmentBody] = Body(None),
+    shipment_id: Optional[str] = Query(None),
+    origin: Optional[str] = Query(None),
+    destination: Optional[str] = Query(None),
+    supplier: Optional[str] = Query(None),
+    wallet_age_days: int = Query(default=30, ge=0, le=36500),
+    amount_algo: float = Query(default=1.0, ge=0.0, le=1e9),
+    delivery_days: int = Query(default=7, ge=1, le=365),
+    supplier_reputation: int = Query(default=50, ge=0, le=100),
+):
+    """
+    Register a shipment on-chain + SQLite.
+
+    **Preferred:** JSON body `{"shipment_id","origin","destination","supplier_address"}`.
+
+    **Legacy:** query parameters `shipment_id`, `origin`, `destination`, `supplier`.
+    """
+    if body is not None:
+        sid = (body.shipment_id or "").strip()
+        org = (body.origin or "").strip()
+        dst = (body.destination or "").strip()
+        sup = (body.supplier_address or "").strip()
+    elif shipment_id and origin and destination and supplier:
+        sid = shipment_id.strip()
+        org = origin.strip()
+        dst = destination.strip()
+        sup = supplier.strip()
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="Send JSON: { shipment_id, origin, destination, supplier_address } or pass those four as query parameters.",
+        )
+    if not sid or not org or not dst or not sup:
+        raise HTTPException(status_code=422, detail="shipment_id, origin, destination, and supplier_address are required.")
+    return _register_shipment_core(sid, org, dst, sup, wallet_age_days, amount_algo, delivery_days, supplier_reputation)
 
 @app.get("/sync-ledger")
 def sync_ledger():
@@ -2327,8 +2381,8 @@ def _navibot_fallback_response(query: str) -> dict:
         )
     if any(w in q for w in ("reputation", "supplier", "score")):
         return _navibot_pack(
-            "Supplier reputation is stored on-chain (box storage). After the Delhi demo settlement the score is often around 55/100. "
-            "Switch to Supplier view to see the reputation card for your wallet.",
+            "Supplier reputation is stored on-chain in a box after settlements. New wallets have no box until a settlement updates it. "
+                    "Switch to Supplier view to see your live score when the chain has one.",
             None,
             None,
             True,
