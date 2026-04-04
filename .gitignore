@@ -1,6 +1,8 @@
 # 🚨 SECRETS & KEYS (CRITICAL) 🚨
 .env
 .env.*
+# Allow the tracked template (no real secrets in this file)
+!.env.example
 *.key
 *.pem
 *.mnemonic
