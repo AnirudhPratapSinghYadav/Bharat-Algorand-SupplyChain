@@ -1,26 +1,32 @@
 [
   {
-    "shipment_id": "SHIP_001",
+    "shipment_id": "PROD_001",
     "event": "GPS signal lost for 3 hours near Arabian Sea corridor",
     "severity": "high",
     "timestamp": "2026-03-02T06:30:00Z"
   },
   {
-    "shipment_id": "SHIP_001",
+    "shipment_id": "PROD_001",
     "event": "Carrier reported unexpected port congestion at Cochin Port",
     "severity": "medium",
     "timestamp": "2026-03-02T08:15:00Z"
   },
   {
-    "shipment_id": "SHIP_002",
+    "shipment_id": "PROD_002",
     "event": "Truck delayed 6 hours due to landslide on NH-766",
     "severity": "high",
     "timestamp": "2026-03-02T04:00:00Z"
   },
   {
-    "shipment_id": "SHIP_003",
-    "event": "Refrigeration unit temperature spike detected (+8°C above threshold)",
+    "shipment_id": "PROD_003",
+    "event": "Refrigeration unit temperature spike detected (+8\u00c2\u00b0C above threshold)",
     "severity": "high",
     "timestamp": "2026-03-02T02:45:00Z"
+  },
+  {
+    "shipment_id": "PROD_003",
+    "event": "GPS signal lost \u2014 carrier unreachable for 4+ hours",
+    "severity": "high",
+    "timestamp": "2026-03-03T02:06:23.616239+00:00"
   }
 ]

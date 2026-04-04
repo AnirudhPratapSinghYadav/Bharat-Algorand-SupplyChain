@@ -51,5 +51,44 @@
       "tx_id": "ABHCXGPW27YZMIYXKVV3IEOFH6WZXRKRDSEZLI7426J5H5677NYQ",
       "confirmed_round": 61050906
     }
+  ],
+  "DEMO_902": [
+    {
+      "timestamp": "2026-03-03T02:25:23.364196+00:00",
+      "sentinel_score": 20,
+      "auditor_status": "Unknown",
+      "verdict": "REJECTED",
+      "summary": "After reviewing the Sentry's risk score of 20/100 and the Auditor's on-chain status ('Unknown'), I find insufficient evidence to authorize settlement. The risk threshold has not been met.",
+      "reasoning_narrative": "On-chain finality: the Algorand record shows 'Unknown'. Geopolitical and operational risk: Sentry assessed 20/100. After reviewing the Sentry's risk score of 20/100 and the Auditor's on-chain status ('Unknown'), I find insufficient evidence to authorize settlement. The risk threshold has not been met.",
+      "mitigation_strategy": "",
+      "tx_id": null,
+      "confirmed_round": null
+    }
+  ],
+  "PROD_002": [
+    {
+      "timestamp": "2026-03-03T02:45:20.932551+00:00",
+      "sentinel_score": 20,
+      "auditor_status": "Unknown",
+      "verdict": "REJECTED",
+      "summary": "After reviewing the Sentry's risk score of 20/100 and the Auditor's on-chain status ('Unknown'), I find insufficient evidence to authorize settlement. The risk threshold has not been met.",
+      "reasoning_narrative": "On-chain finality: the Algorand record shows 'Unknown'. Geopolitical and operational risk: Sentry assessed 20/100. After reviewing the Sentry's risk score of 20/100 and the Auditor's on-chain status ('Unknown'), I find insufficient evidence to authorize settlement. The risk threshold has not been met.",
+      "mitigation_strategy": "",
+      "tx_id": null,
+      "confirmed_round": null
+    }
+  ],
+  "PROD_001": [
+    {
+      "timestamp": "2026-03-03T03:07:01.605771+00:00",
+      "sentinel_score": 20,
+      "auditor_status": "Unknown",
+      "verdict": "REJECTED",
+      "summary": "After reviewing the Sentry's risk score of 20/100 and the Auditor's on-chain status ('Unknown'), I find insufficient evidence to authorize settlement. The risk threshold has not been met.",
+      "reasoning_narrative": "On-chain finality: the Algorand record shows 'Unknown'. Geopolitical and operational risk: Sentry assessed 20/100. After reviewing the Sentry's risk score of 20/100 and the Auditor's on-chain status ('Unknown'), I find insufficient evidence to authorize settlement. The risk threshold has not been met.",
+      "mitigation_strategy": "",
+      "tx_id": null,
+      "confirmed_round": null
+    }
   ]
 }

@@ -70,7 +70,7 @@ Navi-Trust is an **Autonomous Agentic Commerce** platform that:
 ### DevOps / Scripts
 | Script | Purpose |
 |---|---|
-| `v2_testnet_deploy.py` | Deploys the smart contract to Algorand Testnet, writes `APP_ID` to `.env` |
+| `smart_contracts/navi_trust/smart_contracts/navi_trust/deploy_config.py` | Deploys the NaviTrust contract via AlgoKit typed factory (prints APP_ID; set `.env` manually) |
 | `seed_blockchain.py` | Funds contract MBR, registers shipments on-chain, optional `--reset` for demo re-runs |
 
 ---
@@ -84,12 +84,11 @@ algo-hack/
 ├── shipments.db                    # SQLite database (auto-created on startup)
 ├── offchain_events.json            # Persisted logistics events (supplier-injected)
 ├── audit_trail.json                # Persisted MAS verdict history
-├── v2_testnet_deploy.py            # Smart contract deployment script
 ├── seed_blockchain.py              # Blockchain seeding + off-chain reset script
 ├── artifacts/
-│   └── AgriSupplyChainEscrow.arc56.json  # ARC-56 app spec (ABI + TEAL)
+│   ├── NaviTrust.arc56.json         # ARC-56 app spec for current contract
+│   └── AgriSupplyChainEscrow.arc56.json  # Legacy ARC-56 spec kept for fallback/compat
 ├── frontend/
-│   ├── index.html                  # HTML entry point
 │   ├── package.json                # NPM dependencies
 │   ├── vite.config.ts              # Vite config (global polyfill, buffer alias)
 │   └── src/
@@ -306,10 +305,13 @@ When the Settlement Arbiter approves a trigger, the stakeholder can click "Trigg
 ### Phase 1: Setup
 ```bash
 # 1. Deploy smart contract (one-time)
-python v2_testnet_deploy.py
-# → Writes APP_ID to .env
+cd smart_contracts/navi_trust
+poetry install
+python -m smart_contracts deploy
+# → Prints APP_ID; set APP_ID in repo root .env
 
 # 2. Seed shipments on-chain
+cd ../..
 python seed_blockchain.py
 # → Funds contract MBR, registers SHIP_001/002/003 in Box Storage
 
@@ -348,10 +350,10 @@ python seed_blockchain.py --reset
 
 | Variable | Description | Example |
 |---|---|---|
-| `GEMINI_API_KEY` | Google Gemini API key | `AIzaSy...` |
+| `GEMINI_API_KEY` | Google Gemini API key | `your_key_here` |
 | `ALGOD_ADDRESS` | Algorand node URL | `https://testnet-api.algonode.cloud` |
 | `ALGOD_TOKEN` | Algorand node token (empty for Algonode) | `""` |
-| `DEPLOYER_MNEMONIC` | 25-word Algorand account mnemonic | `major inhale ...` |
+| `DEPLOYER_MNEMONIC` | 25-word Algorand account mnemonic | `(never commit; use .env only)` |
 | `APP_ID` | Deployed smart contract application ID | `756424573` |
 | `ALGO_NETWORK` | Network identifier | `testnet` |
 | `WEATHER_API_URL` | Open-Meteo base URL | `https://api.open-meteo.com/v1/forecast` |
@@ -469,8 +471,11 @@ npm run dev
 
 ### First-Time Blockchain Setup
 ```bash
-# Deploy contract (writes APP_ID to .env)
-python v2_testnet_deploy.py
+# Deploy contract (prints APP_ID; set in repo root .env)
+cd smart_contracts/navi_trust
+poetry install
+python -m smart_contracts deploy
+cd ../..
 
 # Seed shipments on-chain
 python seed_blockchain.py

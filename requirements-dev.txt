@@ -1,0 +1,4 @@
+# Local development: Algokit CLI + VibeKit (not required on minimal API hosting)
+-r requirements.txt
+algokit>=2.10.2
+vibekit>=0.1.0

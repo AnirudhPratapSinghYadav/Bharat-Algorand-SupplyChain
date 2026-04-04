@@ -1,0 +1,25 @@
+{
+  "description": "Navi-Trust repo anchor for agent/tooling. PyPI vibekit is a Python library (VibeKitClient); this file is the single local map of paths—no absolute paths from other machines.",
+  "repo_root": ".",
+  "backend": {
+    "fastapi": "app:app",
+    "module_file": "app.py"
+  },
+  "frontend": {
+    "directory": "frontend",
+    "package_manager": "npm"
+  },
+  "algokit": {
+    "config": "smart_contracts/navi_trust/.algokit.toml",
+    "project_directory": "smart_contracts/navi_trust",
+    "contract_source": "smart_contracts/navi_trust/smart_contracts/navi_trust/contract.py"
+  },
+  "chain_artifacts": {
+    "navitrust_arc56": "artifacts/NaviTrust.arc56.json",
+    "legacy_escrow_arc56": "artifacts/AgriSupplyChainEscrow.arc56.json"
+  },
+  "environment": {
+    "dotenv": ".env",
+    "frontend_dotenv": "frontend/.env"
+  }
+}

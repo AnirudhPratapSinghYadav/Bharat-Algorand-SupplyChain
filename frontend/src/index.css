@@ -46,7 +46,7 @@ body {
   padding: 24px 32px;
 }
 
-/* ── Cards ────────────────────────────────────────────── */
+/* â”€â”€ Cards â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
@@ -59,7 +59,7 @@ body {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
 }
 
-/* ── Grid ─────────────────────────────────────────────── */
+/* â”€â”€ Grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
@@ -78,7 +78,7 @@ body {
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
-/* ── Status Badges ────────────────────────────────────── */
+/* â”€â”€ Status Badges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .status-badge {
   padding: 4px 12px;
   border-radius: 20px;
@@ -92,7 +92,7 @@ body {
 .status-yellow { background: var(--warning-light); color: var(--warning); border: 1px solid #fde68a; }
 .status-red { background: var(--danger-light); color: var(--danger); border: 1px solid #fecaca; }
 
-/* ── Buttons ──────────────────────────────────────────── */
+/* â”€â”€ Buttons â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 button {
   border-radius: 6px;
   border: 1px solid var(--border-color);
@@ -129,7 +129,7 @@ button:disabled {
   background: var(--primary-hover);
 }
 
-/* ── Typography ───────────────────────────────────────── */
+/* â”€â”€ Typography â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 h1 { font-size: 1.5rem; line-height: 1.3; margin-bottom: 0.2em; font-weight: 700; color: var(--text-main); }
 h2 { font-size: 1.25rem; font-weight: 600; color: var(--text-main); }
 h3 { font-size: 1.1rem; font-weight: 600; color: var(--text-main); }
@@ -137,7 +137,7 @@ h4 { font-size: 0.95rem; font-weight: 600; }
 p { color: var(--text-muted); margin: 0; }
 a { color: var(--primary-accent); }
 
-/* ── Log Entries ──────────────────────────────────────── */
+/* â”€â”€ Log Entries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .log-entry {
   font-family: 'Courier New', Courier, monospace;
   font-size: 0.8rem;
@@ -148,10 +148,11 @@ a { color: var(--primary-accent); }
   color: var(--text-main);
 }
 
-/* ── Modal Backdrop ───────────────────────────────────── */
+/* â”€â”€ Modal Backdrop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 .modal-backdrop {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 9999;
   background: rgba(0, 0, 0, 0.4);
   display: flex;
   align-items: center;
@@ -162,7 +163,7 @@ a { color: var(--primary-accent); }
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
-/* ── Code / Mono ──────────────────────────────────────── */
+/* â”€â”€ Code / Mono â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 code {
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
   font-size: 0.85em;
@@ -172,7 +173,11 @@ code {
   color: var(--text-main);
 }
 
-/* ── Blinking dot animation ───────────────────────────── */
+/* â”€â”€ Blinking dot animation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
@@ -186,7 +191,7 @@ code {
   animation: blink 1.4s ease-in-out infinite;
 }
 
-/* ── Skeleton Shimmer ────────────────────────────────── */
+/* â”€â”€ Skeleton Shimmer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 @keyframes shimmer {
   0% { background-position: -400px 0; }
   100% { background-position: 400px 0; }
@@ -215,7 +220,7 @@ code {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
-/* ── On-Chain Alert: Glowing Red for Flagged Shipments ─── */
+/* â”€â”€ On-Chain Alert: Glowing Red for Flagged Shipments â”€â”€â”€ */
 @keyframes glow-red {
   0% { box-shadow: 0 0 5px #ef4444; border-color: #ef4444; }
   50% { box-shadow: 0 0 20px #ef4444; border-color: #f87171; }
@@ -226,7 +231,7 @@ code {
   border-width: 2px !important;
 }
 
-/* ── Live Logistics Ticker ─────────────────────────────────── */
+/* â”€â”€ Live Logistics Ticker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 @keyframes ticker-scroll {
   0% { transform: translateX(0); }
   100% { transform: translateX(-50%); }
@@ -255,3 +260,341 @@ code {
 .ticker-item.high { color: #fcd34d; }
 .ticker-item.medium { color: #93c5fd; }
 .ticker-item.low { color: #86efac; }
+
+@keyframes navibot-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.04); opacity: 0.92; }
+}
+
+@keyframes navibot-wave {
+  0%, 100% { transform: scaleY(0.5); opacity: 0.6; }
+  50% { transform: scaleY(1.2); opacity: 1; }
+}
+
+@keyframes nt-map-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.18); opacity: 0.88; }
+}
+
+
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+   Authenticated dashboard â€” dark â€œmission controlâ€ shell
+   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+
+.dashboard-shell {
+  min-height: 100vh;
+  padding-bottom: 120px;
+  background:
+    radial-gradient(ellipse 100% 80% at 50% -30%, rgba(99, 102, 241, 0.22), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 100% 50%, rgba(14, 165, 233, 0.08), transparent 45%),
+    linear-gradient(165deg, #070b14 0%, #0f172a 38%, #1a1030 72%, #0a0f1a 100%);
+  color: #cbd5e1;
+}
+
+.dashboard-shell .dashboard-container {
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 24px 28px 32px;
+}
+
+.dashboard-shell .dash-insights {
+  margin-top: 20px;
+  margin-bottom: 8px;
+}
+
+.dashboard-shell .dash-insights-heading {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(148, 163, 184, 0.85);
+  margin-bottom: 12px;
+}
+
+.dashboard-shell .dash-insights-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.dashboard-shell .dash-insight-card {
+  padding: 14px 16px !important;
+  background: rgba(15, 23, 42, 0.55) !important;
+  border-color: rgba(148, 163, 184, 0.15) !important;
+}
+
+.dashboard-shell .dash-insight-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(148, 163, 184, 0.9);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dashboard-shell .dash-insight-body {
+  font-size: 0.84rem;
+  color: #e2e8f0;
+  line-height: 1.45;
+}
+
+.dashboard-shell .dash-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: clamp(64px, 8vw, 96px);
+  padding-top: 20px;
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.dashboard-shell .dash-footer-brand {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: rgba(248, 250, 252, 0.55);
+}
+
+.dashboard-shell .dash-footer-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+
+.dashboard-shell .dash-footer-nav a {
+  font-size: 0.8rem;
+  color: rgba(148, 163, 184, 0.75);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.dashboard-shell .dash-footer-nav a:hover {
+  color: rgba(186, 230, 253, 0.95);
+}
+
+.dashboard-shell .dash-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18) !important;
+}
+
+.dashboard-shell .dash-brand-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.2), rgba(129, 140, 248, 0.2));
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dashboard-shell .dash-title {
+  margin: 0;
+  font-size: 1.28rem;
+  font-weight: 800;
+  color: #f8fafc;
+  letter-spacing: -0.02em;
+}
+
+.dashboard-shell .dash-app-meta {
+  font-size: 0.7rem;
+  color: #94a3b8;
+}
+
+.dashboard-shell .dash-role-toggle {
+  display: flex;
+  background: rgba(15, 23, 42, 0.85);
+  border-radius: 10px;
+  padding: 3px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.dashboard-shell .dash-role-btn {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-family: inherit;
+  background: transparent;
+  color: #94a3b8;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.dashboard-shell .dash-role-btn--stakeholder-active {
+  background: linear-gradient(135deg, #2563eb, #4f46e5);
+  color: #fff;
+}
+
+.dashboard-shell .dash-role-btn--supplier-active {
+  background: linear-gradient(135deg, #d97706, #ea580c);
+  color: #fff;
+}
+
+.dashboard-shell .dash-wallet-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px 4px 4px;
+  background: rgba(30, 41, 59, 0.9);
+  border-radius: 9999px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+}
+
+.dashboard-shell .dash-wallet-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.35), rgba(167, 139, 250, 0.35));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.dashboard-shell .dash-wallet-addr {
+  font-size: 0.78rem;
+  color: #e2e8f0;
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  font-weight: 500;
+}
+
+.dashboard-shell .dash-disconnect {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  border-radius: 9999px;
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  color: #94a3b8;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.dashboard-shell .dash-disconnect:hover {
+  background: rgba(127, 29, 29, 0.35);
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.dashboard-shell .dash-nav {
+  display: flex;
+  gap: 20px;
+  padding: 6px 0 14px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.dashboard-shell .dash-nav a {
+  color: #7dd3fc;
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+.dashboard-shell .dash-nav a:hover {
+  color: #e0f2fe;
+}
+
+.dashboard-shell .dash-subtitle {
+  text-align: left;
+  margin-top: 12px;
+  margin-bottom: 0;
+  font-size: 0.875rem;
+  color: #94a3b8;
+}
+
+.dashboard-shell .card {
+  background: linear-gradient(155deg, rgba(30, 41, 59, 0.92), rgba(15, 23, 42, 0.96)) !important;
+  border: 1px solid rgba(148, 163, 184, 0.16) !important;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.04) !important;
+  color: #e2e8f0;
+}
+
+.dashboard-shell .card:hover {
+  box-shadow: 0 16px 48px rgba(56, 189, 248, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
+}
+
+.dashboard-shell .dash-kpi-num {
+  color: #f1f5f9 !important;
+}
+
+.dashboard-shell .dash-kpi-label {
+  color: #94a3b8 !important;
+}
+
+.dashboard-shell .dash-chart-title {
+  color: #f1f5f9 !important;
+}
+
+.dashboard-shell .skeleton-card {
+  background: rgba(30, 41, 59, 0.6) !important;
+  border-color: rgba(148, 163, 184, 0.12) !important;
+}
+
+.dashboard-shell .skeleton {
+  background: linear-gradient(90deg, rgba(51, 65, 85, 0.4) 25%, rgba(71, 85, 105, 0.5) 50%, rgba(51, 65, 85, 0.4) 75%) !important;
+  background-size: 800px 100% !important;
+}
+
+.dashboard-shell .ticker-wrap {
+  background: rgba(15, 23, 42, 0.55) !important;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 12px;
+  padding: 10px 14px;
+}
+
+.dashboard-shell h1,
+.dashboard-shell h2,
+.dashboard-shell h3 {
+  color: #f1f5f9;
+}
+
+.dashboard-shell code {
+  background: rgba(15, 23, 42, 0.9);
+  color: #bae6fd;
+  border: 1px solid rgba(56, 189, 248, 0.15);
+}
+
+.dashboard-shell .primary-btn {
+  background: linear-gradient(135deg, #0ea5e9, #2563eb);
+  border: none;
+  color: #fff;
+}
+
+.dashboard-shell .primary-btn:hover {
+  filter: brightness(1.08);
+}
+
+.dashboard-shell .dash-tx-banner {
+  border: 1px solid rgba(52, 211, 153, 0.35) !important;
+  background: rgba(6, 78, 59, 0.35) !important;
+}
+
+.dashboard-shell .dash-tx-banner,
+.dashboard-shell .dash-tx-banner span {
+  color: #6ee7b7 !important;
+}
+
+.dashboard-shell .dash-tx-banner a {
+  color: #7dd3fc !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker-content {
+    animation: none !important;
+  }
+}

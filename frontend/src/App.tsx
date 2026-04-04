@@ -18,6 +18,11 @@ import NaviBotPage from './pages/NaviBotPage';
 import { NaviBotPanel } from './components/NaviBotPanel';
 import { LandingPage } from './components/landing/LandingPage';
 import { ChainVerificationHub } from './components/verification/ChainVerificationHub';
+import { WitnessPanel } from './components/WitnessPanel';
+import { RiskPrediction } from './components/RiskPrediction';
+import { WeatherCourt } from './components/WeatherCourt';
+import { CustodyChain } from './components/CustodyChain';
+import { OracleStake } from './components/OracleStake';
 
 const peraWallet = new PeraWalletConnect({ chainId: 416002 });
 
@@ -121,6 +126,25 @@ function MainApp() {
     const [confirmingTxLabel, setConfirmingTxLabel] = useState<string | null>(null);
     const [lastConfirmedTx, setLastConfirmedTx] = useState<ConfirmedActivity | null>(null);
     const [activityFeed, setActivityFeed] = useState<ConfirmedActivity[]>([]);
+    const [oracleAddress, setOracleAddress] = useState<string | null>(null);
+    const [chainHealth, setChainHealth] = useState(false);
+
+    /* ── Backend / algod health (dashboard navbar) ───────────── */
+    useEffect(() => {
+        if (!accountAddress) return;
+        const check = async () => {
+            try {
+                const r = await fetch(`${BACKEND_URL}/health`);
+                const d = (await r.json()) as { algod_ok?: boolean };
+                setChainHealth(d.algod_ok === true);
+            } catch {
+                setChainHealth(false);
+            }
+        };
+        void check();
+        const interval = window.setInterval(() => void check(), 30000);
+        return () => window.clearInterval(interval);
+    }, [accountAddress]);
 
     /* ── Wallet reconnect on mount ─────────────────────────── */
     useEffect(() => {
@@ -244,7 +268,10 @@ function MainApp() {
                 const bootRes = await axios.get(`${BACKEND_URL}/bootstrap`, opts).catch(() => null);
                 if (bootRes?.data) {
                     const d = bootRes.data;
-                    if (d.config) setAppId(d.config.app_id);
+                    if (d.config) {
+                        setAppId(d.config.app_id);
+                        setOracleAddress(d.config.oracle_address ?? null);
+                    }
                     if (d.stats) setStats(d.stats);
                     if (Array.isArray(d.shipments) && d.shipments.length > 0) {
                         setShipments(sortShipmentsStable(d.shipments));
@@ -274,7 +301,10 @@ function MainApp() {
                         axios.get(`${BACKEND_URL}/shipments`, opts),
                         axios.get(`${BACKEND_URL}/risk-history`, opts),
                     ]);
-                    if (configRes.status === 'fulfilled') setAppId(configRes.value.data.app_id);
+                    if (configRes.status === 'fulfilled') {
+                        setAppId(configRes.value.data.app_id);
+                        setOracleAddress(configRes.value.data.oracle_address ?? null);
+                    }
                     if (statsRes.status === 'fulfilled') setStats(statsRes.value.data);
                     if (shipmentsRes.status === 'fulfilled') {
                         const raw = shipmentsRes.value.data;
@@ -579,10 +609,11 @@ function MainApp() {
         }
         setIsPaying(shipmentId);
         try {
+            setToast('Confirm escrow in Pera Wallet…');
             const res = await axios.post(`${BACKEND_URL}/fund-shipment/build`, {
                 shipment_id: shipmentId,
-                payer_address: accountAddress,
-                micro_algo: 500_000,
+                buyer_address: accountAddress,
+                amount_algo: 0.5,
             });
             const txnsB64: string[] = res.data.txns_b64;
             const txns = txnsB64.map((b64) => {
@@ -712,6 +743,13 @@ function MainApp() {
                     <div>
                         <h1 className="dash-title">Navi-Trust</h1>
                         {appId && <span className="dash-app-meta">APP_ID: {appId} &middot; Algorand Testnet</span>}
+                        <div style={{ marginTop: 4, fontSize: '0.75rem', fontWeight: 600 }}>
+                            {chainHealth ? (
+                                <span style={{ color: '#34d399' }}>● Algorand Testnet</span>
+                            ) : (
+                                <span style={{ color: '#fbbf24' }}>● Connecting…</span>
+                            )}
+                        </div>
                     </div>
                 </div>
 
@@ -1060,6 +1098,9 @@ function MainApp() {
                     )}
                 </div>
             )}
+
+            {role === 'supplier' && !isLoading && <RiskPrediction />}
+            {!isLoading && <OracleStake />}
 
             {!isLoading && (
                 <section className="dash-insights" aria-label="Recent activity">
@@ -1469,6 +1510,18 @@ function MainApp() {
                                     </div>
                                 )}
                             </div>
+
+                            <WitnessPanel shipmentId={ship.shipment_id} oracleAddress={oracleAddress} />
+                            {role === 'stakeholder' && (
+                                <WeatherCourt shipmentId={ship.shipment_id} destinationLabel={ship.destination || ''} />
+                            )}
+                            {role === 'supplier' && (
+                                <CustodyChain
+                                    shipmentId={ship.shipment_id}
+                                    walletAddress={accountAddress}
+                                    canAdd={Boolean(accountAddress)}
+                                />
+                            )}
 
                             {/* Jury reasoning preview — Stakeholder only */}
                             {role === 'stakeholder' && jury && (

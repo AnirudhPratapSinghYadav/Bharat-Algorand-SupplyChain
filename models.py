@@ -2,7 +2,7 @@
 
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class WeatherData(BaseModel):
@@ -54,9 +54,44 @@ class SettleBody(BaseModel):
 
 
 class FundShipmentBuildBody(BaseModel):
+    """Build unsigned pay + fund_shipment group. Prefer buyer_address + amount_algo (ALGO)."""
+
     shipment_id: str
-    payer_address: str
-    micro_algo: int = Field(default=500_000, ge=500_000, le=20_000_000)
+    buyer_address: str = ""
+    payer_address: str = ""
+    amount_algo: float | None = Field(default=None, gt=0, le=20.0)
+    micro_algo: int | None = Field(default=None, ge=500_000, le=20_000_000)
+
+    @model_validator(mode="after")
+    def _wallet_present(self):
+        if not (self.buyer_address or self.payer_address).strip():
+            raise ValueError("buyer_address or payer_address is required")
+        return self
+
+    def resolved_payer(self) -> str:
+        return (self.buyer_address or self.payer_address).strip()
+
+    def resolved_micro(self) -> int:
+        if self.micro_algo is not None:
+            return int(self.micro_algo)
+        algo = self.amount_algo if self.amount_algo is not None else 0.5
+        return max(500_000, int(round(float(algo) * 1_000_000)))
+
+
+class PredictDisputeBody(BaseModel):
+    supplier_reputation: int = 50
+    route_risk: int = 30
+    destination_city: str = "Dubai"
+    amount_algo: float = 1.0
+    shipment_id: str | None = None
+
+
+class CustodyHandoffBody(BaseModel):
+    shipment_id: str
+    handler_address: str
+    location: str
+    handler_name: str
+    photo_hash: str = ""
 
 
 class NavibotRequest(BaseModel):

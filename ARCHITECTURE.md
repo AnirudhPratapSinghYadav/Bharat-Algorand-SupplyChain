@@ -124,12 +124,11 @@
 
 | File | Purpose |
 |---|---|
-| `agri_escrow.py` | Algorand Python (Puya/algopy) smart contract source |
-| `v2_testnet_deploy.py` | One-time deployment script → creates APP_ID, writes to .env |
-| `seed_blockchain.py` | Funds MBR + registers shipments in Box Storage |
-| `artifacts/AgriSupplyChainEscrow.arc56.json` | Compiled ARC-56 app spec (ABI, state schema, TEAL) |
-| `artifacts/AgriSupplyChainEscrow.approval.teal` | Compiled approval program |
-| `artifacts/AgriSupplyChainEscrow.clear.teal` | Compiled clear-state program |
+| `smart_contracts/navi_trust/smart_contracts/navi_trust/contract.py` | NaviTrust smart contract source (Algorand Python / Puya) |
+| `smart_contracts/navi_trust/smart_contracts/navi_trust/deploy_config.py` | Deployment entrypoint (AlgoKit typed factory deploy) |
+| `seed_blockchain.py` | Funds MBR + registers SHIP_* shipments (idempotent) |
+| `artifacts/NaviTrust.arc56.json` | Committed ARC-56 app spec used by backend |
+| `artifacts/AgriSupplyChainEscrow.arc56.json` | Legacy ARC-56 spec kept for fallback/compat |
 
 ---
 
@@ -205,16 +204,16 @@ This dual decode handles both raw UTF-8 and potential ARC-4 length-prefixed stri
 
 ## 5. Smart Contract Specification
 
-### 5.1 Source Code (`agri_escrow.py`)
+### 5.1 Source Code (`smart_contracts/navi_trust/smart_contracts/navi_trust/contract.py`)
 
-Written in **Algorand Python (Puya)** using the `algopy` framework. Compiles to TEAL v11.
+Written in **Algorand Python (Puya)** using the `algopy` framework. Compiles to TEAL via AlgoKit.
 
 ```python
-class AgriSupplyChainEscrow(ARC4Contract):
-    def __init__(self):
-        self.shipments = BoxMap(String, String, key_prefix="shipment_")
-        self.shipment_buyers = BoxMap(String, Account, key_prefix="buyer_")
-        self.shipment_funds = BoxMap(String, UInt64, key_prefix="funds_")
+class NaviTrust(ARC4Contract):
+    def __init__(self) -> None:
+        self.shipment_status = BoxMap(String, String, key_prefix="st_")
+        self.shipment_supplier = BoxMap(String, Account, key_prefix="sp_")
+        self.shipment_funds = BoxMap(String, UInt64, key_prefix="fn_")
 ```
 
 ### 5.2 ABI Methods
@@ -841,7 +840,7 @@ Frontend                          Pera Wallet              Algorand Testnet
 
 | Action | Who Can Do It | Enforcement |
 |---|---|---|
-| Deploy contract | Deployer (mnemonic holder) | `v2_testnet_deploy.py` |
+| Deploy contract | Deployer (mnemonic holder) | `smart_contracts/navi_trust/smart_contracts/navi_trust/deploy_config.py` (AlgoKit typed factory deploy) |
 | Add shipment | Deployer | `seed_blockchain.py` (no on-chain assert, but convention) |
 | Fund escrow | Anyone (buyer) | Contract validates payment receiver |
 | Report disaster | Creator only | `assert Txn.sender == Global.creator_address` |
@@ -858,12 +857,12 @@ Frontend                          Pera Wallet              Algorand Testnet
 ```
 Step 1: Deploy Contract
 ─────────────────────────
-$ python v2_testnet_deploy.py
-  → Loads DEPLOYER_MNEMONIC from .env
-  → Connects to Algorand Testnet via AlgoNode
-  → Loads ARC-56 app spec from artifacts/
-  → factory.deploy() → creates APP_ID
-  → Writes APP_ID to .env
+$ cd smart_contracts/navi_trust
+$ poetry install
+$ python -m smart_contracts deploy
+  → Loads DEPLOYER_MNEMONIC / DEPLOYER from .env (AlgoKit conventions)
+  → Deploys via typed factory
+  → Prints deployed APP_ID (set APP_ID in your repo root .env manually)
 
 Step 2: Seed Blockchain
 ─────────────────────────
@@ -871,8 +870,8 @@ $ python seed_blockchain.py
   → Loads DEPLOYER_MNEMONIC + APP_ID from .env
   → Checks deployer balance + contract balance
   → Funds contract MBR if < 0.5 ALGO
-  → Calls add_shipment("SHIP_001"), add_shipment("SHIP_002"), add_shipment("SHIP_003")
-  → Verifies via get_shipment_status() for each
+  → Calls register_shipment("SHIP_001" ...), register_shipment("SHIP_002" ...), register_shipment("SHIP_003" ...)
+  → Verifies via box reads for each
 
 Step 3: Start Backend
 ─────────────────────────
@@ -892,7 +891,7 @@ $ cd frontend && npm run dev
 ```
 .env (DEPLOYER_MNEMONIC, GEMINI_API_KEY)
   │
-  ├──► v2_testnet_deploy.py → APP_ID written to .env
+  ├──► smart_contracts/navi_trust deploy → prints APP_ID (set in .env)
   │         │
   │         ▼
   ├──► seed_blockchain.py → Boxes created on-chain
@@ -1110,10 +1109,10 @@ JURY_CACHE: dict[str, dict] = {}  # key: shipment_id → full jury payload
 
 | Variable | Example | Required | Used By |
 |---|---|---|---|
-| `GEMINI_API_KEY` | `AIzaSy...` | Yes | `SentinelAgent`, `ChiefJusticeAgent` |
+| `GEMINI_API_KEY` | `your_key_here` | Yes | `SentinelAgent`, `ChiefJusticeAgent` |
 | `APP_ID` | `756424573` | Yes | `AuditorAgent`, frontend ABI calls, all endpoints |
 | `ALGO_NETWORK` | `testnet` | Yes | `AlgorandClient` initialization |
-| `DEPLOYER_MNEMONIC` | `major inhale ...` | Yes (scripts only) | `v2_testnet_deploy.py`, `seed_blockchain.py` |
+| `DEPLOYER_MNEMONIC` | `(never commit; use .env only)` | Yes (scripts only) | `seed_blockchain.py` |
 | `ALGOD_ADDRESS` | `https://testnet-api.algonode.cloud` | No (default in SDK) | Reference |
 | `ALGOD_TOKEN` | `""` | No | AlgoNode requires no token |
 | `WEATHER_API_URL` | `https://api.open-meteo.com/v1/forecast` | No | Reference (hardcoded in app.py) |
@@ -1164,7 +1163,7 @@ JURY_CACHE: dict[str, dict] = {}  # key: shipment_id → full jury payload
 | **ARC-4** | ABI for Algorand smart contracts | All 5 methods use ABI encoding. Frontend uses `algosdk.ABIMethod` |
 | **ARC-22** | Conventions for application state | Box storage with defined key prefixes |
 | **ARC-28** | Event emission | `log_alert` emits `Alert(string)` event |
-| **ARC-56** | Extended app spec | `AgriSupplyChainEscrow.arc56.json` — includes ABI, state maps, source, error messages |
+| **ARC-56** | Extended app spec | `NaviTrust.arc56.json` — includes ABI, state maps, source, error messages |
 
 ## Appendix D: Running in Production
 
@@ -1176,7 +1175,10 @@ export ALGO_NETWORK="testnet"
 export DEPLOYER_MNEMONIC="..."
 
 # 2. Deploy (one-time)
-python v2_testnet_deploy.py
+cd smart_contracts/navi_trust
+poetry install
+python -m smart_contracts deploy
+cd ../..
 
 # 3. Seed (one-time)
 python seed_blockchain.py
@@ -1187,6 +1189,6 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 
 # 5. Frontend
 cd frontend
-npm install --legacy-peer-deps
+npm install
 npm run dev   # → http://localhost:5173
 ```

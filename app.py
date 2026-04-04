@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 
 import requests
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -36,7 +36,19 @@ from models import (
     SettleBody,
     NavibotRequest,
     FundShipmentBuildBody,
+    PredictDisputeBody,
+    CustodyHandoffBody,
 )
+
+import custody_chain as navi_custody
+import dead_reckoning as navi_ml
+import fraud_detector
+import navitrust_demos
+import oracle_stake
+import weather_oracle as navi_weather_oracle
+import witness_protocol as navi_witness
+from navitrust_io import load_json as navi_load_json
+from navitrust_io import save_json as navi_save_json
 
 APP_ID = chain.APP_ID
 algorand = chain.algorand
@@ -57,19 +69,27 @@ if _CORS_EXTRA:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    try:
+        chain.verify_oracle_setup()
+    except RuntimeError as e:
+        logger.error("%s", e)
+        raise
     load_logistics_events()
     load_verdict_history()
     for _ in range(6):
         generate_random_logistics_event()
     bg_task = asyncio.create_task(_live_feed_background_task())
+    weather_task = asyncio.create_task(_weather_oracle_background())
     try:
         yield
     finally:
         bg_task.cancel()
-        try:
-            await bg_task
-        except asyncio.CancelledError:
-            pass
+        weather_task.cancel()
+        for t in (bg_task, weather_task):
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="Navi-Trust Oracle API", lifespan=lifespan)
@@ -375,6 +395,67 @@ async def _live_feed_background_task():
         await asyncio.sleep(3)
         # Global Event Engine logic could go here
         generate_random_logistics_event()
+
+
+async def _weather_oracle_background():
+    """Hourly Open-Meteo → Algorand oracle notes (best-effort)."""
+    await asyncio.sleep(20)
+    while True:
+        try:
+            if chain.ORACLE_MNEMONIC:
+                await asyncio.to_thread(navi_weather_oracle.write_weather_oracle_tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("weather oracle background: %s", e)
+        await asyncio.sleep(3600)
+
+
+REGISTER_LOG_PATH = "shipment_register_log.json"
+FRAUD_SCORES_PATH = "fraud_scores.json"
+
+
+def _register_history_for_fraud() -> list[dict]:
+    log = navi_load_json(REGISTER_LOG_PATH, [])
+    if not isinstance(log, list):
+        return []
+    now = datetime.now(timezone.utc)
+    out: list[dict] = []
+    for e in log:
+        if not isinstance(e, dict):
+            continue
+        try:
+            ts = datetime.fromisoformat(str(e.get("ts", "")).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            days_ago = (now - ts).total_seconds() / 86400.0
+        except Exception:
+            days_ago = 999.0
+        out.append({**e, "days_ago": days_ago})
+    return out
+
+
+def _append_register_log(entry: dict) -> None:
+    log = navi_load_json(REGISTER_LOG_PATH, [])
+    if not isinstance(log, list):
+        log = []
+    log.append(entry)
+    navi_save_json(REGISTER_LOG_PATH, log[-2000:])
+
+
+def get_shipment_from_chain(shipment_id: str) -> dict:
+    oc = chain.read_shipment_full(shipment_id) if APP_ID else {}
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
+    rowd = dict(row) if row else {}
+    return {
+        "shipment_id": shipment_id,
+        "origin": rowd.get("origin") or "",
+        "destination": rowd.get("destination") or "",
+        "status": oc.get("status") if isinstance(oc, dict) else "",
+        "risk_score": int(oc.get("risk_score") or 0) if isinstance(oc, dict) else 0,
+        "verdict_json": oc.get("verdict") if isinstance(oc, dict) else None,
+    }
 
 def _generate_reasoning_hash(text: str) -> str:
     """SHA-256 hash of AI reasoning narrative for on-chain integrity."""
@@ -1113,6 +1194,7 @@ def _shipment_row_for_ui(sid: str, chain_status: str, db_row) -> dict:
         "last_jury": lj,
         "supplier_address": _read_supplier_address(sid),
         "on_chain": full,
+        "source": full.get("source") or ("algorand_box_storage" if chain.use_navitrust() and APP_ID else "mixed"),
         "lora_app_url": full.get("lora_url") or (f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else ""),
     }
 
@@ -1269,6 +1351,12 @@ def run_jury(req: RunJuryRequest):
     save_verdict_history()
 
     chief_justice_out = {**judgment, "judgment": j_judgment, "reasoning_narrative": j_reasoning}
+    stake_info = None
+    try:
+        stake_info = oracle_stake.place_oracle_stake(req.shipment_id, verdict["verdict"])
+    except Exception as e:
+        logger.warning("oracle stake skipped: %s", e)
+
     payload = {
         "shipment_id": req.shipment_id,
         "origin": row["origin"],
@@ -1283,6 +1371,8 @@ def run_jury(req: RunJuryRequest):
         "on_chain_tx_id": on_chain_tx_id,
         "confirmed_round": confirmed_round,
         "explorer_url": f"{LORA_TESTNET_TX}/{on_chain_tx_id}" if on_chain_tx_id else None,
+        "oracle_stake": stake_info,
+        "stake_tx_id": (stake_info or {}).get("tx_id"),
     }
     JURY_CACHE[req.shipment_id] = payload
     return payload
@@ -1442,13 +1532,63 @@ def get_stats():
 
 
 @app.post("/register-shipment")
-def register_shipment(shipment_id: str, origin: str, destination: str, supplier: str):
+def register_shipment(
+    shipment_id: str,
+    origin: str,
+    destination: str,
+    supplier: str,
+    wallet_age_days: int = Query(default=30, ge=0, le=36500),
+    amount_algo: float = Query(default=1.0, ge=0.0, le=1e9),
+    delivery_days: int = Query(default=7, ge=1, le=365),
+    supplier_reputation: int = Query(default=50, ge=0, le=100),
+):
     """
     On-board a new shipment via ATC.
     Synchronizes DB and Algorand Testnet (NaviTrust register_shipment or legacy add_shipment).
+    Runs phantom-detector rules before persisting; blocked shipments return 403.
     """
     if not DEPLOYER_MNEMONIC or not APP_ID:
         raise HTTPException(status_code=500, detail="Missing oracle configuration (APP_ID / mnemonic).")
+
+    shipment_data = {
+        "origin": origin,
+        "destination": destination,
+        "supplier": supplier,
+        "wallet_age_days": wallet_age_days,
+        "amount_algo": amount_algo,
+        "delivery_days": delivery_days,
+        "supplier_reputation": supplier_reputation,
+    }
+    fraud_report = fraud_detector.detect_fraud(shipment_data, _register_history_for_fraud())
+    fraud_note = json.dumps(
+        {
+            "type": "NAVI_FRAUD_CHECK",
+            "shipment_id": shipment_id,
+            "fraud_probability": fraud_report["fraud_probability"],
+            "verdict": fraud_report["verdict"],
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    try:
+        chain.send_oracle_zero_note(fraud_note[:2000])
+    except Exception:
+        pass
+
+    if fraud_report.get("blocked"):
+        try:
+            chain.send_oracle_zero_note(
+                json.dumps(
+                    {
+                        "type": "NAVI_FRAUD_BLOCK",
+                        "shipment_id": shipment_id,
+                        "fraud_probability": fraud_report["fraud_probability"],
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=403, detail={"fraud_report": fraud_report, "shipment_id": shipment_id})
 
     with get_db() as conn:
         conn.execute(
@@ -1457,18 +1597,35 @@ def register_shipment(shipment_id: str, origin: str, destination: str, supplier:
         )
         conn.commit()
 
+    if fraud_report.get("verdict") == "WARNING":
+        fs = navi_load_json(FRAUD_SCORES_PATH, {})
+        if not isinstance(fs, dict):
+            fs = {}
+        fs[shipment_id] = fraud_report
+        navi_save_json(FRAUD_SCORES_PATH, fs)
+
     try:
         if chain.use_navitrust():
             route = f"{origin} → {destination}"
             r = chain.register_navitrust(shipment_id, supplier, route)
         else:
             r = chain.register_legacy(shipment_id, supplier)
+        _append_register_log(
+            {
+                "shipment_id": shipment_id,
+                "origin": origin,
+                "destination": destination,
+                "supplier": supplier,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         return {
             "status": "Registered",
             "tx_id": r.get("tx_id"),
             "app_id": r.get("app_id"),
             "lora_url": r.get("lora_url"),
             "lora_tx_url": r.get("lora_tx_url") or chain.lora_tx_url(r.get("tx_id")),
+            "fraud_report": fraud_report,
         }
     except Exception as e:
         logger.error("Registration failed: %s", e)
@@ -1509,6 +1666,7 @@ async def bootstrap():
         "network": ALGO_NETWORK,
         "shipments": ids,
         "lora_application_url": f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else "",
+        "oracle_address": chain.oracle_address_string(),
     }
     total_v = sum(len(v) for v in AUDIT_TRAIL.values())
     total_a = sum(1 for vs in AUDIT_TRAIL.values() for v in vs if v.get("verdict") == "APPROVED")
@@ -1537,11 +1695,18 @@ async def bootstrap():
 
 @app.get("/health")
 def health():
+    algod_ok = False
+    try:
+        chain.algorand.client.algod.status()
+        algod_ok = True
+    except Exception:
+        algod_ok = False
     return {
         "status": "ok",
         "app_id": APP_ID,
         "network": ALGO_NETWORK,
         "navitrust": chain.use_navitrust(),
+        "algod_ok": algod_ok,
     }
 
 
@@ -1578,7 +1743,9 @@ def fund_shipment_build(body: FundShipmentBuildBody):
     if st in ("Unregistered", "Unknown"):
         raise HTTPException(status_code=400, detail="Shipment is not registered on-chain.")
     try:
-        txns = chain.build_fund_shipment_txns_b64(body.payer_address, body.shipment_id, body.micro_algo)
+        payer = body.resolved_payer()
+        micro = body.resolved_micro()
+        txns = chain.build_fund_shipment_txns_b64(payer, body.shipment_id, micro)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
@@ -1587,7 +1754,8 @@ def fund_shipment_build(body: FundShipmentBuildBody):
     return {
         "txns_b64": txns,
         "shipment_id": body.shipment_id,
-        "micro_algo": body.micro_algo,
+        "micro_algo": micro,
+        "amount_algo": micro / 1_000_000.0,
         "receiver": get_application_address(APP_ID),
     }
 
@@ -1961,6 +2129,177 @@ async def navibot_chat(req: NavibotRequest, request: Request):
         return JSONResponse(content=_navibot_pack(soft, None, None, True))
 
 
+@app.post("/witness/record/{shipment_id}")
+async def witness_record_sensor(shipment_id: str):
+    out = await asyncio.to_thread(navi_witness.write_sensor_to_chain, shipment_id, None)
+    tx_id = out.get("tx_id")
+    return {
+        "tx_id": tx_id,
+        "lora_url": out.get("lora_url") or (f"{LORA_TESTNET_TX}/{tx_id}" if tx_id else ""),
+        "message": "Sensor reading written to Algorand",
+        "reading": out.get("reading"),
+    }
+
+
+@app.get("/witness/history/{shipment_id}")
+def witness_sensor_history(shipment_id: str):
+    log = navi_load_json(navi_witness.SENSOR_LOG, [])
+    slist = log if isinstance(log, list) else []
+    shipment_log = [r for r in slist if r.get("shipment_id") == shipment_id]
+    anomaly = navi_witness.detect_sensor_anomaly(shipment_log)
+    return {
+        "shipment_id": shipment_id,
+        "readings": shipment_log[-50:],
+        "anomaly_check": anomaly,
+        "total_readings": len(shipment_log),
+        "blockchain_proofs": [r.get("lora_url") for r in shipment_log if r.get("lora_url")],
+    }
+
+
+@app.post("/predict/dispute-risk")
+def predict_dispute_risk(body: PredictDisputeBody):
+    result = navi_ml.predict_dispute_probability(
+        supplier_reputation=body.supplier_reputation,
+        route_risk=body.route_risk,
+        destination_city=body.destination_city,
+        amount_algo=body.amount_algo,
+    )
+    note = json.dumps(
+        {
+            "type": "NAVI_PREDICTION",
+            "shipment_id": body.shipment_id,
+            "dispute_probability": result["dispute_probability_pct"],
+            "risk_level": result["risk_level"],
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    tx = chain.send_oracle_zero_note(note)
+    result["prediction_chain"] = tx
+    result["lora_prediction_url"] = (tx or {}).get("lora_url")
+    return result
+
+
+@app.get("/weather-oracle/latest")
+def weather_oracle_latest():
+    by_city = navi_weather_oracle.latest_by_city()
+    tick_ran = False
+    if not by_city and chain.ORACLE_MNEMONIC:
+        try:
+            navi_weather_oracle.write_weather_oracle_tick()
+            by_city = navi_weather_oracle.latest_by_city()
+            tick_ran = True
+        except Exception as e:
+            logger.warning("weather-oracle/latest seed tick: %s", e)
+    return {"cities": by_city, "tick_seeded": tick_ran}
+
+
+@app.get("/weather-oracle/history/{city}")
+def weather_oracle_history(city: str, hours: int = 72):
+    h = max(1, min(hours, 168))
+    return {"city": city, "hours": h, "readings": navi_weather_oracle.history_city(city, hours=h)}
+
+
+@app.get("/weather-oracle/dispute-evidence/{shipment_id}")
+def weather_oracle_dispute_evidence(shipment_id: str, hours: int = 72):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
+    dest_city = "Dubai"
+    if row and row["destination"]:
+        dest_city = str(row["destination"]).split(",")[0].strip() or dest_city
+    ev = navi_weather_oracle.dispute_evidence_for_shipment(dest_city, shipment_id, hours=hours)
+    return ev
+
+
+@app.post("/custody/handoff")
+def custody_handoff(body: CustodyHandoffBody):
+    prev = 0
+    chain_so_far = navi_custody.get_chain(body.shipment_id)
+    if chain_so_far:
+        prev = int(chain_so_far[-1].get("asa_id") or 0)
+    return navi_custody.mint_custody_nft(
+        body.shipment_id,
+        body.handler_address,
+        body.location,
+        body.handler_name,
+        prev_nft_id=prev,
+        photo_hash=body.photo_hash or "",
+    )
+
+
+@app.get("/custody/chain/{shipment_id}")
+def custody_chain_get(shipment_id: str):
+    return {"shipment_id": shipment_id, "chain": navi_custody.get_chain(shipment_id)}
+
+
+@app.get("/oracle/stakes")
+def oracle_stakes_list():
+    return oracle_stake.list_stakes()
+
+
+@app.get("/oracle/reputation")
+def oracle_reputation():
+    return oracle_stake.reputation_summary()
+
+
+@app.get("/navibot/voice-summary/{shipment_id}")
+async def navibot_voice_summary(shipment_id: str):
+    ship = get_shipment_from_chain(shipment_id)
+    verdict = None
+    vraw = ship.get("verdict_json")
+    if vraw:
+        try:
+            verdict = json.loads(vraw) if isinstance(vraw, str) else vraw
+        except Exception:
+            verdict = {"verdict": "Unknown"}
+    prompt = (
+        "You are NaviBot, the AI witness for Navi-Trust.\n"
+        "Speak as if testifying in a trade court. Professional. Clear.\n"
+        "Maximum 3 sentences. Start with \"I, NaviBot...\"\n\n"
+        f"Shipment: {shipment_id}\n"
+        f"Route: {ship.get('origin')} to {ship.get('destination')}\n"
+        f"Status: {ship.get('status')}\n"
+        f"Risk Score: {ship.get('risk_score', 'unknown')}\n"
+        f"Verdict: {(verdict or {}).get('verdict', 'No verdict yet')}\n"
+        f"Reasoning: {(verdict or {}).get('reasoning', (verdict or {}).get('narrative', 'Pending assessment'))}\n\n"
+        "Speak the verdict clearly. Reference the blockchain proof."
+    )
+    testimony = await asyncio.to_thread(_navibot_gemini_text, prompt, "")
+    if not testimony.strip():
+        testimony = (
+            f"I, NaviBot, testify regarding shipment {shipment_id} from {ship.get('origin')} to {ship.get('destination')}. "
+            f"On-chain status is {ship.get('status')}. Risk score recorded: {ship.get('risk_score', 'unknown')}. "
+            "Full cryptographic proof is available on Algorand via Lora."
+        )
+    testimony_hash = hashlib.sha256(testimony.encode()).hexdigest()
+    note = json.dumps(
+        {
+            "type": "NAVI_TESTIMONY",
+            "shipment_id": shipment_id,
+            "testimony_hash": testimony_hash,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    tx = chain.send_oracle_zero_note(note)
+    return {
+        "text": testimony,
+        "testimony_hash": testimony_hash,
+        "shipment_id": shipment_id,
+        "message": "Testimony hash recorded on Algorand",
+        "testimony_chain": tx,
+        "lora_url": (tx or {}).get("lora_url"),
+    }
+
+
+@app.get("/demo/insulin-journey")
+async def demo_insulin_journey():
+    return await asyncio.to_thread(navitrust_demos.run_insulin_journey_demo)
+
+
+@app.get("/demo/ghost-shipment-attempt")
+def demo_ghost_shipment():
+    return navitrust_demos.run_ghost_shipment_demo()
+
+
 @app.get("/config")
 async def get_config():
     """Backend config for frontend bootstrap. Lora: use /application/{id} only (no /boxes)."""
@@ -1971,6 +2310,7 @@ async def get_config():
         "network": ALGO_NETWORK,
         "shipments": ids,
         "lora_application_url": f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else LORA_TESTNET_APP,
+        "oracle_address": chain.oracle_address_string(),
     }
 
 
