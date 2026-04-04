@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Link, Route, Routes } from 'react-router-dom';
 import { PeraWalletConnect } from "@perawallet/connect";
 import algosdk from "algosdk";
@@ -21,6 +22,7 @@ import { WeatherCourt } from './components/WeatherCourt';
 import { CustodyChain } from './components/CustodyChain';
 import { ShipmentDestinationWeatherRow } from './components/DestinationWeather';
 import { JuryRiskHistoryChart } from './components/JuryRiskHistoryChart';
+import { LiveVerdictTerminal } from './components/LiveVerdictTerminal';
 
 const CITIES = ['Mumbai', 'Chennai', 'Delhi', 'Singapore', 'Dubai', 'Rotterdam'] as const;
 
@@ -93,6 +95,16 @@ interface Shipment {
     last_jury: any;
     supplier_address?: string | null;
     funds_locked_microalgo?: number;
+    supplier_reputation_score?: number | null;
+    supplier_reputation_source?: string | null;
+    on_chain?: {
+        certificate_asa?: number;
+        lora_cert_url?: string;
+        funds_microalgo?: number;
+        status?: string;
+        /** Present when API exposes last settlement app-call tx id */
+        settlement_tx_id?: string;
+    };
 }
 
 interface DialogueEntry { agent: string; message: string; }
@@ -117,11 +129,11 @@ interface AuditTrailData {
 type Role = 'stakeholder' | 'supplier';
 
 function MainApp() {
+    const queryClient = useQueryClient();
     const [accountAddress, setAccountAddress] = useState<string | null>(null);
     const [role, setRole] = useState<Role>('stakeholder');
     const [shipments, setShipments] = useState<Shipment[]>([]);
     const [appId, setAppId] = useState<number | null>(null);
-    const [juryRunning, setJuryRunning] = useState<string | null>(null);
     const [juryResult, setJuryResult] = useState<JuryResult | null>(null);
     const [auditTrail, setAuditTrail] = useState<AuditTrailData | null>(null);
     const [selectedShipment, setSelectedShipment] = useState<Shipment | null>(null);
@@ -130,6 +142,9 @@ function MainApp() {
         total_scans: number;
         verified_anomalies: number;
         contract_algo?: number;
+        escrow_total_algo?: number;
+        contract_app_address?: string;
+        lora_contract_account_url?: string;
         total_shipments?: number;
         active_shipments?: number;
         total_settled?: number;
@@ -158,7 +173,14 @@ function MainApp() {
     const [activityFeed, setActivityFeed] = useState<ConfirmedActivity[]>([]);
     const [oracleAddress, setOracleAddress] = useState<string | null>(null);
     const [chainHealth, setChainHealth] = useState(false);
-    const [juryAgentIdx, setJuryAgentIdx] = useState(0);
+    /** When set, that shipment's card shows LiveVerdictTerminal instead of the standard body. */
+    const [juryTerminalShipmentId, setJuryTerminalShipmentId] = useState<string | null>(null);
+    const [settleReceipt, setSettleReceipt] = useState<{
+        shipment_id: string;
+        cert_asa_id: number;
+        tx_id?: string;
+        supplier_paid_algo?: number;
+    } | null>(null);
 
     const refreshRecentTxns = useCallback(() => {
         axios
@@ -359,20 +381,6 @@ function MainApp() {
         refreshRecentTxns();
     }, [accountAddress, isLoading, refreshRecentTxns, lastConfirmedTx?.txId]);
 
-    useEffect(() => {
-        if (!juryRunning) {
-            setJuryAgentIdx(0);
-            return;
-        }
-        setJuryAgentIdx(0);
-        const t1 = window.setTimeout(() => setJuryAgentIdx(1), 1000);
-        const t2 = window.setTimeout(() => setJuryAgentIdx(2), 2200);
-        return () => {
-            window.clearTimeout(t1);
-            window.clearTimeout(t2);
-        };
-    }, [juryRunning]);
-
     /* ── Wallet ─────────────────────────────────────────────── */
     const handleConnectWallet = () => {
         peraWallet
@@ -398,32 +406,15 @@ function MainApp() {
         }
     };
 
-    /* ── Run Jury ───────────────────────────────────────────── */
-    const handleRunJury = async (shipmentId: string) => {
-        setJuryRunning(shipmentId);
-        const safetyTimer = setTimeout(() => {
-            setJuryRunning(null);
-        }, 20000);
-        try {
-            const res = await axios.post(`${BACKEND_URL}/run-jury`, { shipment_id: shipmentId }, { timeout: 15000 });
-            setJuryResult(res.data);
-
-            const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
-            setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
-            axios.get(`${BACKEND_URL}/stats`).then(r => setStats(r.data)).catch(() => {});
-            refreshRecentTxns();
-        } catch (e: any) {
-            setJuryRunning(null);
-            const detail = e.response?.data?.detail ?? e.message ?? 'Unknown error';
-            const msg = typeof detail === 'string' && detail.includes('already flagged')
-                ? 'This shipment is already settled on Algorand. No further action needed. Open Audit Trail to view the on-chain record.'
-                : 'Jury failed: ' + detail;
-            alert(msg);
-        } finally {
-            clearTimeout(safetyTimer);
-            setJuryRunning(null);
-        }
-    };
+    const refreshAfterJury = useCallback(async () => {
+        const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
+        setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
+        axios.get(`${BACKEND_URL}/stats`).then((r) => setStats(r.data)).catch(() => {});
+        refreshRecentTxns();
+        void queryClient.invalidateQueries({ queryKey: ['risk-history'] });
+        void queryClient.invalidateQueries({ queryKey: ['shipments'] });
+        void queryClient.invalidateQueries({ queryKey: ['stats'] });
+    }, [queryClient, refreshRecentTxns]);
 
     /* ── Submit Mitigation (Supplier) ───────────────────────── */
     const handleSubmitMitigation = async () => {
@@ -485,13 +476,27 @@ function MainApp() {
     const handleSettleShipment = async (shipmentId: string) => {
         try {
             const r = await axios.post(`${BACKEND_URL}/settle`, { shipment_id: shipmentId }, { timeout: 120_000 });
-            const txId = (r.data as { tx_id?: string })?.tx_id;
+            const data = r.data as {
+                tx_id?: string;
+                cert_asa_id?: number;
+                supplier_paid_algo?: number;
+            };
+            const txId = data?.tx_id;
+            const cert = typeof data?.cert_asa_id === 'number' ? data.cert_asa_id : 0;
             if (txId) recordConfirmedTx({ txId, label: 'Settlement completed' });
+            setSettleReceipt({
+                shipment_id: shipmentId,
+                cert_asa_id: cert,
+                tx_id: txId,
+                supplier_paid_algo: typeof data?.supplier_paid_algo === 'number' ? data.supplier_paid_algo : undefined,
+            });
             setToast('Settlement submitted.');
             const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
             setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
             axios.get(`${BACKEND_URL}/stats`).then((x) => setStats(x.data)).catch(() => {});
             refreshRecentTxns();
+            void queryClient.invalidateQueries({ queryKey: ['risk-history'] });
+            void queryClient.invalidateQueries({ queryKey: ['stats'] });
         } catch (e: unknown) {
             const err = e as { response?: { data?: { detail?: string } } };
             setToast(typeof err.response?.data?.detail === 'string' ? err.response.data.detail : 'Settlement failed');
@@ -973,6 +978,39 @@ function MainApp() {
                 </div>
             )}
 
+            {!isLoading && stats.escrow_total_algo != null && stats.lora_contract_account_url ? (
+                <div
+                    style={{
+                        marginTop: 12,
+                        padding: '10px 14px',
+                        borderRadius: 10,
+                        background: 'rgba(15,23,42,0.45)',
+                        border: '1px solid rgba(148,163,184,0.2)',
+                        fontSize: '0.82rem',
+                        color: '#cbd5e1',
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        alignItems: 'center',
+                        gap: 8,
+                    }}
+                >
+                    <Coins size={15} color="#38bdf8" style={{ flexShrink: 0 }} />
+                    <span>
+                        Contract escrow:{' '}
+                        <strong style={{ color: '#f1f5f9' }}>{stats.escrow_total_algo.toFixed(4)} ALGO</strong> on the app
+                        account
+                    </span>
+                    <a
+                        href={stats.lora_contract_account_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ fontWeight: 600, color: '#7dd3fc', marginLeft: 'auto' }}
+                    >
+                        View contract account on Lora ↗
+                    </a>
+                </div>
+            ) : null}
+
             <section className="card" style={{ marginTop: 16, padding: '16px 18px' }} aria-label="Recent activity">
                 <div style={{ fontWeight: 700, fontSize: '0.9rem', marginBottom: 12 }}>Recent activity</div>
                 {isLoading ? (
@@ -1167,21 +1205,57 @@ function MainApp() {
                     const jury = ship.last_jury;
                     const risk = jury?.sentinel?.risk_score ?? null;
                     const sc = stageStyle(ship.stage);
-                    const isRunning = juryRunning === ship.shipment_id;
-
                     const hasVerdictTx = !!(jury?.on_chain_tx_id);
                     const verdictFlagged = !!jury?.trigger_contract;
                     const awaitingOffChainSync = !(ship.origin && ship.origin !== 'N/A' && ship.destination && ship.destination !== 'N/A');
                     const cardFlagged = ship.stage === 'Disputed' || ship.stage === 'Delayed_Disaster';
+                    const cardDisputedPulse = cardFlagged;
                     const fundsMicro = ship.funds_locked_microalgo ?? 0;
                     const riskBandPct = risk !== null ? Math.min(100, Math.max(0, risk)) : 0;
+                    const certAsa =
+                        settleReceipt?.shipment_id === ship.shipment_id
+                            ? settleReceipt.cert_asa_id
+                            : ship.on_chain?.certificate_asa ?? 0;
+                    const supplierPaidAlgo =
+                        settleReceipt?.shipment_id === ship.shipment_id
+                            ? settleReceipt.supplier_paid_algo
+                            : undefined;
+                    const settleTxId =
+                        settleReceipt?.shipment_id === ship.shipment_id
+                            ? settleReceipt.tx_id
+                            : typeof ship.on_chain?.settlement_tx_id === 'string'
+                              ? ship.on_chain.settlement_tx_id
+                              : undefined;
+
+                    const terminalOpen = juryTerminalShipmentId === ship.shipment_id;
 
                     return (
                         <div
                             key={ship.shipment_id}
-                            className={`card${cardFlagged ? ' card-flagged' : ''}`}
+                            className={`card${cardFlagged ? ' card-flagged' : ''}${cardDisputedPulse ? ' card-disputed-pulse' : ''}`}
                             style={{ textAlign: 'left', borderLeft: cardAccentBorder(ship.stage) }}
                         >
+                            {terminalOpen ? (
+                                <LiveVerdictTerminal
+                                    shipmentId={ship.shipment_id}
+                                    destinationCity={ship.destination || '—'}
+                                    originCity={ship.origin || ''}
+                                    fundsLockedMicroalgo={fundsMicro}
+                                    appId={appId}
+                                    onComplete={(_jr, _raw) => {
+                                        void refreshAfterJury();
+                                    }}
+                                    onClose={() => setJuryTerminalShipmentId(null)}
+                                    onSettle={
+                                        ship.stage === 'In_Transit'
+                                            ? () => void handleSettleShipment(ship.shipment_id)
+                                            : undefined
+                                    }
+                                    onViewDispute={() => void handleViewAudit(ship.shipment_id)}
+                                />
+                            ) : null}
+                            {terminalOpen ? null : (
+                            <>
                             {/* Header */}
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
                                 <div>
@@ -1216,11 +1290,146 @@ function MainApp() {
                                 </div>
                             </div>
 
+                            {cardFlagged ? (
+                                <div
+                                    style={{
+                                        marginBottom: 14,
+                                        padding: 14,
+                                        borderRadius: 10,
+                                        border: '1px solid rgba(239,68,68,0.45)',
+                                        background: 'linear-gradient(135deg, rgba(127,29,29,0.2) 0%, rgba(15,23,42,0.5) 100%)',
+                                    }}
+                                >
+                                    <div style={{ fontWeight: 800, fontSize: '0.82rem', color: '#fecaca', letterSpacing: '0.04em', marginBottom: 8 }}>
+                                        ⚠ ESCROW FROZEN
+                                    </div>
+                                    <div style={{ fontSize: '0.8rem', color: '#e2e8f0', lineHeight: 1.55, marginBottom: 6 }}>
+                                        <span style={{ fontWeight: 800, color: '#F59E0B' }}>{(fundsMicro / 1e6).toFixed(4)} ALGO</span>{' '}
+                                        locked · Cannot be released until the dispute is resolved by the oracle.
+                                    </div>
+                                    {risk != null ? (
+                                        <div style={{ fontSize: '0.78rem', color: '#cbd5e1', marginBottom: 6 }}>
+                                            Risk verdict:{' '}
+                                            <strong>{risk}/100</strong>
+                                            {jury?.sentinel?.reasoning_narrative || jury?.sentinel?.reasoning
+                                                ? ` — ${String(jury.sentinel.reasoning_narrative || jury.sentinel.reasoning).slice(0, 120)}${String(jury.sentinel.reasoning_narrative || jury.sentinel.reasoning).length > 120 ? '…' : ''}`
+                                                : null}
+                                        </div>
+                                    ) : null}
+                                    {(jury?.sentinel?.reasoning_narrative || jury?.sentinel?.reasoning) && (
+                                        <div
+                                            style={{
+                                                fontSize: '0.75rem',
+                                                color: '#94a3b8',
+                                                fontStyle: 'italic',
+                                                lineHeight: 1.5,
+                                                borderLeft: '2px solid rgba(245,158,11,0.5)',
+                                                paddingLeft: 10,
+                                            }}
+                                        >
+                                            &ldquo;{jury.sentinel.reasoning_narrative || jury.sentinel.reasoning}&rdquo;
+                                        </div>
+                                    )}
+                                </div>
+                            ) : null}
+
                             <ShipmentDestinationWeatherRow destination={ship.destination} />
 
-                            {ship.stage === 'Settled' ? (
+                            {typeof ship.supplier_reputation_score === 'number' ? (
+                                <div style={{ fontSize: '0.75rem', color: '#475569', marginBottom: 8 }}>
+                                    Supplier reputation:{' '}
+                                    <strong>{ship.supplier_reputation_score}</strong>/100
+                                    {ship.supplier_reputation_source === 'algorand_box_storage' ? (
+                                        <span style={{ color: '#15803d', marginLeft: 6 }}>(Verified on Algorand)</span>
+                                    ) : null}
+                                </div>
+                            ) : null}
+
+                            {ship.stage === 'Settled' && certAsa > 0 ? (
+                                <div
+                                    style={{
+                                        marginBottom: 12,
+                                        padding: 16,
+                                        borderRadius: 10,
+                                        border: '1px solid #86efac',
+                                        background: 'linear-gradient(180deg, #ecfdf5 0%, #d1fae5 100%)',
+                                    }}
+                                >
+                                    <div style={{ fontWeight: 800, fontSize: '0.88rem', color: '#14532d', marginBottom: 12 }}>
+                                        On-chain settlement proof
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                                        <div>
+                                            <div style={{ fontSize: '0.84rem', color: '#166534', fontWeight: 700, marginBottom: 8 }}>
+                                                ✓{' '}
+                                                {supplierPaidAlgo != null
+                                                    ? `${supplierPaidAlgo.toFixed(4)} ALGO released to supplier`
+                                                    : typeof ship.on_chain?.funds_microalgo === 'number' && ship.on_chain.funds_microalgo > 0
+                                                      ? `${(ship.on_chain.funds_microalgo / 1e6).toFixed(4)} ALGO released to supplier (from escrow)`
+                                                      : 'ALGO released to supplier from escrow'}
+                                            </div>
+                                            {settleTxId ? (
+                                                <a
+                                                    href={`https://lora.algokit.io/testnet/transaction/${settleTxId}`}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    style={{
+                                                        display: 'inline-flex',
+                                                        alignItems: 'center',
+                                                        justifyContent: 'center',
+                                                        gap: 6,
+                                                        padding: '10px 14px',
+                                                        borderRadius: 8,
+                                                        background: '#16a34a',
+                                                        color: '#fff',
+                                                        fontWeight: 700,
+                                                        fontSize: '0.8rem',
+                                                        textDecoration: 'none',
+                                                        width: '100%',
+                                                        boxSizing: 'border-box',
+                                                    }}
+                                                >
+                                                    View payment on Lora ↗
+                                                </a>
+                                            ) : (
+                                                <div style={{ fontSize: '0.75rem', color: '#15803d' }}>
+                                                    Payment tx: open audit trail or Lora app history for this shipment.
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div style={{ borderTop: '1px solid rgba(22,101,52,0.2)', paddingTop: 12 }}>
+                                            <div style={{ fontSize: '0.84rem', color: '#166534', fontWeight: 700, marginBottom: 8 }}>
+                                                ✓ Certificate minted: NAVI-CERT <strong>#{certAsa}</strong>
+                                            </div>
+                                            <a
+                                                href={`https://lora.algokit.io/testnet/asset/${certAsa}`}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                style={{
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    gap: 6,
+                                                    padding: '10px 14px',
+                                                    borderRadius: 8,
+                                                    border: '2px solid #15803d',
+                                                    background: '#fff',
+                                                    color: '#14532d',
+                                                    fontWeight: 700,
+                                                    fontSize: '0.8rem',
+                                                    textDecoration: 'none',
+                                                    width: '100%',
+                                                    boxSizing: 'border-box',
+                                                }}
+                                            >
+                                                View certificate on Lora ↗
+                                            </a>
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : ship.stage === 'Settled' ? (
                                 <div style={{ fontSize: '0.72rem', color: '#15803d', fontWeight: 600, marginBottom: 8 }}>
-                                    Certificate minted — settlement confirmed on Algorand
+                                    Settlement confirmed on Algorand — refresh if certificate ASA is not shown yet.
                                 </div>
                             ) : null}
 
@@ -1281,26 +1490,7 @@ function MainApp() {
                                 </div>
                             </div>
 
-                            {isRunning && role === 'stakeholder' && (
-                                <div
-                                    style={{
-                                        marginBottom: 14,
-                                        padding: 14,
-                                        borderRadius: 10,
-                                        background: 'rgba(15,23,42,0.06)',
-                                        border: '1px solid rgba(148,163,184,0.35)',
-                                    }}
-                                >
-                                    <div style={{ fontWeight: 700, fontSize: '0.85rem', color: '#0f172a', marginBottom: 10 }}>Running AI jury…</div>
-                                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: '0.8rem', color: '#475569', lineHeight: 1.8 }}>
-                                        <li style={{ color: juryAgentIdx >= 0 ? '#0f172a' : '#94a3b8' }}>Sentry analyzing weather…</li>
-                                        <li style={{ color: juryAgentIdx >= 1 ? '#0f172a' : '#94a3b8' }}>Auditor checking chain…</li>
-                                        <li style={{ color: juryAgentIdx >= 2 ? '#0f172a' : '#94a3b8' }}>Arbiter deciding…</li>
-                                    </ul>
-                                </div>
-                            )}
-
-                            {role === 'stakeholder' && jury && !isRunning && (
+                            {role === 'stakeholder' && jury && !terminalOpen && (
                                 <div
                                     style={{
                                         marginBottom: 14,
@@ -1438,7 +1628,7 @@ function MainApp() {
                                             <button
                                                 type="button"
                                                 className="primary-btn"
-                                                disabled={isRunning || awaitingOffChainSync}
+                                                disabled={awaitingOffChainSync}
                                                 style={{
                                                     flex: 1,
                                                     display: 'flex',
@@ -1449,10 +1639,10 @@ function MainApp() {
                                                     fontSize: '0.8rem',
                                                     ...(awaitingOffChainSync ? { background: '#9ca3af', cursor: 'not-allowed' } : {}),
                                                 }}
-                                                onClick={() => void handleRunJury(ship.shipment_id)}
+                                                onClick={() => setJuryTerminalShipmentId(ship.shipment_id)}
                                                 title={awaitingOffChainSync ? 'Syncing shipment metadata' : undefined}
                                             >
-                                                <Play size={13} /> {isRunning ? 'Running jury…' : 'Run AI jury'}
+                                                <Play size={13} /> Run AI jury
                                             </button>
                                         ) : null}
                                         {ship.stage === 'In_Transit' && hasVerdictTx && !verdictFlagged ? (
@@ -1514,6 +1704,8 @@ function MainApp() {
                                     </button>
                                 )}
                             </div>
+                            </>
+                            )}
                         </div>
                     );
                 })}
