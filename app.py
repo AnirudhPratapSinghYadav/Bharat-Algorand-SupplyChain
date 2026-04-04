@@ -6,37 +6,117 @@ import json
 import time
 import base64
 import random
+import re
 import sqlite3
 import logging
 import asyncio
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 import hashlib
 from datetime import datetime, timezone
 from typing import Optional, List
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from google import genai
 from algokit_utils import AlgorandClient
 from algosdk.logic import get_application_address
 
-app = FastAPI(title="Navi-Trust: Supply Chain Risk Monitor")
+import algorand_client as chain
+import verification as ver
+from models import (
+    WeatherData,
+    RiskPrediction,
+    BlockchainState,
+    RunJuryRequest,
+    SubmitMitigationRequest,
+    SettleBody,
+    NavibotRequest,
+    FundShipmentBuildBody,
+)
+
+APP_ID = chain.APP_ID
+algorand = chain.algorand
+INDEXER_URL = chain.INDEXER_URL
+LORA_TESTNET_TX = chain.LORA_TESTNET_TX
+LORA_TESTNET_APP = chain.LORA_TESTNET_APP
+
+_CORS_EXTRA = os.environ.get("CORS_EXTRA_ORIGINS", "")
+_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://navitrustapp.vercel.app",
+]
+if _CORS_EXTRA:
+    _CORS_ORIGINS.extend(o.strip() for o in _CORS_EXTRA.split(",") if o.strip())
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    load_logistics_events()
+    load_verdict_history()
+    for _ in range(6):
+        generate_random_logistics_event()
+    bg_task = asyncio.create_task(_live_feed_background_task())
+    try:
+        yield
+    finally:
+        bg_task.cancel()
+        try:
+            await bg_task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="Navi-Trust Oracle API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(RequestValidationError)
+async def _navibot_friendly_validation(request: Request, exc: RequestValidationError):
+    """Avoid broken clients on /navibot: return soft JSON instead of 422 when body is malformed."""
+    if request.url.path.rstrip("/").endswith("navibot"):
+        return JSONResponse(
+            status_code=200,
+            content={
+                "text": 'Send JSON: {"message": "your question"}',
+                "reply": 'Send JSON: {"message": "your question"}',
+                "action": None,
+                "audio_url": None,
+                "fallback": True,
+            },
+        )
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-APP_ID = int(os.environ.get("APP_ID", 0))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+_NAVIBOT_HITS: dict[str, list[float]] = {}
+
+
+def _navibot_rate_ok(client_key: str) -> bool:
+    now = time.time()
+    window = 60.0
+    cap = int(os.environ.get("NAVIBOT_RL_PER_MIN", "24"))
+    hits = _NAVIBOT_HITS.setdefault(client_key, [])
+    hits[:] = [t for t in hits if now - t < window]
+    if len(hits) >= cap:
+        return False
+    hits.append(now)
+    return True
 ALGO_NETWORK = os.environ.get("ALGO_NETWORK", "testnet")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
@@ -44,6 +124,21 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 # — Single source of truth; never hardcode these in business logic.
 STATUS_IN_TRANSIT = "In_Transit"
 STATUS_FLAGGED = "Delayed_Disaster"
+STATUS_DISPUTED = chain.STATUS_DISPUTED
+
+
+def _status_is_flagged(s: str) -> bool:
+    return s in (STATUS_FLAGGED, STATUS_DISPUTED)
+
+
+def _db_flagged_status() -> str:
+    return STATUS_DISPUTED if chain.use_navitrust() else STATUS_FLAGGED
+
+
+def _status_db_matches_chain(db_s: str, chain_s: str) -> bool:
+    if db_s == chain_s:
+        return True
+    return _status_is_flagged(db_s) and _status_is_flagged(chain_s)
 RISK_THRESHOLD_AUTHORIZE = 80
 
 print(f"[BOOT] GEMINI_API_KEY loaded: {'YES (' + GEMINI_API_KEY[:8] + '...)' if GEMINI_API_KEY else 'NO'}")
@@ -109,6 +204,34 @@ def init_db():
         )
         conn.commit()
 
+    with get_db() as conn:
+        for ddl in (
+            "ALTER TABLE shipments ADD COLUMN dest_lat REAL",
+            "ALTER TABLE shipments ADD COLUMN dest_lon REAL",
+        ):
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
+        conn.commit()
+
+    # Demo seed: SHIP_* aligns with seed_blockchain.py + Lora verification
+    with get_db() as conn:
+        for sid, orig, dest, lat, lon, dlat, dlon in [
+            ("SHIP_001", "Jawaharlal Nehru Port (IN)", "Singapore", 18.94, 72.95, 1.2897, 103.8501),
+            ("SHIP_002", "Chennai", "Colombo", 13.08, 80.27, 6.9271, 79.8612),
+            ("SHIP_003", "Mumbai", "Dubai", 19.07, 72.87, 25.2048, 55.2708),
+        ]:
+            conn.execute(
+                "INSERT OR IGNORE INTO shipments (id, origin, destination, current_lat, current_lon, status) VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, orig, dest, lat, lon, STATUS_IN_TRANSIT),
+            )
+            conn.execute(
+                "UPDATE shipments SET dest_lat = ?, dest_lon = ? WHERE id = ?",
+                (dlat, dlon, sid),
+            )
+        conn.commit()
+        logger.info("DB seed verified (SHIP_001, SHIP_002, SHIP_003)")
 
 # ─── Off-chain Logistics Events ───────────────────────────────────
 LOGISTICS_EVENTS: List[dict] = []
@@ -282,17 +405,7 @@ def save_verdict_history():
     with open(VERDICT_HISTORY_PATH, "w") as f:
         json.dump(AUDIT_TRAIL, f, indent=2)
 
-# ─── Algorand Client ──────────────────────────────────────────────
-try:
-    algorand = (
-        AlgorandClient.testnet()
-        if ALGO_NETWORK == "testnet"
-        else AlgorandClient.default_localnet()
-    )
-except Exception:
-    algorand = AlgorandClient.testnet()
-
-DEPLOYER_MNEMONIC = os.environ.get("DEPLOYER_MNEMONIC")
+DEPLOYER_MNEMONIC = chain.DEPLOYER_MNEMONIC or os.environ.get("DEPLOYER_MNEMONIC")
 N8N_WEBHOOK_URL = os.environ.get("N8N_WEBHOOK_URL", "")
 
 print(f"[BOOT] N8N_WEBHOOK_URL: {'YES' if N8N_WEBHOOK_URL else 'not set (webhook skip)'}")
@@ -313,105 +426,77 @@ def _fire_webhook(event: str, payload: dict):
         logger.warning(f"Webhook failed: {e}")
 
 
-LORA_TESTNET_TX = "https://lora.algokit.io/testnet/transaction"
-LORA_TESTNET_APP = "https://lora.algokit.io/testnet/application"
+RSS_LOGISTICS_URL = os.environ.get("RSS_LOGISTICS_URL", "https://shippingwatch.com/service/rss")
 
 
-def _flag_shipment_on_chain(shipment_id: str, reasoning_hash: str) -> Optional[dict]:
-    """
-    Atomic on-chain state transition via ATC. Synchronous confirmation.
-    Includes AI reasoning hash for cryptographic proof.
-    """
+def _flag_shipment_on_chain(
+    shipment_id: str, reasoning_hash: str, reasoning_narrative: str = "", risk_score: int = 88
+) -> Optional[dict]:
+    """NaviTrust: record_verdict. Legacy: report_disaster_delay + optional note."""
     if not DEPLOYER_MNEMONIC or not APP_ID:
         logger.warning("Cannot flag on-chain: missing DEPLOYER_MNEMONIC or APP_ID")
         return None
     try:
-        from algokit_utils import AppClientMethodCallParams
-        deployer = algorand.account.from_mnemonic(mnemonic=DEPLOYER_MNEMONIC)
-
-        with open("artifacts/AgriSupplyChainEscrow.arc56.json", "r") as f:
-            app_spec = f.read()
-        app_client = algorand.client.get_app_client_by_id(
-            app_spec=app_spec, app_id=APP_ID, default_sender=deployer.address,
+        payload = json.dumps(
+            {"hash": reasoning_hash, "narrative": reasoning_narrative[:2000], "risk": risk_score},
+            ensure_ascii=False,
         )
-        result = app_client.send.call(
-            params=AppClientMethodCallParams(
-                method="report_disaster_delay",
-                args=[shipment_id, reasoning_hash],
-                sender=deployer.address,
-            )
-        )
-        tx_id = result.tx_ids[0] if result.tx_ids else None
-        confirmed_round = result.confirmation.get("confirmed-round") if result.confirmation else None
-        
-        logger.info(f"[ATC] Verified Round {confirmed_round} — Hash Stored: {reasoning_hash[:10]}...")
+        if chain.use_navitrust():
+            res = chain.record_verdict_chain(shipment_id, payload, risk_score)
+        else:
+            res = chain.legacy_report_disaster(shipment_id, reasoning_hash)
+        if not res:
+            return None
+        tx_id = res.get("tx_id")
+        confirmed_round = res.get("confirmed_round")
+        if tx_id and reasoning_narrative and DEPLOYER_MNEMONIC:
+            try:
+                from algosdk import mnemonic as mn
+                from algosdk.future import transaction
+                from algosdk.v2client import algod
+                deployer = algorand.account.from_mnemonic(mnemonic=DEPLOYER_MNEMONIC)
+                note = ("NAVI|" + shipment_id + "|" + reasoning_narrative[:900]).encode("utf-8")
+                algod_url = (
+                    "https://testnet-api.algonode.cloud"
+                    if ALGO_NETWORK == "testnet"
+                    else "https://mainnet-api.algonode.cloud"
+                )
+                alc = algod.AlgodClient("", algod_url, "")
+                sp = alc.suggested_params()
+                pay = transaction.PaymentTxn(deployer.address, sp, deployer.address, 0, note=note)
+                sk = mn.to_private_key(DEPLOYER_MNEMONIC)
+                pay.fee = 1000
+                pay.flat_fee = True
+                signed = pay.sign(sk)
+                alc.send_transaction(signed)
+            except Exception as ne:
+                logger.warning(f"Note append skipped: {ne}")
+        logger.info(f"[ATC] Verified Round {confirmed_round} — on-chain update ok")
         return {"tx_id": tx_id, "confirmed_round": confirmed_round}
     except Exception as e:
         logger.warning(f"On-chain flag failed: {e}")
         return None
 
 def _resolve_shipment_on_chain(shipment_id: str, resolution_hash: str) -> bool:
-    """Reverts flagged shipment to In_Transit on Algorand testnet."""
-    if not DEPLOYER_MNEMONIC or not APP_ID: return False
+    """Legacy: resolve_disaster. NaviTrust: record_verdict low risk returns In_Transit (no separate resolve)."""
+    if not DEPLOYER_MNEMONIC or not APP_ID:
+        return False
     try:
-        from algokit_utils import AppClientMethodCallParams
-        deployer = algorand.account.from_mnemonic(mnemonic=DEPLOYER_MNEMONIC)
-        with open("artifacts/AgriSupplyChainEscrow.arc56.json", "r") as f:
-            app_spec = f.read()
-        app_client = algorand.client.get_app_client_by_id(app_spec=app_spec, app_id=APP_ID, default_sender=deployer.address)
-        app_client.send.call(params=AppClientMethodCallParams(method="resolve_disaster", args=[shipment_id, resolution_hash], sender=deployer.address))
-        return True
+        if chain.use_navitrust():
+            payload = json.dumps({"mitigation_hash": resolution_hash, "action": "clear_dispute"})
+            r = chain.record_verdict_chain(shipment_id, payload, 10)
+            return r is not None
+        return chain.legacy_resolve_disaster(shipment_id, resolution_hash)
     except Exception as e:
         logger.error(f"On-chain resolution failed: {e}")
         return False
 
 
-# ─── Startup ──────────────────────────────────────────────────────
-@app.on_event("startup")
-async def on_startup():
-    init_db()
-    load_logistics_events()
-    load_verdict_history()
-    # Seed initial live event and start 30s background injector
-    generate_random_logistics_event()
-    asyncio.create_task(_live_feed_background_task())
-
-
 # ─── Pydantic Models ──────────────────────────────────────────────
-class WeatherData(BaseModel):
-    temperature: float
-    precipitation: float
-    weather_code: int
-
-
-class RiskPrediction(BaseModel):
-    risk_score: int
-    predicted_delay_probability: int
-    anomaly_detected: bool
-    reasoning_narrative: str
-    mitigation: str = ""
-
-
-class BlockchainState(BaseModel):
-    blockchain_status: str
-    audit_report: str
-
-
-class RunJuryRequest(BaseModel):
-    shipment_id: str
-
-
-class SimulateEventRequest(BaseModel):
-    shipment_id: str
-    event: str
-    severity: str = "medium"
-    wallet: Optional[str] = None
-
-
-class SubmitMitigationRequest(BaseModel):
-    shipment_id: str
-    wallet: str
-    resolution_text: str
+def _is_gemini_rate_limit(e: Exception) -> bool:
+    """Detect 429 Rate Limit from Gemini API for explicit fallback logging."""
+    s = str(e).lower()
+    return "429" in s or "rate limit" in s or ("resource" in s and "exhausted" in s) or "quota" in s
 
 
 def _sanitize_llm_text(text: str) -> str:
@@ -537,7 +622,10 @@ class LogisticsSentryAgent:
                 result["reasoning"] = _sanitize_llm_text(result.get("reasoning", ""))
             print(f"[Logistics Sentry] Gemini OK — score={result.get('risk_score')}")
         except Exception as e:
-            print(f"!!! GEMINI ERROR [Logistics Sentry]: {type(e).__name__} - {str(e)}")
+            if _is_gemini_rate_limit(e):
+                logger.warning("Gemini 429 Rate Limit — falling back to OpenAI")
+            else:
+                print(f"!!! GEMINI ERROR [Logistics Sentry]: {type(e).__name__} - {str(e)}")
             oai_text = _openai_chat(prompt)
             if oai_text:
                 try:
@@ -590,10 +678,9 @@ class ComplianceAuditorAgent:
         risk_flags = False
         
         try:
-            box_name = b"shipment_" + shipment_id.encode("utf-8")
-            box_resp = algorand.client.algod.application_box_by_name(APP_ID, box_name)
-            raw = base64.b64decode(box_resp["value"])
-            on_chain_status = raw.decode("utf-8") if raw[:2] != b"\x00" else raw[2:].decode("utf-8")
+            on_chain_status = _read_box_status(shipment_id)
+            if on_chain_status == "Unregistered":
+                on_chain_status = "Unknown"
         except Exception as e:
             logger.warning(f"ComplianceAuditor box read failed: {e}")
 
@@ -602,7 +689,7 @@ class ComplianceAuditorAgent:
         fraud_reason = ""
 
         if db_row:
-            if db_row["status"] != on_chain_status:
+            if not _status_db_matches_chain(db_row["status"], on_chain_status):
                 fraud_flag = True
                 fraud_reason = "On-chain status mismatch"
         
@@ -644,7 +731,7 @@ class SettlementArbiterAgent:
         'as an autonomous service provider under the x402 protocol."\n\n'
         "RULES (apply STRICTLY in order):\n"
         "1. DOUBLE-CLAIM FRAUD: If Auditor reports disaster_reported = True "
-        "(status '{status_flagged}'), MUST return trigger_contract=false. "
+        "(status '{status_flagged}' or '{status_disputed}'), MUST return trigger_contract=false. "
         "Say: 'Double-Claim Fraud Detected'.\n"
         "2. UNREGISTERED: If 'Unregistered', REJECT.\n"
         "3. AUTHORIZE: If Risk Score > {risk_threshold} AND '{status_transit}', APPROVE. "
@@ -672,6 +759,7 @@ class SettlementArbiterAgent:
             audit_report=state["audit_report"],
             app_id=APP_ID,
             status_flagged=STATUS_FLAGGED,
+            status_disputed=STATUS_DISPUTED,
             status_transit=STATUS_IN_TRANSIT,
             risk_threshold=RISK_THRESHOLD_AUTHORIZE,
         )
@@ -690,7 +778,10 @@ class SettlementArbiterAgent:
                 result["reasoning_narrative"] = _sanitize_llm_text(result.get("reasoning_narrative", ""))
             print(f"[Settlement Arbiter] Gemini OK — trigger={result.get('trigger_contract')}")
         except Exception as e:
-            print(f"!!! GEMINI ERROR [Settlement Arbiter]: {type(e).__name__} - {str(e)}")
+            if _is_gemini_rate_limit(e):
+                logger.warning("Gemini 429 Rate Limit — falling back to OpenAI")
+            else:
+                print(f"!!! GEMINI ERROR [Settlement Arbiter]: {type(e).__name__} - {str(e)}")
             oai_text = _openai_chat(prompt)
             if oai_text:
                 try:
@@ -700,11 +791,12 @@ class SettlementArbiterAgent:
                 except Exception as e2:
                     print(f"!!! OPENAI PARSE ERROR [Arbiter]: {e2}")
 
+        chain_status = state["blockchain_status"] if isinstance(state, dict) else getattr(state, "blockchain_status", "Unknown")
         if result:
             narrative = result.get("reasoning_narrative", "Settlement authorized under x402.")
             result["reasoning_hash"] = _generate_reasoning_hash(narrative)
         else:
-            if state.blockchain_status == STATUS_FLAGGED:
+            if _status_is_flagged(chain_status):
                 trigger = False
                 reason = (
                     "I have reviewed the Auditor's report and must reject this claim. "
@@ -712,14 +804,14 @@ class SettlementArbiterAgent:
                     "settled on the Algorand blockchain. This record is immutable — "
                     "I cannot authorize a second settlement under x402 protocol."
                 )
-            elif state.blockchain_status == "Unregistered":
+            elif chain_status == "Unregistered":
                 trigger = False
                 reason = (
                     "The Auditor could not locate this shipment on the Algorand "
                     "blockchain. Without an on-chain identity, I cannot authorize "
                     "settlement. This appears to be an unregistered or fraudulent claim."
                 )
-            elif prediction.risk_score > RISK_THRESHOLD_AUTHORIZE and state.blockchain_status == STATUS_IN_TRANSIT:
+            elif prediction.risk_score > RISK_THRESHOLD_AUTHORIZE and chain_status == STATUS_IN_TRANSIT:
                 trigger = True
                 reason = (
                     "I authorize this settlement as an autonomous service provider "
@@ -734,18 +826,18 @@ class SettlementArbiterAgent:
                 reason = (
                     f"After reviewing the Sentry's risk score of "
                     f"{prediction.risk_score}/100 and the Auditor's on-chain status "
-                    f"('{state.blockchain_status}'), I find insufficient evidence to "
+                    f"('{chain_status}'), I find insufficient evidence to "
                     f"authorize settlement. The risk threshold has not been met."
                 )
             reasoning_narr = (
-                f"On-chain finality: the Algorand record shows '{state.blockchain_status}'. "
+                f"On-chain finality: the Algorand record shows '{chain_status}'. "
                 + ("Fraud prevention: a prior disaster claim was already settled; blockchain immutability blocks double-claim. "
-                   if state.blockchain_status == STATUS_FLAGGED
+                   if _status_is_flagged(chain_status)
                    else f"Geopolitical and operational risk: Sentry assessed {prediction.risk_score}/100. ")
                 + reason
             )
             mit_strat = ""
-            if prediction.risk_score > 70 and state.blockchain_status == STATUS_IN_TRANSIT:
+            if prediction.risk_score > 70 and chain_status == STATUS_IN_TRANSIT:
                 mit_strat = "Reroute via Air Freight; Contact Backup Supplier; Expedite customs pre-clearance."
             elif prediction.risk_score > 70:
                 mit_strat = "Consider alternate routing and backup logistics provider."
@@ -772,29 +864,27 @@ class SettlementArbiterAgent:
 
 
 def fetch_weather(lat: float, lon: float) -> Optional[WeatherData]:
-    cache_key = f"{lat},{lon}"
-    now = time.time()
-    cached = WEATHER_CACHE.get(cache_key)
-    if cached and now - cached[0] < WEATHER_CACHE_TTL:
-        return cached[1]
     try:
-        url = (
-            f"https://api.open-meteo.com/v1/forecast"
-            f"?latitude={lat}&longitude={lon}"
-            f"&current=temperature_2m,precipitation,weather_code"
+        r = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "current": "temperature_2m,precipitation,weather_code",
+                "timezone": "auto",
+            },
+            timeout=5,
         )
-        resp = requests.get(url, timeout=5)
-        d = resp.json()["current"]
-        wd = WeatherData(
-            temperature=d["temperature_2m"],
-            precipitation=d["precipitation"],
-            weather_code=d["weather_code"],
+        r.raise_for_status()
+        cur = r.json().get("current") or {}
+        return WeatherData(
+            temperature=float(cur.get("temperature_2m", 20.0)),
+            precipitation=float(cur.get("precipitation", 0) or 0),
+            weather_code=int(cur.get("weather_code", 0)),
         )
-        WEATHER_CACHE[cache_key] = (now, wd)
-        return wd
     except Exception as e:
-        logger.error(f"Weather fetch failed: {e}")
-        return None
+        logger.debug("Open-Meteo failed: %s", e)
+        return WeatherData(temperature=22.0, precipitation=0.0, weather_code=0)
 
 
 def get_events_for(shipment_id: str) -> List[dict]:
@@ -835,15 +925,35 @@ def _get_supplier_trust(wallet: str) -> int:
 # ═══════════════════════════════════════════════════════════════════
 
 
+def _sanitize_box_status(raw: str) -> str:
+    """
+    Strict sanitizer for Algorand Box status strings.
+    - Maps layed_Disaster (truncation/corruption) -> Delayed_Disaster
+    - Strips null bytes (\\x00) and whitespace
+    """
+    if not raw or not isinstance(raw, str):
+        return raw or "Unknown"
+    s = raw.replace("\x00", "").strip()
+    if "layed_Disaster" in s or s == "layed_Disaster":
+        return STATUS_FLAGGED  # Delayed_Disaster
+    if s == STATUS_IN_TRANSIT or s == STATUS_FLAGGED or s == STATUS_DISPUTED:
+        return s
+    if "Delayed" in s and "Disaster" in s:
+        return STATUS_FLAGGED
+    return s
+
+
+def _decode_box_value_to_str(raw: bytes) -> str:
+    """Decode box value bytes to string, strip null prefix if present."""
+    if not raw:
+        return ""
+    text = raw.decode("utf-8", errors="ignore") if raw[:2] != b"\x00" else raw[2:].decode("utf-8", errors="ignore")
+    return _sanitize_box_status(text)
+
+
 def _read_box_status(shipment_id: str) -> str:
-    """Read shipment status from Algorand Box Storage. Returns status string or 'Unregistered'."""
-    try:
-        box_name = b"shipment_" + shipment_id.encode("utf-8")
-        box_resp = algorand.client.algod.application_box_by_name(APP_ID, box_name)
-        raw = base64.b64decode(box_resp["value"])
-        return raw.decode("utf-8") if raw[:2] != b"\x00" else raw[2:].decode("utf-8")
-    except Exception:
-        return "Unregistered"
+    """Read shipment status from Algorand (NaviTrust st_ box or legacy shipment_ box)."""
+    return chain.read_shipment_status(shipment_id)
 
 
 def _decode_box_name_to_shipment_id(name_raw: bytes) -> Optional[str]:
@@ -860,6 +970,24 @@ def _decode_box_name_to_shipment_id(name_raw: bytes) -> Optional[str]:
         except Exception:
             pass
     return None
+
+
+def _read_supplier_address(shipment_id: str) -> Optional[str]:
+    """Read supplier address from Algorand Box (supplier_ prefix). Returns None if not found."""
+    if not APP_ID:
+        return None
+    try:
+        from algosdk.encoding import encode_address
+        box_name = b"supplier_" + shipment_id.encode("utf-8")
+        box_resp = algorand.client.algod.application_box_by_name(APP_ID, box_name)
+        raw = base64.b64decode(box_resp["value"])
+        if len(raw) >= 32:
+            return encode_address(raw[:32])
+        return None
+    except Exception:
+        return None
+
+
 class MitigationAuditorAgent:
     """AI Agent to validate supplier mitigation strategies."""
     
@@ -874,12 +1002,19 @@ class MitigationAuditorAgent:
             client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else genai.Client()
             resp = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
             return "APPROVED" in resp.text.upper()
-        except:
-            return len(resolution_text) > 20 # Deterministic fallback
+        except Exception as e:
+            if _is_gemini_rate_limit(e):
+                logger.warning("Gemini 429 [MitigationAuditor] — using deterministic fallback")
+            oai_text = _openai_chat(prompt)
+            if oai_text:
+                return "APPROVED" in oai_text.upper()
+            return len(resolution_text) > 20  # Deterministic fallback
 
 def _list_ledger_shipments() -> List[tuple[str, str]]:
     """List all shipment IDs and their on-chain status from Box Storage. Dynamic — no hardcoding."""
     try:
+        if chain.use_navitrust():
+            return chain.list_shipment_statuses_from_boxes()
         resp = algorand.client.algod.application_boxes(APP_ID)
         boxes = resp.get("boxes", [])
         result: List[tuple[str, str]] = []
@@ -899,42 +1034,113 @@ def _list_ledger_shipments() -> List[tuple[str, str]]:
         return []
 
 
-# Deprecated sync-ledger (consolidated below)
+def _db_cell(row, key: str, default=None):
+    if row is None or key not in row.keys():
+        return default
+    v = row[key]
+    return default if v is None else v
+
+
+def _shipment_row_for_ui(sid: str, chain_status: str, db_row) -> dict:
+    """Single dashboard row: on-chain boxes + DB coordinates + real off-chain events + jury cache."""
+    full: dict = {}
+    if APP_ID and chain.use_navitrust():
+        try:
+            full = chain.read_shipment_full(sid)
+        except Exception:
+            full = {}
+    origin, dest = "", ""
+    lat, lon = 0.0, 0.0
+    dest_lat_v = _db_cell(db_row, "dest_lat")
+    dest_lon_v = _db_cell(db_row, "dest_lon")
+    if db_row is not None:
+        origin = db_row["origin"] or ""
+        dest = db_row["destination"] or ""
+        lat = float(db_row["current_lat"] or 0)
+        lon = float(db_row["current_lon"] or 0)
+    route = full.get("route") or ""
+    if "→" in route:
+        parts = route.split("→", 1)
+        if len(parts) == 2:
+            if not str(origin).strip():
+                origin = parts[0].strip()
+            if not str(dest).strip():
+                dest = parts[1].strip()
+    events = get_events_for(sid)
+    ev_out = [
+        {
+            "shipment_id": sid,
+            "event": e.get("event", ""),
+            "severity": e.get("severity", "medium"),
+            "timestamp": e.get("timestamp", ""),
+        }
+        for e in events[:8]
+    ]
+    lj = JURY_CACHE.get(sid)
+    risk = int(full.get("risk_score") or 0)
+    verdict_raw = full.get("verdict") or ""
+    narrative = ""
+    if verdict_raw:
+        try:
+            vj = json.loads(verdict_raw)
+            narrative = str(vj.get("narrative", ""))[:400]
+        except Exception:
+            narrative = str(verdict_raw)[:400]
+    if not lj and (verdict_raw or risk):
+        lj = {
+            "sentinel": {"risk_score": risk, "reasoning_narrative": narrative or "Recorded on-chain."},
+            "chief_justice": {"reasoning_narrative": narrative or "Verdict on-chain.", "judgment": "RECORDED"},
+            "trigger_contract": chain_status == chain.STATUS_DISPUTED,
+        }
+    stage = chain_status
+    if chain_status in ("Unknown", "Unregistered"):
+        stage = "Not_Registered"
+    funds_micro = int(full.get("funds_microalgo") or 0)
+    dest_lat = float(dest_lat_v) if dest_lat_v is not None else None
+    dest_lon = float(dest_lon_v) if dest_lon_v is not None else None
+    return {
+        "shipment_id": sid,
+        "origin": origin or "—",
+        "destination": dest or "—",
+        "lat": lat,
+        "lon": lon,
+        "dest_lat": dest_lat,
+        "dest_lon": dest_lon,
+        "stage": stage,
+        "funds_locked_microalgo": funds_micro,
+        "weather": {"temperature": 0.0, "precipitation": 0.0, "weather_code": 0},
+        "logistics_events": ev_out,
+        "last_jury": lj,
+        "supplier_address": _read_supplier_address(sid),
+        "on_chain": full,
+        "lora_app_url": full.get("lora_url") or (f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else ""),
+    }
+
+
+def build_sync_ledger_shipments() -> List[dict]:
+    """Enumerate on-chain shipments via boxes, merge DB metadata; append DB-only rows as Not_Registered."""
+    ledger_pairs = _list_ledger_shipments()
+    with get_db() as conn:
+        db_rows = {r["id"]: r for r in conn.execute("SELECT * FROM shipments").fetchall()}
+    seen = {sid for sid, _ in ledger_pairs}
+    rows = [_shipment_row_for_ui(sid, st, db_rows.get(sid)) for sid, st in ledger_pairs]
+    for sid, db_row in db_rows.items():
+        if sid in seen:
+            continue
+        st = chain.read_shipment_status(sid)
+        if st in ("Unregistered", "Unknown"):
+            rows.append(_shipment_row_for_ui(sid, "Not_Registered", db_row))
+    return rows
 
 
 @app.get("/shipments")
-async def get_shipments():
-    """Returns shipments — ledger-first via /sync-ledger when APP_ID set, else SQLite fallback."""
-    if APP_ID:
-        try:
-            ledger = _list_ledger_shipments()
-            if ledger:
-                return await sync_ledger()
-        except Exception:
-            pass
-    with get_db() as conn:
-        rows = conn.execute("SELECT * FROM shipments").fetchall()
-    result = []
-    for row in rows:
-        weather = fetch_weather(row["current_lat"], row["current_lon"])
-        events = get_events_for(row["id"])
-        cached = JURY_CACHE.get(row["id"])
-        result.append({
-            "shipment_id": row["id"],
-            "origin": row["origin"],
-            "destination": row["destination"],
-            "lat": row["current_lat"],
-            "lon": row["current_lon"],
-            "stage": row["status"],
-            "weather": weather.model_dump() if weather else None,
-            "logistics_events": events,
-            "last_jury": cached,
-        })
-    return result
+def get_shipments():
+    """Ledger-first shipment list (boxes + DB), same as /sync-ledger."""
+    return sync_ledger()
 
 
 @app.post("/run-jury")
-async def run_jury(req: RunJuryRequest):
+def run_jury(req: RunJuryRequest):
     """
     Full MAS pipeline — Blockchain-AI Convergence (80%+ Algorand).
 
@@ -947,17 +1153,24 @@ async def run_jury(req: RunJuryRequest):
         row = conn.execute(
             "SELECT * FROM shipments WHERE id = ?", (req.shipment_id,)
         ).fetchone()
+
+    # Orphan fallback: shipment on-chain but not in DB — use generic prompt, no crash
     if not row:
-        raise HTTPException(
-            status_code=400, detail=f"Unknown shipment '{req.shipment_id}'"
-        )
+        row = {
+            "id": req.shipment_id,
+            "origin": "Unknown",
+            "destination": "Unknown",
+            "current_lat": 0.0,
+            "current_lon": 0.0,
+            "status": STATUS_IN_TRANSIT,
+        }
+        logger.warning(f"[ORPHAN] {req.shipment_id} not in DB — using fallback metadata")
 
     events = get_events_for(req.shipment_id)
 
     # ── PRE-FLIGHT: Compliance Auditor checks ledger BEFORE Sentry runs ─
-    # Prevents AI hallucinations from overriding blockchain. If box says Flagged, abort immediately.
     state = ComplianceAuditorAgent.audit(req.shipment_id, sentry_prediction=None)
-    if state.blockchain_status == STATUS_FLAGGED:
+    if _status_is_flagged(state["blockchain_status"]):
         logger.warning(f"[PRE-FLIGHT ABORT] {req.shipment_id} — already flagged on-chain, AI analysis skipped")
         raise HTTPException(
             status_code=400,
@@ -966,7 +1179,7 @@ async def run_jury(req: RunJuryRequest):
 
     weather = fetch_weather(row["current_lat"], row["current_lon"])
     if not weather:
-        raise HTTPException(status_code=503, detail="Weather data unavailable")
+        weather = WeatherData(temperature=22.0, precipitation=0.0, weather_code=0)
 
     # ── Step 1: Logistics Sentry — risk analysis (with live logistics feed) ─
     live_ctx = get_live_logistics_context()
@@ -976,7 +1189,7 @@ async def run_jury(req: RunJuryRequest):
     state = ComplianceAuditorAgent.audit(req.shipment_id, sentry_prediction=prediction)
 
     # Fraud halt: if Auditor detected an existing claim, short-circuit
-    fraud_detected = state.blockchain_status == STATUS_FLAGGED
+    fraud_detected = _status_is_flagged(state["blockchain_status"])
     if fraud_detected:
         logger.warning(f"[FRAUD HALT] {req.shipment_id} — Auditor found disaster_reported=True, aborting settlement")
 
@@ -990,16 +1203,27 @@ async def run_jury(req: RunJuryRequest):
         with get_db() as conn:
             conn.execute(
                 "UPDATE shipments SET status = ? WHERE id = ?",
-                (STATUS_FLAGGED, req.shipment_id),
+                (_db_flagged_status(), req.shipment_id),
             )
             conn.commit()
         
         reasoning_hash = judgment.get("reasoning_hash", "0")
-        flag_result = _flag_shipment_on_chain(req.shipment_id, reasoning_hash)
+        reasoning_txt = _sanitize_llm_text(judgment.get("reasoning_narrative", judgment.get("judgment", "")))
+        flag_result = _flag_shipment_on_chain(
+            req.shipment_id, reasoning_hash, reasoning_txt, risk_score=prediction.risk_score
+        )
         
         if flag_result:
             on_chain_tx_id = flag_result.get("tx_id")
             confirmed_round = flag_result.get("confirmed_round")
+            # Fire n8n webhook ONLY after Algorand confirmation (control tower)
+            _fire_webhook("settlement_confirmed", {
+                "shipment_id": req.shipment_id,
+                "risk_score": prediction.risk_score,
+                "reasoning_narrative": reasoning_txt,
+                "TX_ID": on_chain_tx_id,
+                "explorer_url": f"{LORA_TESTNET_TX}/{on_chain_tx_id}" if on_chain_tx_id else None,
+            })
 
     j_judgment = _sanitize_llm_text(judgment.get("judgment", ""))
     j_reasoning = _sanitize_llm_text(judgment.get("reasoning_narrative", j_judgment))
@@ -1008,7 +1232,7 @@ async def run_jury(req: RunJuryRequest):
             "agent": "Logistics Sentry",
             "message": (
                 f"Risk Score: {prediction.risk_score}/100\n"
-                f"{prediction.reasoning}\n"
+                f"{prediction.reasoning_narrative}\n"
                 f"Mitigation: {prediction.mitigation}\n"
                 "[Passing to Compliance Auditor for on-chain verification]"
             ),
@@ -1016,8 +1240,8 @@ async def run_jury(req: RunJuryRequest):
         {
             "agent": "Compliance Auditor",
             "message": (
-                f"On-Chain Status: {state.blockchain_status}\n"
-                f"{state.audit_report}\n"
+                f"On-Chain Status: {state['blockchain_status']}\n"
+                f"{state['audit_report']}\n"
                 "[Passing to Settlement Arbiter for final verdict]"
             ),
         },
@@ -1033,7 +1257,7 @@ async def run_jury(req: RunJuryRequest):
     verdict = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "sentinel_score": prediction.risk_score,
-        "auditor_status": state.blockchain_status,
+        "auditor_status": state["blockchain_status"],
         "verdict": "APPROVED" if judgment["trigger_contract"] else "REJECTED",
         "summary": j_judgment[:200],
         "reasoning_narrative": j_reasoning,
@@ -1051,7 +1275,7 @@ async def run_jury(req: RunJuryRequest):
         "destination": row["destination"],
         "weather": weather.model_dump(),
         "sentinel": prediction.model_dump(),
-        "auditor": state.model_dump(),
+        "auditor": state,
         "chief_justice": chief_justice_out,
         "trigger_contract": judgment["trigger_contract"],
         "agent_dialogue": agent_dialogue,
@@ -1066,22 +1290,39 @@ async def run_jury(req: RunJuryRequest):
 
 @app.get("/audit-trail/{shipment_id}")
 async def get_audit_trail(shipment_id: str):
-    """Immutable audit history — off-chain verdicts + on-chain box state."""
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT id FROM shipments WHERE id = ?", (shipment_id,)
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Shipment not found")
-
+    """Immutable audit history — verdicts + Indexer tx notes + on-chain box state."""
     on_chain = "Not found on-chain"
     try:
-        box_name = b"shipment_" + shipment_id.encode("utf-8")
-        box_resp = algorand.client.algod.application_box_by_name(APP_ID, box_name)
-        raw = base64.b64decode(box_resp["value"])
-        on_chain = (
-            raw.decode("utf-8") if raw[:2] != b"\x00" else raw[2:].decode("utf-8")
-        )
+        s = _read_box_status(shipment_id)
+        if s != "Unregistered":
+            on_chain = s
+    except Exception:
+        pass
+
+    indexer_notes = []
+    try:
+        if DEPLOYER_MNEMONIC:
+            from algosdk import mnemonic as mn
+            addr = mn.to_public_key(DEPLOYER_MNEMONIC)
+            r = requests.get(f"{INDEXER_URL}/v2/accounts/{addr}/transactions?limit=30", timeout=3)
+            if r.ok:
+                for tx in r.json().get("transactions", []):
+                    n = tx.get("note")
+                    if not n:
+                        continue
+                    try:
+                        text = base64.b64decode(n).decode("utf-8", errors="replace")
+                        if text.startswith("NAVI|"):
+                            parts = text.split("|", 2)
+                            if parts[1] == shipment_id:
+                                indexer_notes.append({
+                                    "reasoning": parts[2] if len(parts) > 2 else "",
+                                    "tx_id": tx.get("id"),
+                                    "round": tx.get("confirmed-round") or tx.get("confirmed_round"),
+                                })
+                    except Exception:
+                        pass
+        indexer_notes = indexer_notes[:10]
     except Exception:
         pass
 
@@ -1092,33 +1333,7 @@ async def get_audit_trail(shipment_id: str):
         "on_chain_status": on_chain,
         "verdicts": AUDIT_TRAIL.get(shipment_id, []),
         "total_scans": len(AUDIT_TRAIL.get(shipment_id, [])),
-    }
-
-
-@app.post("/simulate-event")
-async def simulate_event(req: SimulateEventRequest):
-    """Supplier role: inject a logistics event for a shipment."""
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT id FROM shipments WHERE id = ?", (req.shipment_id,)
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=400, detail="Unknown shipment")
-
-    new_event = {
-        "shipment_id": req.shipment_id,
-        "event": req.event,
-        "severity": req.severity,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    LOGISTICS_EVENTS.append(new_event)
-    save_logistics_events()
-    if req.wallet:
-        _update_supplier_trust(req.wallet, delta=-2)
-    return {
-        "status": "ok",
-        "event": new_event,
-        "total_events": len(get_events_for(req.shipment_id)),
+        "indexer_notes": indexer_notes,
     }
 
 
@@ -1134,7 +1349,7 @@ async def get_supplier_trust_score(wallet: str = ""):
 
 
 @app.post("/submit-mitigation")
-async def submit_mitigation(req: SubmitMitigationRequest):
+def submit_mitigation(req: SubmitMitigationRequest):
     """Supplier submits proof of resolution. AI-verified; logged for trust score."""
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
@@ -1174,19 +1389,6 @@ async def submit_mitigation(req: SubmitMitigationRequest):
     }
 
 
-@app.post("/trigger-disaster")
-async def trigger_disaster(shipment_id: str):
-    """Human-in-the-loop: confirms disaster after Pera Wallet signing."""
-    logger.info(f"Disaster trigger confirmed for {shipment_id}")
-    with get_db() as conn:
-        conn.execute(
-            "UPDATE shipments SET status = ? WHERE id = ?",
-            (STATUS_FLAGGED, shipment_id),
-        )
-        conn.commit()
-    return {"status": "authorized", "shipment_id": shipment_id}
-
-
 @app.get("/risk-history")
 async def get_risk_history():
     """Risk score time-series for analytics graph — all verdicts across shipments."""
@@ -1206,12 +1408,22 @@ async def get_risk_history():
 
 
 @app.get("/stats")
-async def get_stats():
-    """Network Intelligence stats for KPI ribbon — real data from Algorand where possible."""
+def get_stats():
+    """Network Intelligence stats for KPI ribbon — ledger-first, then audit trail fallback."""
     total_verdicts = sum(len(v) for v in AUDIT_TRAIL.values())
-    total_anomalies = sum(
-        1 for vs in AUDIT_TRAIL.values() for v in vs if v.get("verdict") == "APPROVED"
-    )
+    total_anomalies = total_verdicts  # fallback
+    if APP_ID:
+        try:
+            ledger = _list_ledger_shipments()
+            total_anomalies = sum(1 for _sid, status in ledger if _status_is_flagged(status))
+        except Exception:
+            total_anomalies = sum(
+                1 for vs in AUDIT_TRAIL.values() for v in vs if v.get("verdict") == "APPROVED"
+            )
+    else:
+        total_anomalies = sum(
+            1 for vs in AUDIT_TRAIL.values() for v in vs if v.get("verdict") == "APPROVED"
+        )
 
     contract_algo = None
     if APP_ID:
@@ -1230,86 +1442,48 @@ async def get_stats():
 
 
 @app.post("/register-shipment")
-async def register_shipment(shipment_id: str, origin: str, destination: str, supplier: str):
+def register_shipment(shipment_id: str, origin: str, destination: str, supplier: str):
     """
-    On-board a new shipment via ATC. 
-    Synchronizes DB and Algorand Testnet.
+    On-board a new shipment via ATC.
+    Synchronizes DB and Algorand Testnet (NaviTrust register_shipment or legacy add_shipment).
     """
     if not DEPLOYER_MNEMONIC or not APP_ID:
-        raise HTTPException(status_code=500, detail="Missing Config")
-    
-    # 1. Store in DB (Off-chain)
+        raise HTTPException(status_code=500, detail="Missing oracle configuration (APP_ID / mnemonic).")
+
     with get_db() as conn:
         conn.execute(
             "INSERT INTO shipments (id, origin, destination, current_lat, current_lon, status) VALUES (?, ?, ?, ?, ?, ?)",
-            (shipment_id, origin, destination, 0.0, 0.0, STATUS_IN_TRANSIT)
+            (shipment_id, origin, destination, 0.0, 0.0, STATUS_IN_TRANSIT),
         )
         conn.commit()
-    
-    # 2. Register on Algorand (On-chain)
+
     try:
-        from algokit_utils import AppClientMethodCallParams
-        deployer = algorand.account.from_mnemonic(mnemonic=DEPLOYER_MNEMONIC)
-        with open("artifacts/AgriSupplyChainEscrow.arc56.json", "r") as f:
-            app_spec = f.read()
-        app_client = algorand.client.get_app_client_by_id(
-            app_spec=app_spec, app_id=APP_ID, default_sender=deployer.address,
-        )
-        result = app_client.send.call(
-            params=AppClientMethodCallParams(
-                method="add_shipment",
-                args=[shipment_id, supplier],
-                sender=deployer.address,
-            )
-        )
-        return {"status": "Registered", "tx_id": result.tx_ids[0]}
+        if chain.use_navitrust():
+            route = f"{origin} → {destination}"
+            r = chain.register_navitrust(shipment_id, supplier, route)
+        else:
+            r = chain.register_legacy(shipment_id, supplier)
+        return {
+            "status": "Registered",
+            "tx_id": r.get("tx_id"),
+            "app_id": r.get("app_id"),
+            "lora_url": r.get("lora_url"),
+            "lora_tx_url": r.get("lora_tx_url") or chain.lora_tx_url(r.get("tx_id")),
+        }
     except Exception as e:
-        logger.error(f"Registration failed: {e}")
-        return {"status": "DB_ONLY_FAILURE", "error": str(e)}
+        logger.error("Registration failed: %s", e)
+        with get_db() as conn:
+            conn.execute("DELETE FROM shipments WHERE id = ?", (shipment_id,))
+            conn.commit()
+        raise HTTPException(
+            status_code=502,
+            detail=f"On-chain registration failed (database row rolled back): {e!s}",
+        ) from e
 
-# Consolidated /sync-ledger with extended properties
 @app.get("/sync-ledger")
-async def sync_ledger():
-    """
-    Unified Endpoint for UI. Fetches on-chain truth and joins with DB.
-    """
-    ledger_ships = _list_ledger_shipments()
-    
-    metadata = {}
-    with get_db() as conn:
-        rows = conn.execute("SELECT * FROM shipments").fetchall()
-        for r in rows:
-            metadata[r["id"]] = dict(r)
-            
-    result = []
-    for ship_id, status in ledger_ships:
-        meta = metadata.get(ship_id, {})
-        
-        # Additional on-chain details
-        reasoning_hash = "None"
-        is_breached = False
-        try:
-            h_resp = algorand.client.algod.application_box_by_name(APP_ID, b"hash_" + ship_id.encode())
-            h_raw = base64.b64decode(h_resp["value"])
-            reasoning_hash = h_raw.decode("utf-8") if h_raw[:2] != b"\x00" else h_raw[2:].decode("utf-8")
-            
-            b_resp = algorand.client.algod.application_box_by_name(APP_ID, b"breach_" + ship_id.encode())
-            b_raw = base64.b64decode(b_resp["value"])
-            is_breached = int.from_bytes(b_raw, "big") > 0
-        except: pass
-
-        result.append({
-            "shipment_id": ship_id,
-            "origin": meta.get("origin", "N/A"),
-            "destination": meta.get("destination", "N/A"),
-            "stage": status,
-            "reasoning_hash": reasoning_hash,
-            "risk_breach": is_breached,
-            "lat": meta.get("current_lat", 0),
-            "lon": meta.get("current_lon", 0),
-            "telemetry": generate_random_logistics_event()["telemetry"] # Live Telemetry feed
-        })
-    return result
+def sync_ledger():
+    """On-chain box enumeration merged with DB + jury cache — no synthetic shipments."""
+    return build_sync_ledger_shipments()
 
 
 @app.get("/live-feed")
@@ -1323,6 +1497,468 @@ async def generate_event():
     """Explicitly trigger one random logistics event (for testing/demo)."""
     ev = generate_random_logistics_event()
     return {"event": ev, "feed_length": len(LIVE_FEED)}
+
+
+@app.get("/bootstrap")
+async def bootstrap():
+    """Wallet dashboard bootstrap: same shipment list as /sync-ledger; stats from chain where possible."""
+    shipments = build_sync_ledger_shipments()
+    ids = [s["shipment_id"] for s in shipments]
+    config = {
+        "app_id": APP_ID,
+        "network": ALGO_NETWORK,
+        "shipments": ids,
+        "lora_application_url": f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else "",
+    }
+    total_v = sum(len(v) for v in AUDIT_TRAIL.values())
+    total_a = sum(1 for vs in AUDIT_TRAIL.values() for v in vs if v.get("verdict") == "APPROVED")
+    contract_algo = None
+    if APP_ID:
+        try:
+            app_addr = get_application_address(APP_ID)
+            bal = algorand.account.get_information(app_addr).amount
+            contract_algo = float(bal.algo) if hasattr(bal, "algo") else None
+        except Exception:
+            pass
+    stats = {"total_scans": total_v, "verified_anomalies": total_a, "contract_algo": round(contract_algo, 4) if contract_algo is not None else None}
+    risk_pts = []
+    for sid, vs in AUDIT_TRAIL.items():
+        for v in vs:
+            if v.get("sentinel_score") is not None:
+                risk_pts.append({"time": v.get("timestamp", ""), "score": v["sentinel_score"], "shipment": sid})
+    risk_pts.sort(key=lambda x: x["time"])
+    return {
+        "config": config,
+        "stats": stats,
+        "shipments": shipments,
+        "risk_history": {"points": risk_pts[-60:]},
+    }
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "app_id": APP_ID,
+        "network": ALGO_NETWORK,
+        "navitrust": chain.use_navitrust(),
+    }
+
+
+@app.get("/shipment/{shipment_id}")
+def get_shipment_public(shipment_id: str):
+    oc = chain.read_shipment_full(shipment_id) if APP_ID else {}
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
+    return {
+        "shipment_id": shipment_id,
+        "on_chain": oc,
+        "database": dict(row) if row else None,
+        "verdicts": AUDIT_TRAIL.get(shipment_id, []),
+    }
+
+
+@app.post("/settle")
+def settle_shipment_api(body: SettleBody):
+    r = chain.settle_shipment_chain(body.shipment_id)
+    if not r:
+        raise HTTPException(
+            status_code=400,
+            detail="settle_shipment failed (needs NaviTrust app, oracle mnemonic, and APP_ID)",
+        )
+    return r
+
+
+@app.post("/fund-shipment/build")
+def fund_shipment_build(body: FundShipmentBuildBody):
+    """Return unsigned atomic group (pay + fund_shipment) for the buyer wallet to sign."""
+    if not chain.use_navitrust() or not APP_ID:
+        raise HTTPException(status_code=400, detail="NaviTrust APP_ID and ARC56 spec required.")
+    st = chain.read_shipment_status(body.shipment_id)
+    if st in ("Unregistered", "Unknown"):
+        raise HTTPException(status_code=400, detail="Shipment is not registered on-chain.")
+    try:
+        txns = chain.build_fund_shipment_txns_b64(body.payer_address, body.shipment_id, body.micro_algo)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("fund-shipment build failed")
+        raise HTTPException(status_code=500, detail=f"Could not build transactions: {e!s}") from e
+    return {
+        "txns_b64": txns,
+        "shipment_id": body.shipment_id,
+        "micro_algo": body.micro_algo,
+        "receiver": get_application_address(APP_ID),
+    }
+
+
+def _navibot_focus_id(query: str, explicit: Optional[str]) -> Optional[str]:
+    if explicit and explicit.strip():
+        return explicit.strip()
+    m = re.search(r"\b(SHIP_[A-Za-z0-9_-]+)\b", query or "")
+    return m.group(1) if m else None
+
+
+def _navibot_chain_context(focus_id: Optional[str]) -> dict:
+    ctx: dict = {
+        "app_id": APP_ID,
+        "network": ALGO_NETWORK,
+        "navitrust": chain.use_navitrust(),
+        "lora_application_url": f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else None,
+    }
+    if focus_id and APP_ID:
+        ctx["shipment_id"] = focus_id
+        ctx["on_chain"] = chain.read_shipment_full(focus_id)
+        ctx["recent_verdict_history"] = AUDIT_TRAIL.get(focus_id, [])[-5:]
+    return ctx
+
+
+def _navibot_action_hint(query: str, ctx: Optional[dict] = None) -> Optional[str]:
+    q = (query or "").lower()
+    if any(k in q for k in ("settle", "payout", "release fund", "pay supplier", "run settlement", "authorize settlement")):
+        return "settle"
+    if any(k in q for k in ("verify", "proof", "lora", "explorer", "transaction", "view shipment", "missing data")):
+        return "view"
+    if any(k in q for k in ("dispute", "open case", "escalate", "file claim")):
+        return "case"
+    if ctx:
+        oc = ctx.get("on_chain") or {}
+        st = str(oc.get("status") or "")
+        if st in ("Delayed_Disaster", "Disputed"):
+            return "case"
+    return None
+
+
+def _navibot_wants_risk_explanation(query: str) -> bool:
+    q = (query or "").lower()
+    needles = (
+        "why is this shipment risky",
+        "why is it risky",
+        "why risky",
+        "explain risk",
+        "shipment risky",
+        "elevated risk",
+        "what is the risk",
+        "why high risk",
+    )
+    return any(n in q for n in needles) or ("risk" in q and ("why" in q or "explain" in q))
+
+
+def _navibot_risk_facts(focus_id: Optional[str], ctx: dict) -> dict:
+    """Structured facts only — safe to show to user and to send to LLM."""
+    oc = ctx.get("on_chain") if isinstance(ctx.get("on_chain"), dict) else {}
+    facts: dict = {
+        "shipment_id": focus_id,
+        "on_chain_status": oc.get("status") or oc.get("stage") or None,
+        "raw_on_chain": {k: oc.get(k) for k in ("status", "stage", "disaster_reported") if k in oc},
+    }
+    verdicts = ctx.get("recent_verdict_history") or []
+    facts["recent_verdicts"] = [
+        {
+            "verdict": v.get("verdict"),
+            "sentinel_score": v.get("sentinel_score"),
+            "timestamp": v.get("timestamp"),
+        }
+        for v in verdicts[-5:]
+        if isinstance(v, dict)
+    ]
+    evs = []
+    if focus_id:
+        for e in LOGISTICS_EVENTS:
+            if isinstance(e, dict) and e.get("shipment_id") == focus_id:
+                evs.append(
+                    {
+                        "event": e.get("event"),
+                        "severity": e.get("severity"),
+                        "timestamp": e.get("timestamp"),
+                    }
+                )
+    facts["logistics_events"] = evs[-5:]
+    return facts
+
+
+def _navibot_risk_fallback_text(facts: dict) -> str:
+    """Rule-based copy if LLM unavailable — no hallucination."""
+    sid = facts.get("shipment_id") or "This shipment"
+    st = facts.get("on_chain_status") or "unknown"
+    parts = [f"{sid} on-chain status: {st}."]
+    evs = facts.get("logistics_events") or []
+    if evs:
+        parts.append("Logged logistics signals include: " + "; ".join(f"{e.get('event')} ({e.get('severity') or 'n/a'})" for e in evs[-3:]) + ".")
+    else:
+        parts.append("No matching off-chain logistics events in the local feed for this ID.")
+    verdicts = facts.get("recent_verdicts") or []
+    if verdicts:
+        last = verdicts[-1]
+        parts.append(
+            f"Latest recorded scan: verdict {last.get('verdict')!s}, score {last.get('sentinel_score')!s}."
+        )
+    if st in ("Delayed_Disaster", "Disputed"):
+        rec = "Recommended action: open the audit trail, review on-chain proof, then run settlement or dispute flow from the dashboard."
+    elif st == "In_Transit":
+        rec = "Recommended action: keep monitoring telemetry; use Verify for a public snapshot."
+    else:
+        rec = "Recommended action: open Verify to confirm chain state, then proceed per your playbook."
+    parts.append(rec)
+    return " ".join(parts)
+
+
+def _elevenlabs_tts(text: str) -> Optional[str]:
+    key = os.environ.get("ELEVENLABS_API_KEY")
+    voice = os.environ.get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
+    if not key or not (text or "").strip():
+        return None
+    snippet = text.strip()[:500]
+    try:
+        r = requests.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice}",
+            headers={"xi-api-key": key, "Accept": "audio/mpeg", "Content-Type": "application/json"},
+            json={"text": snippet, "model_id": "eleven_turbo_v2_5"},
+            timeout=14,
+        )
+        r.raise_for_status()
+        return "data:audio/mpeg;base64," + base64.b64encode(r.content).decode("ascii")
+    except Exception as e:
+        logger.debug("ElevenLabs TTS failed: %s", e)
+        return None
+
+
+def _navibot_gemini_text(sys_prompt: str, user_blob: str) -> str:
+    """Try multiple Gemini model ids — returns empty string if all fail."""
+    if not GEMINI_API_KEY:
+        logger.warning("navibot: GEMINI_API_KEY not set")
+        return ""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    combined = (sys_prompt + "\n\n" + user_blob).strip()
+    for model in ("gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"):
+        try:
+            resp = client.models.generate_content(model=model, contents=combined)
+            t = (getattr(resp, "text", None) or "").strip()
+            if t:
+                return t
+        except Exception as e:
+            logger.warning("navibot gemini model=%s: %s", model, e)
+    return ""
+
+
+def _navibot_pack(text: str, action: Optional[str], audio_url: Optional[str], fallback: bool) -> dict:
+    t = (text or "").replace("\n", " ").strip()
+    if len(t) > 700:
+        t = t[:697] + "…"
+    return {
+        "text": t,
+        "reply": t,
+        "action": action,
+        "audio_url": audio_url if audio_url else None,
+        "fallback": fallback,
+    }
+
+
+@app.get("/verification/health")
+def verification_health():
+    """Algod + indexer reachability (honest stale / retry UI)."""
+    return ver.chain_health()
+
+
+@app.get("/verification/on-chain-state")
+def verification_on_chain_state(wallet: str = ""):
+    """Ledger-sourced global/local summary: NaviTrust."""
+    return ver.read_on_chain_state(wallet.strip())
+
+
+@app.get("/verification/tx/{tx_id}")
+def verification_transaction_detail(tx_id: str):
+    """Single tx + atomic group members + Lora URLs (indexer)."""
+    return ver.indexer_transaction_detail(tx_id.strip())
+
+
+@app.get("/verification/wallet-proofs")
+def verification_wallet_proofs(wallet: str, limit: int = 25):
+    w = (wallet or "").strip()
+    if len(w) < 52:
+        raise HTTPException(status_code=400, detail="Valid Algorand wallet address required")
+    lim = max(5, min(limit, 60))
+    return ver.wallet_proofs(w, lim)
+
+
+@app.get("/verification/audit-trail")
+def verification_audit_trail(wallet: str, limit: int = 40):
+    w = (wallet or "").strip()
+    if len(w) < 52:
+        raise HTTPException(status_code=400, detail="Valid Algorand wallet address required")
+    lim = max(5, min(limit, 80))
+    return ver.audit_trail_methods(w, lim)
+
+
+@app.get("/verification/asa/{asset_id}")
+def verification_asa(asset_id: int):
+    return ver.asa_proof(asset_id)
+
+
+@app.get("/verification/export/wallet-proofs.json")
+def verification_export_wallet_json(wallet: str):
+    w = (wallet or "").strip()
+    if len(w) < 52:
+        raise HTTPException(status_code=400, detail="Valid Algorand wallet address required")
+    body = ver.export_wallet_proofs_json(w)
+    safe = "".join(c if c.isalnum() else "_" for c in w[:12])
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="navitrust_wallet_proofs_{safe}.json"'},
+    )
+
+
+@app.get("/verification/export/wallet-proofs.csv")
+def verification_export_wallet_csv(wallet: str):
+    w = (wallet or "").strip()
+    if len(w) < 52:
+        raise HTTPException(status_code=400, detail="Valid Algorand wallet address required")
+    body = ver.export_wallet_proofs_csv(w)
+    safe = "".join(c if c.isalnum() else "_" for c in w[:12])
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="navitrust_wallet_proofs_{safe}.csv"'},
+    )
+
+
+@app.get("/verification/arc4-dictionary")
+def verification_arc4_dictionary():
+    """Public ARC-4 selector → method signature map (from ARC56 + runtime hints)."""
+    return ver.arc4_dictionary()
+
+
+@app.get("/verification/shipment-box")
+def verification_shipment_box(shipment_id: str):
+    """NaviTrust box storage snapshot for a shipment id (algod)."""
+    return ver.shipment_ledger_snapshot(shipment_id.strip())
+
+
+@app.get("/verification/bundle")
+def verification_bundle_get(wallet: str = "", tx_id: str = ""):
+    """Combined proof object (JSON) for auditors — same domain apps only."""
+    w = (wallet or "").strip()
+    if len(w) < 52:
+        raise HTTPException(status_code=400, detail="Valid Algorand wallet address required")
+    return ver.proof_bundle(w, (tx_id or "").strip() or None)
+
+
+@app.get("/verification/export/bundle.json")
+def verification_export_bundle_json(wallet: str, tx_id: str = ""):
+    w = (wallet or "").strip()
+    if len(w) < 52:
+        raise HTTPException(status_code=400, detail="Valid Algorand wallet address required")
+    body = ver.export_proof_bundle_json(w, tx_id or "")
+    safe = "".join(c if c.isalnum() else "_" for c in w[:12])
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="navitrust_proof_bundle_{safe}.json"'},
+    )
+
+
+@app.get("/transactions")
+def list_app_transactions(limit: int = 20):
+    lim = max(1, min(limit, 50))
+    return {"transactions": chain.indexer_recent_app_txns(lim), "app_id": APP_ID}
+
+
+@app.post("/navibot")
+async def navibot_chat(req: NavibotRequest, request: Request):
+    """Always returns 200 + JSON. Never surfaces raw stack traces to the client."""
+    soft = "System temporarily unavailable. Showing last known data."
+    try:
+        q = req.effective_text()
+        if len(q) > 4000:
+            q = q[:4000]
+
+        if not q:
+            return JSONResponse(
+                content=_navibot_pack(
+                    "Ask about a shipment on Algorand—for example: “Why is this shipment risky?” "
+                    "Select a shipment on the dashboard for richer context.",
+                    None,
+                    None,
+                    True,
+                )
+            )
+
+        client_key = request.client.host if request.client else "unknown"
+        if not _navibot_rate_ok(client_key):
+            return JSONResponse(
+                content=_navibot_pack(
+                    "You’re sending messages quickly. Please wait a few seconds and try again.",
+                    None,
+                    None,
+                    True,
+                )
+            )
+
+        focus = _navibot_focus_id(q, req.shipment_id)
+        ctx = _navibot_chain_context(focus)
+        used_fallback = False
+        user_blob = q
+        if req.history:
+            user_blob = (
+                "Prior turns (JSON): " + json.dumps(req.history[:12])[:4000] + "\n\nUser message: " + q
+            )
+
+        text = ""
+        if _navibot_wants_risk_explanation(q):
+            facts = _navibot_risk_facts(focus, ctx)
+            sys_risk = (
+                "You are NaviBot for Navi-Trust. Using ONLY facts in RISK_FACTS_JSON, explain shipment risk in "
+                "2–3 concise sentences. Mention concrete signals (status, events, scores). "
+                "End with one sentence starting with 'Recommended action:'. "
+                "If facts are thin, say monitoring looks routine and suggest Verify for proof."
+            )
+            user_risk = "RISK_FACTS_JSON:\n" + json.dumps(facts, default=str)[:6000]
+            try:
+                text = await asyncio.wait_for(
+                    asyncio.to_thread(_navibot_gemini_text, sys_risk, user_risk),
+                    timeout=25.0,
+                )
+            except asyncio.TimeoutError:
+                text = ""
+            if not text:
+                text = _navibot_risk_fallback_text(facts)
+                used_fallback = True
+        else:
+            sys_prompt = (
+                "You are NaviBot for Navi-Trust on Algorand. Explain shipment status clearly in at most 2 short sentences. "
+                "Use ONLY facts from CHAIN_CONTEXT_JSON. If data is missing, say it is not on-chain yet—do not invent "
+                "tx ids, balances, or statuses. You may suggest Verify or Lora for public proof.\n\n"
+                f"CHAIN_CONTEXT_JSON:\n{json.dumps(ctx, default=str)[:8000]}"
+            )
+            try:
+                text = await asyncio.wait_for(
+                    asyncio.to_thread(_navibot_gemini_text, sys_prompt, user_blob),
+                    timeout=25.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("navibot gemini timeout")
+                text = ""
+            except Exception as e:
+                logger.warning("navibot gemini: %s", e)
+                text = ""
+            if not text:
+                text = _openai_chat(sys_prompt + "\n\n" + user_blob) or ""
+            if not text:
+                text = "AI unavailable. Showing system data: open Verify for on-chain shipment proof."
+                used_fallback = True
+
+        action = _navibot_action_hint(q, ctx)
+        audio_url: Optional[str] = None
+        try:
+            audio_url = await asyncio.wait_for(asyncio.to_thread(_elevenlabs_tts, text), timeout=18.0)
+        except Exception:
+            audio_url = None
+
+        return JSONResponse(content=_navibot_pack(text, action, audio_url, used_fallback))
+    except Exception as e:
+        logger.exception("navibot fatal: %s", e)
+        return JSONResponse(content=_navibot_pack(soft, None, None, True))
 
 
 @app.get("/config")
@@ -1344,7 +1980,7 @@ async def get_config():
 
 
 @app.get("/box-status")
-async def get_box_status():
+def get_box_status():
     """Read live Algorand Box Storage status for all registered shipments. JSON dict of shipment_id -> status."""
     with get_db() as conn:
         rows = conn.execute("SELECT id FROM shipments").fetchall()
@@ -1353,11 +1989,8 @@ async def get_box_status():
     for row in rows:
         ship_id = row["id"]
         try:
-            box_name = b"shipment_" + ship_id.encode("utf-8")
-            box_resp = algorand.client.algod.application_box_by_name(APP_ID, box_name)
-            raw = base64.b64decode(box_resp["value"])
-            status = raw.decode("utf-8") if raw[:2] != b"\x00" else raw[2:].decode("utf-8")
-            statuses[ship_id] = status
+            s = _read_box_status(ship_id)
+            statuses[ship_id] = s if s != "Unregistered" else "Unknown"
         except Exception:
             statuses[ship_id] = "Unknown"
 
@@ -1369,15 +2002,72 @@ async def get_box_status():
 # ═══════════════════════════════════════════════════════════════════
 
 
-INDEXER_URL = (
-    "https://testnet-idx.algonode.cloud"
-    if ALGO_NETWORK == "testnet"
-    else "https://mainnet-idx.algonode.cloud"
-)
+@app.get("/indexer-audit")
+def get_indexer_audit(shipment_id: str = ""):
+    """Verifiable tx notes from Algorand Indexer — tamper-proof audit trail."""
+    try:
+        if not DEPLOYER_MNEMONIC:
+            return {"notes": [], "error": "no_deployer"}
+        from algosdk import mnemonic as mn
+        deployer_addr = mn.to_public_key(DEPLOYER_MNEMONIC)
+        url = f"{INDEXER_URL}/v2/accounts/{deployer_addr}/transactions?limit=50"
+        resp = requests.get(url, timeout=3)
+        resp.raise_for_status()
+        data = resp.json()
+        notes = []
+        for tx in data.get("transactions", []):
+            n = tx.get("note")
+            if not n:
+                continue
+            try:
+                raw = base64.b64decode(n)
+                text = raw.decode("utf-8", errors="replace")
+                if text.startswith("NAVI|"):
+                    parts = text.split("|", 2)
+                    sid = parts[1] if len(parts) > 1 else ""
+                    msg = parts[2] if len(parts) > 2 else ""
+                    if shipment_id and sid != shipment_id:
+                        continue
+                    notes.append({
+                        "shipment_id": sid,
+                        "reasoning": msg,
+                        "tx_id": tx.get("id"),
+                        "round": tx.get("confirmed-round") or tx.get("confirmed_round"),
+                    })
+            except Exception:
+                continue
+        return {"notes": notes[:20]}
+    except Exception as e:
+        logger.warning(f"Indexer audit failed: {e}")
+        return {"notes": []}
+
+
+@app.get("/global-kpis")
+def get_global_kpis():
+    """Ledger stats: NaviTrust box enumeration or global state / audit fallback."""
+    if chain.use_navitrust() and APP_ID:
+        g = chain.global_stats_navitrust()
+        g["total_settlements"] = g.get("total_settled", 0)
+        return g
+    try:
+        app_info = algorand.client.algod.application_info(APP_ID)
+        gs = app_info.get("params", {}).get("global-state", [])
+        total = 0
+        for kv in gs:
+            k = base64.b64decode(kv.get("key", "")).decode("utf-8", errors="ignore")
+            if "Total_Settlements" in k or "total_settlements" in k.lower():
+                total = int(kv.get("value", {}).get("uint", 0))
+                break
+        if total == 0:
+            total = sum(1 for vs in AUDIT_TRAIL.values() for v in vs if v.get("tx_id"))
+        return {"total_settlements": total, "app_id": APP_ID}
+    except Exception as e:
+        logger.warning("Global KPIs failed: %s", e)
+        return {"total_settlements": sum(1 for vs in AUDIT_TRAIL.values() for v in vs if v.get("tx_id")), "app_id": APP_ID}
 
 
 @app.get("/verify-tx/{tx_id}")
-async def verify_transaction(tx_id: str):
+def verify_transaction(tx_id: str):
     """
     Verify an Algorand transaction — returns confirmation status and Lora Explorer link.
     Uses indexer to check if TX is in a block; clickable proof for public auditability.
@@ -1408,95 +2098,48 @@ async def verify_transaction(tx_id: str):
 
 
 @app.get("/verify/{shipment_id}")
-async def verify_shipment(shipment_id: str):
+def verify_shipment(shipment_id: str):
     """Public verification interface — anyone can verify a shipment's on-chain status."""
-    on_chain = "Not found on-chain"
+    full = chain.read_shipment_full(shipment_id) if APP_ID else {}
+    on_chain = full.get("status", "Not found on-chain")
     box_raw = None
-    try:
-        box_name = b"shipment_" + shipment_id.encode("utf-8")
-        box_resp = algorand.client.algod.application_box_by_name(APP_ID, box_name)
-        raw = base64.b64decode(box_resp["value"])
-        on_chain = raw.decode("utf-8") if raw[:2] != b"\x00" else raw[2:].decode("utf-8")
-        box_raw = base64.b64encode(raw).decode("ascii")
-    except Exception:
-        pass
+    if not chain.use_navitrust():
+        try:
+            box_name = b"shipment_" + shipment_id.encode("utf-8")
+            box_resp = algorand.client.algod.application_box_by_name(APP_ID, box_name)
+            raw = base64.b64decode(box_resp["value"])
+            on_chain = _decode_box_value_to_str(raw) or on_chain
+            box_raw = base64.b64encode(raw).decode("ascii")
+        except Exception:
+            pass
 
     with get_db() as conn:
         row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
 
     verdicts = AUDIT_TRAIL.get(shipment_id, [])
+    latest = verdicts[-1] if verdicts else None
+    verdict_tx = (latest or {}).get("tx_id")
+    funds_micro = int(full.get("funds_microalgo") or 0) if isinstance(full, dict) else 0
+    cert_id = full.get("certificate_asa") if isinstance(full, dict) else None
 
     return {
         "shipment_id": shipment_id,
         "found": row is not None,
         "app_id": APP_ID,
         "network": ALGO_NETWORK,
+        "on_chain": full,
         "on_chain_status": on_chain,
         "off_chain_status": row["status"] if row else None,
         "origin": row["origin"] if row else None,
         "destination": row["destination"] if row else None,
         "box_raw_b64": box_raw,
         "total_scans": len(verdicts),
-        "latest_verdict": verdicts[-1] if verdicts else None,
-        "explorer_url": f"https://lora.algokit.io/testnet/application/{APP_ID}",
+        "latest_verdict": latest,
+        "funds_locked_microalgo": funds_micro,
+        "certificate_asa_id": cert_id,
+        "explorer_url": full.get("lora_url") or f"{LORA_TESTNET_APP}/{APP_ID}",
+        "lora_verdict_tx_url": chain.lora_tx_url(verdict_tx) if verdict_tx else None,
     }
-
-
-# ═══════════════════════════════════════════════════════════════════
-#   x 4 0 2   A G E N T   P A Y M E N T  (simulated)
-# ═══════════════════════════════════════════════════════════════════
-
-
-class PayAgentRequest(BaseModel):
-    shipment_id: str
-    payer_address: str
-
-
-@app.post("/pay-agent")
-async def pay_agent(req: PayAgentRequest):
-    """
-    Simulated x402 payment flow — returns a receipt without on-chain transfer.
-    Real Algorand payments: Use AtomicTransactionComposer to send ALGO/USDC from
-    payer to agent addresses; user signs via Pera Wallet, or backend disburses
-    from a funded treasury for fully automatic payments.
-    """
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT id FROM shipments WHERE id = ?", (req.shipment_id,)
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=400, detail="Unknown shipment")
-
-    cached = JURY_CACHE.get(req.shipment_id)
-    if not cached:
-        raise HTTPException(
-            status_code=400,
-            detail="No settlement verdict exists. Run the agentic settlement first.",
-        )
-
-    receipt = {
-        "protocol": "x402",
-        "service": "Agentic Arbitration Service",
-        "shipment_id": req.shipment_id,
-        "payer": req.payer_address,
-        "agents_paid": [
-            {"name": "Logistics Sentry", "role": "Risk Detection", "fee_usdc": 0.50},
-            {"name": "Compliance Auditor", "role": "On-Chain Verification", "fee_usdc": 0.30},
-            {"name": "Settlement Arbiter", "role": "Final Adjudication", "fee_usdc": 1.20},
-        ],
-        "total_usdc": 2.00,
-        "currency": "USDC (simulated)",
-        "settlement_verdict": cached.get("chief_justice", {}).get("judgment", "N/A")[:120],
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "status": "PAID",
-        "memo": (
-            "Simulated receipt — no on-chain transfer. Algorand supports real "
-            "automatic payments via backend-signed ALGO/USDC transfers or "
-            "user-signed Pera Wallet transactions."
-        ),
-    }
-    logger.info(f"x402 payment: {req.payer_address} -> agents for {req.shipment_id}")
-    return receipt
 
 
 if __name__ == "__main__":
