@@ -609,6 +609,32 @@ code {
   color: #7dd3fc !important;
 }
 
+.role-banner-stakeholder {
+  background: rgba(0, 194, 255, 0.08);
+  border-bottom: 1px solid rgba(0, 194, 255, 0.2);
+  color: #00c2ff;
+  font-size: 12px;
+  padding: 4px 16px;
+  text-align: center;
+}
+
+.role-banner-supplier {
+  background: rgba(245, 158, 11, 0.08);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.2);
+  color: #f59e0b;
+  font-size: 12px;
+  padding: 4px 16px;
+  text-align: center;
+}
+
+.dashboard-content {
+  transition: opacity 0.2s ease;
+}
+
+.dashboard-content.dashboard-content--switching {
+  opacity: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ticker-content {
     animation: none !important;

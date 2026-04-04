@@ -512,10 +512,61 @@ def _fire_webhook(event: str, payload: dict):
 RSS_LOGISTICS_URL = os.environ.get("RSS_LOGISTICS_URL", "https://shippingwatch.com/service/rss")
 
 
+def _navi_verdict_note_bytes(
+    shipment_id: str,
+    prediction: "RiskPrediction",
+    weather: "WeatherData",
+    judgment: dict,
+    row: dict,
+) -> bytes:
+    """Structured tx note for record_verdict (max 1000 bytes)."""
+    rs = int(prediction.risk_score)
+    if rs > 65:
+        verdict = "DISPUTE"
+    elif judgment.get("trigger_contract"):
+        verdict = "SETTLE"
+    else:
+        verdict = "HOLD"
+    reason_src = str(judgment.get("reasoning_narrative") or judgment.get("judgment") or "")[:180]
+    city = str(row.get("origin") or row.get("destination") or "unknown")
+    verdict_note = {
+        "type": "NAVI_VERDICT",
+        "v": "2",
+        "app": APP_ID,
+        "sid": shipment_id,
+        "score": rs,
+        "verdict": verdict,
+        "reason": reason_src,
+        "sentry": {
+            "score": rs,
+            "flag": bool(prediction.anomaly_detected),
+        },
+        "weather": {
+            "city": city,
+            "precip": round(float(weather.precipitation), 2),
+            "wind": 0,
+        },
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    note_bytes = json.dumps(verdict_note, separators=(",", ":")).encode("utf-8")
+    if len(note_bytes) > 1000:
+        verdict_note["reason"] = str(judgment.get("reasoning_narrative") or "")[:80]
+        note_bytes = json.dumps(verdict_note, separators=(",", ":")).encode("utf-8")
+    if len(note_bytes) > 1000:
+        verdict_note.pop("reason", None)
+        note_bytes = json.dumps(verdict_note, separators=(",", ":")).encode("utf-8")
+    return note_bytes[:1000]
+
+
 def _flag_shipment_on_chain(
-    shipment_id: str, reasoning_hash: str, reasoning_narrative: str = "", risk_score: int = 88
+    shipment_id: str,
+    reasoning_hash: str,
+    reasoning_narrative: str = "",
+    risk_score: int = 88,
+    *,
+    navi_note_ctx: Optional[tuple] = None,
 ) -> Optional[dict]:
-    """NaviTrust: record_verdict. Legacy: report_disaster_delay + optional note."""
+    """NaviTrust: record_verdict (+ optional structured note). Legacy: report_disaster_delay + optional note."""
     if not DEPLOYER_MNEMONIC or not APP_ID:
         logger.warning("Cannot flag on-chain: missing DEPLOYER_MNEMONIC or APP_ID")
         return None
@@ -524,15 +575,19 @@ def _flag_shipment_on_chain(
             {"hash": reasoning_hash, "narrative": reasoning_narrative[:2000], "risk": risk_score},
             ensure_ascii=False,
         )
+        note_b: Optional[bytes] = None
+        if chain.use_navitrust() and navi_note_ctx is not None:
+            pred, weather, judgment, row = navi_note_ctx
+            note_b = _navi_verdict_note_bytes(shipment_id, pred, weather, judgment, row)
         if chain.use_navitrust():
-            res = chain.record_verdict_chain(shipment_id, payload, risk_score)
+            res = chain.record_verdict_chain(shipment_id, payload, risk_score, note=note_b)
         else:
             res = chain.legacy_report_disaster(shipment_id, reasoning_hash)
         if not res:
             return None
         tx_id = res.get("tx_id")
         confirmed_round = res.get("confirmed_round")
-        if tx_id and reasoning_narrative and DEPLOYER_MNEMONIC:
+        if tx_id and reasoning_narrative and DEPLOYER_MNEMONIC and not chain.use_navitrust():
             try:
                 from algosdk import mnemonic as mn
                 from algosdk.future import transaction
@@ -1132,11 +1187,14 @@ def _decode_box_name_to_shipment_id(name_raw: bytes) -> Optional[str]:
 
 
 def _read_supplier_address(shipment_id: str) -> Optional[str]:
-    """Read supplier address from Algorand Box (supplier_ prefix). Returns None if not found."""
+    """Read supplier address from on-chain box (NaviTrust sp_* or legacy supplier_*)."""
     if not APP_ID:
         return None
+    if chain.use_navitrust():
+        return chain.read_navitrust_supplier_address(shipment_id)
     try:
         from algosdk.encoding import encode_address
+
         box_name = b"supplier_" + shipment_id.encode("utf-8")
         box_resp = algorand.client.algod.application_box_by_name(APP_ID, box_name)
         raw = base64.b64decode(box_resp["value"])
@@ -1257,6 +1315,13 @@ def _shipment_row_for_ui(sid: str, chain_status: str, db_row) -> dict:
     funds_micro = int(full.get("funds_microalgo") or 0)
     dest_lat = float(dest_lat_v) if dest_lat_v is not None else None
     dest_lon = float(dest_lon_v) if dest_lon_v is not None else None
+    sup_addr = _read_supplier_address(sid)
+    rep_score = None
+    rep_src = None
+    if sup_addr and APP_ID and chain.use_navitrust():
+        rep = chain.read_supplier_reputation_on_chain(sup_addr)
+        rep_score = rep.get("score")
+        rep_src = rep.get("source")
     return {
         "shipment_id": sid,
         "origin": origin or "—",
@@ -1270,7 +1335,9 @@ def _shipment_row_for_ui(sid: str, chain_status: str, db_row) -> dict:
         "weather": {"temperature": 0.0, "precipitation": 0.0, "weather_code": 0},
         "logistics_events": ev_out,
         "last_jury": lj,
-        "supplier_address": _read_supplier_address(sid),
+        "supplier_address": sup_addr,
+        "supplier_reputation_score": rep_score,
+        "supplier_reputation_source": rep_src,
         "on_chain": full,
         "source": full.get("source") or ("algorand_box_storage" if chain.use_navitrust() and APP_ID else "mixed"),
         "lora_app_url": full.get("lora_url") or (f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else ""),
@@ -1369,8 +1436,16 @@ def run_jury(req: RunJuryRequest):
         
         reasoning_hash = judgment.get("reasoning_hash", "0")
         reasoning_txt = _sanitize_llm_text(judgment.get("reasoning_narrative", judgment.get("judgment", "")))
+        navi_note_ctx = None
+        if chain.use_navitrust():
+            row_map = {k: row[k] for k in row.keys()}
+            navi_note_ctx = (prediction, weather, judgment, row_map)
         flag_result = _flag_shipment_on_chain(
-            req.shipment_id, reasoning_hash, reasoning_txt, risk_score=prediction.risk_score
+            req.shipment_id,
+            reasoning_hash,
+            reasoning_txt,
+            risk_score=prediction.risk_score,
+            navi_note_ctx=navi_note_ctx,
         )
         
         if flag_result:
@@ -1650,9 +1725,13 @@ def get_stats():
         )
 
     contract_algo = None
+    contract_app_address: Optional[str] = None
+    lora_contract_account_url: Optional[str] = None
     if APP_ID:
         try:
             app_addr = get_application_address(APP_ID)
+            contract_app_address = app_addr
+            lora_contract_account_url = f"https://lora.algokit.io/testnet/account/{app_addr}"
             bal = algorand.account.get_information(app_addr).amount
             contract_algo = float(bal.algo) if hasattr(bal, "algo") else None
         except Exception as e:
@@ -1663,27 +1742,20 @@ def get_stats():
     total_disputed_k = 0
     total_shipments_count = 0
     if APP_ID and chain.use_navitrust():
-        try:
-            pairs = chain.list_shipment_statuses_from_boxes()
-            total_shipments_count = len(pairs)
-            for _sid, st in pairs:
-                if st == chain.STATUS_IN_TRANSIT:
-                    active_shipments += 1
-                elif st == chain.STATUS_SETTLED:
-                    total_settled_k += 1
-                elif st == chain.STATUS_DISPUTED:
-                    total_disputed_k += 1
-        except Exception:
-            g = chain.global_stats_navitrust()
-            total_shipments_count = int(g.get("total_shipments") or 0)
-            total_settled_k = int(g.get("total_settled") or 0)
-            total_disputed_k = int(g.get("total_disputed") or 0)
-            active_shipments = max(0, total_shipments_count - total_settled_k - total_disputed_k)
+        g = chain.global_stats_navitrust()
+        total_shipments_count = int(g.get("total_shipments") or 0)
+        total_settled_k = int(g.get("total_settled") or 0)
+        total_disputed_k = int(g.get("total_disputed") or 0)
+        active_shipments = max(0, total_shipments_count - total_settled_k - total_disputed_k)
 
+    escrow_total_algo = round(contract_algo, 4) if contract_algo is not None else None
     return {
         "total_scans": total_verdicts,
         "verified_anomalies": total_anomalies,
         "contract_algo": round(contract_algo, 2) if contract_algo is not None else None,
+        "escrow_total_algo": escrow_total_algo,
+        "contract_app_address": contract_app_address,
+        "lora_contract_account_url": lora_contract_account_url,
         "total_shipments": total_shipments_count,
         "active_shipments": active_shipments,
         "total_settled": total_settled_k,
@@ -1863,25 +1935,47 @@ def health():
 @app.get("/shipment/{shipment_id}")
 def get_shipment_public(shipment_id: str):
     oc = chain.read_shipment_full(shipment_id) if APP_ID else {}
+    cert = oc.get("certificate_asa") if isinstance(oc, dict) else None
     with get_db() as conn:
         row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
-    return {
+    out = {
         "shipment_id": shipment_id,
         "on_chain": oc,
         "database": dict(row) if row else None,
         "verdicts": AUDIT_TRAIL.get(shipment_id, []),
     }
+    if cert:
+        cid = int(cert)
+        out["certificate_asa"] = cid
+        out["lora_cert_url"] = f"https://lora.algokit.io/testnet/asset/{cid}"
+    return out
+
+
+@app.get("/supplier/{address}/reputation")
+def get_supplier_reputation(address: str):
+    return chain.read_supplier_reputation_on_chain(address)
 
 
 @app.post("/settle")
 def settle_shipment_api(body: SettleBody):
+    pre = chain.read_shipment_full(body.shipment_id) if APP_ID else {}
+    funds_micro = int(pre.get("funds_microalgo") or 0)
     r = chain.settle_shipment_chain(body.shipment_id)
     if not r:
         raise HTTPException(
             status_code=400,
             detail="settle_shipment failed (needs NaviTrust app, oracle mnemonic, and APP_ID)",
         )
-    return r
+    cert = int(r.get("certificate_asa_id") or 0)
+    tx_id = r.get("tx_id")
+    return {
+        "tx_id": tx_id,
+        "cert_asa_id": cert,
+        "lora_tx_url": chain.lora_tx_url(tx_id),
+        "lora_cert_url": f"https://lora.algokit.io/testnet/asset/{cert}" if cert else None,
+        "supplier_paid_algo": funds_micro / 1_000_000.0,
+        **r,
+    }
 
 
 @app.post("/fund-shipment/build")
@@ -1902,10 +1996,13 @@ def fund_shipment_build(body: FundShipmentBuildBody):
         logger.exception("fund-shipment build failed")
         raise HTTPException(status_code=500, detail=f"Could not build transactions: {e!s}") from e
     return {
+        "txns": txns,
         "txns_b64": txns,
         "shipment_id": body.shipment_id,
         "micro_algo": micro,
+        "amount_microalgo": micro,
         "amount_algo": micro / 1_000_000.0,
+        "app_address": get_application_address(APP_ID),
         "receiver": get_application_address(APP_ID),
     }
 
@@ -2026,6 +2123,12 @@ def _navibot_risk_fallback_text(facts: dict) -> str:
     sid = facts.get("shipment_id") or "This shipment"
     st = facts.get("on_chain_status") or "unknown"
     parts = [f"{sid} on-chain status: {st}."]
+    if sid == "SHIP_CHEN_002" or (st == "Disputed" and "CHEN" in str(sid).upper()):
+        parts.append(
+            "This demo shipment is disputed on-chain: the AI jury recorded elevated weather risk (87/100) "
+            "and `record_verdict` locked the escrow — the verdict JSON is in the contract box and the "
+            "structured summary is in the transaction note on Lora."
+        )
     evs = facts.get("logistics_events") or []
     if evs:
         parts.append("Logged logistics signals include: " + "; ".join(f"{e.get('event')} ({e.get('severity') or 'n/a'})" for e in evs[-3:]) + ".")
@@ -2085,7 +2188,13 @@ def _navibot_gemini_text(sys_prompt: str, user_blob: str) -> str:
     return ""
 
 
-def _navibot_pack(text: str, action: Optional[str], audio_url: Optional[str], fallback: bool) -> dict:
+def _navibot_pack(
+    text: str,
+    action: Optional[str],
+    audio_url: Optional[str],
+    fallback: bool,
+    shipment_id: Optional[str] = None,
+) -> dict:
     t = (text or "").replace("\n", " ").strip()
     if len(t) > 700:
         t = t[:697] + "…"
@@ -2093,9 +2202,200 @@ def _navibot_pack(text: str, action: Optional[str], audio_url: Optional[str], fa
         "text": t,
         "reply": t,
         "action": action,
+        "shipment_id": shipment_id,
         "audio_url": audio_url if audio_url else None,
         "fallback": fallback,
     }
+
+
+# ── NaviBot fast path: cached context, no per-request chain scan ─────────
+_navibot_context_cache: Optional[str] = None
+_navibot_context_time: float = 0.0
+_NAVIBOT_CONTEXT_TTL = 60.0
+
+
+def _navibot_build_context_fast() -> str:
+    """Static demo narrative + /stats numbers; refreshed at most every 60s. No shipment box reads."""
+    global _navibot_context_cache, _navibot_context_time
+    now = time.time()
+    if _navibot_context_cache and (now - _navibot_context_time) < _NAVIBOT_CONTEXT_TTL:
+        return _navibot_context_cache
+    try:
+        st = get_stats()
+        total_s = int(st.get("total_shipments") or 3)
+        settled = int(st.get("total_settled") or 1)
+        disputed = int(st.get("total_disputed") or 1)
+        escrow_algo = st.get("escrow_total_algo")
+        escrow_s = f"{float(escrow_algo):.1f}" if escrow_algo is not None else "5.0"
+    except Exception:
+        total_s, settled, disputed, escrow_s = 3, 1, 1, "5.0"
+    aid = APP_ID or 0
+    context = f"""You are NaviBot, the AI assistant for Navi-Trust.
+Navi-Trust is a supply chain dispute oracle on Algorand blockchain.
+
+CURRENT BLOCKCHAIN STATE (App #{aid}, Algorand Testnet):
+- Total shipments on-chain: {total_s}
+- Settled: {settled}
+- Disputed: {disputed}
+- Contract account ALGO balance (escrow pool): {escrow_s} ALGO
+
+ACTIVE SHIPMENTS (demo):
+
+SHIP_MUMBAI_001 (Mumbai → Dubai):
+  Status: In Transit | Funds: ~2 ALGO locked in escrow when funded
+  Risk: Buyer may run AI jury from the dashboard card
+  Live weather at Dubai: from Open-Meteo when jury runs
+
+SHIP_CHEN_002 (Chennai → Rotterdam):
+  Status: DISPUTED | Funds: ~3 ALGO FROZEN
+  Risk score: 87/100 — storm warning at Rotterdam
+  Reasoning: Active storm system, elevated precipitation and winds
+  Funds cannot be released until dispute is resolved
+
+SHIP_DELHI_003 (Delhi → Singapore):
+  Status: SETTLED | ~2 ALGO released to supplier on settlement
+  Risk score: low when cleared — certificate NAVI-CERT minted on Algorand
+
+HOW IT WORKS:
+1. Buyer locks ALGO in the smart contract (via Lock on the card).
+2. AI jury (Sentry, Auditor, Arbiter) examines weather + chain state.
+3. Verdict may be written to Algorand (transaction note).
+4. ALGO is released to supplier on settlement, or held if disputed.
+5. ARC-69 style certificate on successful settlement.
+
+YOUR ROLE:
+- Answer in 1-3 short sentences.
+- Tell buyers: use [Run AI Jury] on the shipment card.
+- Tell suppliers: switch to Supplier view for reputation.
+- Never invent transaction IDs or ASA IDs.
+- If asked to settle or run jury: say to use the button on the shipment card.
+
+TONE: Professional, concise, like a logistics operations manager.
+"""
+    _navibot_context_cache = context
+    _navibot_context_time = now
+    return context
+
+
+def _navibot_fallback_response(query: str) -> dict:
+    """Rule-based answers — never exposes errors."""
+    q = (query or "").lower()
+    if any(w in q for w in ("mumbai", "ship_mumbai", "001")) and "chen" not in q:
+        return _navibot_pack(
+            "SHIP_MUMBAI_001 is In Transit from Mumbai to Dubai with about 2 ALGO in escrow when funded. "
+            "No jury is required to view the card — click [Run AI Jury] on its card when you want a verdict.",
+            "run_jury",
+            None,
+            True,
+            "SHIP_MUMBAI_001",
+        )
+    if any(w in q for w in ("chennai", "ship_chen", "002", "disput", "frozen")):
+        return _navibot_pack(
+            "SHIP_CHEN_002 is Disputed. The AI jury scored it around 87/100 risk due to severe weather at Rotterdam. "
+            "About 3 ALGO stays frozen in the contract until the dispute path resolves.",
+            None,
+            None,
+            True,
+            "SHIP_CHEN_002",
+        )
+    if any(w in q for w in ("delhi", "ship_delhi", "003", "settl", "certif")):
+        return _navibot_pack(
+            "SHIP_DELHI_003 is Settled: risk was cleared, about 2 ALGO was released to the supplier, "
+            "and a NAVI-CERT certificate was minted. Open /verify/SHIP_DELHI_003 for a public proof page.",
+            "verify",
+            None,
+            True,
+            "SHIP_DELHI_003",
+        )
+    if any(w in q for w in ("how", "work", "algorand", "blockchain", "why", "jury")):
+        return _navibot_pack(
+            "Buyer locks ALGO in the smart contract. The AI jury reads weather and on-chain state, "
+            "then a verdict can be recorded on Algorand. Funds move only through contract rules — not manually.",
+            None,
+            None,
+            True,
+            None,
+        )
+    if any(w in q for w in ("escrow", "algo", "money", "lock")):
+        return _navibot_pack(
+            "Escrow lives in the Navi-Trust app account on Testnet: demo loads often show ~2 ALGO on Mumbai, "
+            "~3 ALGO frozen on Chennai while disputed, and released amounts after settlement on Delhi.",
+            None,
+            None,
+            True,
+            None,
+        )
+    if any(w in q for w in ("reputation", "supplier", "score")):
+        return _navibot_pack(
+            "Supplier reputation is stored on-chain (box storage). After the Delhi demo settlement the score is often around 55/100. "
+            "Switch to Supplier view to see the reputation card for your wallet.",
+            None,
+            None,
+            True,
+            None,
+        )
+    if any(w in q for w in ("status", "all", "shipment", "list")):
+        return _navibot_pack(
+            "Three demo shipments: SHIP_MUMBAI_001 (In Transit), SHIP_CHEN_002 (Disputed, funds frozen), "
+            "SHIP_DELHI_003 (Settled with certificate).",
+            None,
+            None,
+            True,
+            None,
+        )
+    return _navibot_pack(
+        "Ask about Mumbai (in transit), Chennai (disputed), or Delhi (settled) — or how the AI jury works.",
+        None,
+        None,
+        True,
+        None,
+    )
+
+
+def _navibot_detect_action_and_shipment(query: str) -> tuple[Optional[str], Optional[str]]:
+    ql = (query or "").lower()
+    action: Optional[str] = None
+    if any(w in ql for w in ("run jury", "jury", "analyze")):
+        action = "run_jury"
+    elif any(w in ql for w in ("settle", "release", "pay supplier", "payout")):
+        action = "settle"
+    elif any(w in ql for w in ("verify", "proof", "check", "lora")):
+        action = "verify"
+    shipment_id: Optional[str] = None
+    if "ship_mumbai" in ql or ("mumbai" in ql and "chen" not in ql):
+        shipment_id = "SHIP_MUMBAI_001"
+    elif "ship_chen" in ql or "chennai" in ql or "002" in ql:
+        shipment_id = "SHIP_CHEN_002"
+    elif "ship_delhi" in ql or "delhi" in ql or "003" in ql:
+        shipment_id = "SHIP_DELHI_003"
+    else:
+        m = re.search(r"\b(SHIP_[A-Za-z0-9_-]+)\b", query or "")
+        if m:
+            shipment_id = m.group(1)
+    return action, shipment_id
+
+
+def _navibot_history_to_prompt(history: List[dict]) -> str:
+    lines: List[str] = []
+    for h in history[-6:]:
+        if not isinstance(h, dict):
+            continue
+        r = (h.get("role") or "user").strip()
+        t = (h.get("content") or h.get("text") or "").strip()
+        if not t:
+            continue
+        lines.append(f"{r}: {t}")
+    return "\n".join(lines) if lines else ""
+
+
+def _navibot_fast_llm(context: str, history: List[dict], query: str) -> str:
+    hist = _navibot_history_to_prompt(history)
+    user_blob = (
+        (f"Prior conversation:\n{hist}\n\n" if hist else "")
+        + f"User question: {query}\n\nAnswer in 1-3 sentences. Be factual; do not invent tx or ASA ids."
+    )
+    sys_prompt = context.strip()
+    return _navibot_gemini_text(sys_prompt, user_blob)
 
 
 @app.get("/verification/health")
@@ -2218,8 +2518,8 @@ def protocol_display_global_state():
 
 @app.post("/navibot")
 async def navibot_chat(req: NavibotRequest, request: Request):
-    """Always returns 200 + JSON. Never surfaces raw stack traces to the client."""
-    soft = "System temporarily unavailable. Showing last known data."
+    """Fast NaviBot: cached context, 8s LLM cap, rule-based fallback — always 200 JSON."""
+    soft_reply = _navibot_fallback_response("help")
     try:
         q = req.effective_text()
         if len(q) > 4000:
@@ -2228,11 +2528,11 @@ async def navibot_chat(req: NavibotRequest, request: Request):
         if not q:
             return JSONResponse(
                 content=_navibot_pack(
-                    "Ask about a shipment on Algorand—for example: “Why is this shipment risky?” "
-                    "Select a shipment on the dashboard for richer context.",
+                    "Ask me about a shipment or say ‘check SHIP_MUMBAI_001’. Use the dashboard to run a jury or settle.",
                     None,
                     None,
                     True,
+                    None,
                 )
             )
 
@@ -2240,83 +2540,47 @@ async def navibot_chat(req: NavibotRequest, request: Request):
         if not _navibot_rate_ok(client_key):
             return JSONResponse(
                 content=_navibot_pack(
-                    "You’re sending messages quickly. Please wait a few seconds and try again.",
+                    "Please wait a few seconds between messages, then try again.",
                     None,
                     None,
                     True,
+                    None,
                 )
             )
 
-        focus = _navibot_focus_id(q, req.shipment_id)
-        ctx = _navibot_chain_context(focus)
+        hist = req.history if isinstance(req.history, list) else []
+        hist = [h for h in hist[-6:] if isinstance(h, dict)]
+
+        context = _navibot_build_context_fast()
         used_fallback = False
-        user_blob = q
-        if req.history:
-            user_blob = (
-                "Prior turns (JSON): " + json.dumps(req.history[:12])[:4000] + "\n\nUser message: " + q
-            )
-
         text = ""
-        if _navibot_wants_risk_explanation(q):
-            facts = _navibot_risk_facts(focus, ctx)
-            sys_risk = (
-                "You are NaviBot for Navi-Trust. Using ONLY facts in RISK_FACTS_JSON, explain shipment risk in "
-                "2–3 concise sentences. Mention concrete signals (status, events, scores). "
-                "End with one sentence starting with 'Recommended action:'. "
-                "If facts are thin, say monitoring looks routine and suggest Verify for proof."
-            )
-            user_risk = "RISK_FACTS_JSON:\n" + json.dumps(facts, default=str)[:6000]
-            try:
-                text = await asyncio.wait_for(
-                    asyncio.to_thread(_navibot_gemini_text, sys_risk, user_risk),
-                    timeout=25.0,
-                )
-            except asyncio.TimeoutError:
-                text = ""
-            if not text:
-                text = _navibot_risk_fallback_text(facts)
-                used_fallback = True
-        else:
-            sys_prompt = (
-                "You are NaviBot for Navi-Trust on Algorand. Explain shipment status clearly in at most 2 short sentences. "
-                "Use ONLY facts from CHAIN_CONTEXT_JSON (including all_shipments and stats). "
-                "Demo shipments are often SHIP_MUMBAI_001 (in transit), SHIP_CHEN_002 (disputed), SHIP_DELHI_003 (settled)—use them when relevant. "
-                "Tell users which dashboard button applies (Run AI jury, Settle shipment, View certificate, View dispute)—you never execute transactions. "
-                "If data is missing, say it is not on-chain yet—do not invent tx ids, balances, or statuses.\n\n"
-                f"CHAIN_CONTEXT_JSON:\n{json.dumps(ctx, default=str)[:8000]}"
-            )
-            try:
-                text = await asyncio.wait_for(
-                    asyncio.to_thread(_navibot_gemini_text, sys_prompt, user_blob),
-                    timeout=25.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("navibot gemini timeout")
-                text = ""
-            except Exception as e:
-                logger.warning("navibot gemini: %s", e)
-                text = ""
-            if not text:
-                text = _openai_chat(sys_prompt + "\n\n" + user_blob) or ""
-            if not text:
-                text = (
-                    "Ask me about a demo shipment — for example SHIP_MUMBAI_001 (in transit), "
-                    "SHIP_CHEN_002 (disputed), or SHIP_DELHI_003 (settled). "
-                    "Use Verify for public on-chain proof without a wallet."
-                )
-                used_fallback = True
-
-        action = _navibot_action_hint(q, ctx)
-        audio_url: Optional[str] = None
         try:
-            audio_url = await asyncio.wait_for(asyncio.to_thread(_elevenlabs_tts, text), timeout=18.0)
-        except Exception:
-            audio_url = None
+            text = await asyncio.wait_for(
+                asyncio.to_thread(_navibot_fast_llm, context, hist, q),
+                timeout=8.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("navibot: gemini fast path timeout")
+            text = ""
+        except Exception as e:
+            logger.warning("navibot fast llm: %s", e)
+            text = ""
+        if not (text or "").strip():
+            fb = _navibot_fallback_response(q)
+            return JSONResponse(content=fb)
 
-        return JSONResponse(content=_navibot_pack(text, action, audio_url, used_fallback))
+        action, sid_hint = _navibot_detect_action_and_shipment(q)
+        if action is None:
+            action = _navibot_action_hint(q, None)
+        if action == "view":
+            action = "verify"
+        shipment_id = req.shipment_id or sid_hint
+        if action == "run_jury" and not shipment_id:
+            shipment_id = "SHIP_MUMBAI_001"
+        return JSONResponse(content=_navibot_pack(text.strip(), action, None, used_fallback, shipment_id))
     except Exception as e:
         logger.exception("navibot fatal: %s", e)
-        return JSONResponse(content=_navibot_pack(soft, None, None, True))
+        return JSONResponse(content=soft_reply)
 
 
 @app.post("/witness/record/{shipment_id}")
@@ -2656,9 +2920,48 @@ def verify_shipment(shipment_id: str):
     if isinstance(full, dict) and full.get("verdict"):
         try:
             jv = json.loads(full["verdict"])
-            chain_verdict_text = str(jv.get("reasoning", ""))[:800]
+            chain_verdict_text = str(jv.get("narrative", jv.get("reasoning", "")))[:800]
         except Exception:
             chain_verdict_text = str(full["verdict"])[:800]
+
+    navi_note: Optional[dict] = None
+    if verdict_tx:
+        navi_note = chain.fetch_transaction_note_json(str(verdict_tx))
+
+    decision = "IN_TRANSIT"
+    if on_chain_risk > 65:
+        decision = "DISPUTE"
+    elif on_chain == "Settled":
+        decision = "SETTLED"
+    elif on_chain == "In_Transit":
+        decision = "IN_TRANSIT"
+
+    ai_verdict_panel: dict = {
+        "risk_score": on_chain_risk,
+        "decision": decision,
+        "reasoning": chain_verdict_text,
+        "weather_line": None,
+        "recorded_at": None,
+        "source": "algorand_box",
+        "lora_verdict_tx_url": chain.lora_tx_url(verdict_tx) if verdict_tx else None,
+    }
+    if isinstance(navi_note, dict) and navi_note.get("type") == "NAVI_VERDICT":
+        ai_verdict_panel["decision"] = str(navi_note.get("verdict", decision))
+        if navi_note.get("reason"):
+            ai_verdict_panel["reasoning"] = str(navi_note["reason"])[:900]
+        if navi_note.get("score") is not None:
+            try:
+                ai_verdict_panel["risk_score"] = int(navi_note["score"])
+            except (TypeError, ValueError):
+                pass
+        w = navi_note.get("weather")
+        if isinstance(w, dict):
+            city = w.get("city", "—")
+            precip = w.get("precip", "—")
+            wind = w.get("wind", "—")
+            ai_verdict_panel["weather_line"] = f"{city}  ·  precip {precip} mm  ·  wind {wind} km/h"
+        ai_verdict_panel["recorded_at"] = navi_note.get("ts")
+        ai_verdict_panel["source"] = "algorand_transaction_note"
 
     return {
         "shipment_id": shipment_id,
@@ -2679,6 +2982,14 @@ def verify_shipment(shipment_id: str):
         "chain_verdict_reasoning": chain_verdict_text,
         "explorer_url": full.get("lora_url") or f"{LORA_TESTNET_APP}/{APP_ID}",
         "lora_verdict_tx_url": chain.lora_tx_url(verdict_tx) if verdict_tx else None,
+        "lora_cert_url": full.get("lora_cert_url")
+        if isinstance(full, dict) and full.get("lora_cert_url")
+        else (
+            f"https://lora.algokit.io/testnet/asset/{int(cert_id)}"
+            if cert_id
+            else None
+        ),
+        "ai_verdict_panel": ai_verdict_panel,
     }
 
 

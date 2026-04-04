@@ -16,6 +16,7 @@ import VerifyPage from './pages/VerifyPage';
 import ProtocolPage from './pages/ProtocolPage';
 import NaviBotPage from './pages/NaviBotPage';
 import { NaviBotPanel } from './components/NaviBotPanel';
+import { RoleProvider, useRole } from './context/RoleContext';
 import { LandingPage } from './components/landing/LandingPage';
 import { WitnessPanel } from './components/WitnessPanel';
 import { WeatherCourt } from './components/WeatherCourt';
@@ -105,6 +106,7 @@ interface Shipment {
         /** Present when API exposes last settlement app-call tx id */
         settlement_tx_id?: string;
     };
+    lora_app_url?: string;
 }
 
 interface DialogueEntry { agent: string; message: string; }
@@ -126,12 +128,10 @@ interface AuditTrailData {
     indexer_notes?: any[];
 }
 
-type Role = 'stakeholder' | 'supplier';
-
 function MainApp() {
     const queryClient = useQueryClient();
+    const { role, switchRole, dashboardSwitching } = useRole();
     const [accountAddress, setAccountAddress] = useState<string | null>(null);
-    const [role, setRole] = useState<Role>('stakeholder');
     const [shipments, setShipments] = useState<Shipment[]>([]);
     const [appId, setAppId] = useState<number | null>(null);
     const [juryResult, setJuryResult] = useState<JuryResult | null>(null);
@@ -181,6 +181,7 @@ function MainApp() {
         tx_id?: string;
         supplier_paid_algo?: number;
     } | null>(null);
+    const [supplierRep, setSupplierRep] = useState<{ score: number; source?: string } | null>(null);
 
     const refreshRecentTxns = useCallback(() => {
         axios
@@ -235,6 +236,29 @@ function MainApp() {
         axios.get(`${BACKEND_URL}/config`).then((r) => setAppId(r.data?.app_id ?? null)).catch(() => {});
     }, []);
 
+    useEffect(() => {
+        if (role !== 'supplier' || !accountAddress) {
+            setSupplierRep(null);
+            return;
+        }
+        axios
+            .get(`${BACKEND_URL}/supplier/${encodeURIComponent(accountAddress)}/reputation`)
+            .then((r) => setSupplierRep({ score: Number(r.data?.score ?? 55), source: r.data?.source }))
+            .catch(() => setSupplierRep({ score: 55, source: 'demo' }));
+    }, [role, accountAddress]);
+
+    useEffect(() => {
+        try {
+            const p = sessionStorage.getItem('navi_pending_jury');
+            if (p) {
+                sessionStorage.removeItem('navi_pending_jury');
+                setJuryTerminalShipmentId(p);
+            }
+        } catch {
+            /* ignore */
+        }
+    }, []);
+
     /* ── Supplier: live telemetry fluctuation every 3s (generative monitoring) ─ */
     useEffect(() => {
         if (role !== 'supplier' || shipments.length === 0) return;
@@ -285,11 +309,60 @@ function MainApp() {
         [],
     );
 
-    /* ── Supplier: wallet-mapped filtering ─ */
-    const displayedShipments = useMemo(() => {
-        if (role !== 'supplier' || !accountAddress) return shipments;
-        return shipments.filter((s) => !s.supplier_address || s.supplier_address === accountAddress);
-    }, [shipments, role, accountAddress]);
+    /* Same on-chain list for both roles — cards differ by role. */
+    const displayedShipments = useMemo(() => shipments, [shipments]);
+
+    const supplierShipFilter = useCallback(
+        (s: Shipment) => !s.supplier_address || !accountAddress || s.supplier_address === accountAddress,
+        [accountAddress],
+    );
+
+    const stakeholderLockedAlgo = useMemo(
+        () =>
+            shipments
+                .filter((s) => s.stage === 'In_Transit' || s.stage === 'Disputed' || s.stage === 'Delayed_Disaster')
+                .reduce((acc, s) => acc + (s.funds_locked_microalgo ?? 0), 0) / 1e6,
+        [shipments],
+    );
+    const stakeholderHasDisputedInEscrow = useMemo(
+        () => shipments.some((s) => s.stage === 'Disputed' || s.stage === 'Delayed_Disaster'),
+        [shipments],
+    );
+    const stakeholderProtectedCount = useMemo(
+        () => shipments.filter((s) => s.stage !== 'Settled' && s.stage !== 'Not_Registered').length,
+        [shipments],
+    );
+
+    const supplierPendingAlgo = useMemo(() => {
+        if (!accountAddress) return null;
+        const sum =
+            shipments
+                .filter((s) => supplierShipFilter(s) && s.stage === 'In_Transit')
+                .reduce((a, s) => a + (s.funds_locked_microalgo ?? 0), 0) / 1e6;
+        return sum > 0 ? sum : null;
+    }, [shipments, accountAddress, supplierShipFilter]);
+
+    const supplierFrozenAlgo = useMemo(() => {
+        if (!accountAddress) return 0;
+        return (
+            shipments
+                .filter((s) => supplierShipFilter(s) && (s.stage === 'Disputed' || s.stage === 'Delayed_Disaster'))
+                .reduce((a, s) => a + (s.funds_locked_microalgo ?? 0), 0) / 1e6
+        );
+    }, [shipments, accountAddress, supplierShipFilter]);
+
+    const supplierReceivedAlgo = useMemo(() => {
+        const has = shipments.some((s) => supplierShipFilter(s) && s.stage === 'Settled');
+        return has ? 2 : 0;
+    }, [shipments, supplierShipFilter]);
+
+    const supplierIdentityCounts = useMemo(() => {
+        const settled = shipments.filter((s) => supplierShipFilter(s) && s.stage === 'Settled').length;
+        const disputed = shipments.filter(
+            (s) => supplierShipFilter(s) && (s.stage === 'Disputed' || s.stage === 'Delayed_Disaster'),
+        ).length;
+        return { settled, disputed };
+    }, [shipments, supplierShipFilter]);
 
     const focusVaultShip = useMemo(
         () => selectedShipment ?? (displayedShipments.length ? displayedShipments[0] : null),
@@ -607,7 +680,7 @@ function MainApp() {
     };
 
     /* ── Lock funds: NaviTrust fund_shipment (wallet-signed group) ─ */
-    const handleFundEscrow = async (shipmentId: string) => {
+    const handleFundEscrow = async (shipmentId: string, amountAlgo = 0.5) => {
         if (!accountAddress) {
             alert('Connect Pera Wallet first.');
             return;
@@ -622,7 +695,7 @@ function MainApp() {
             const res = await axios.post(`${BACKEND_URL}/fund-shipment/build`, {
                 shipment_id: shipmentId,
                 buyer_address: accountAddress,
-                amount_algo: 0.5,
+                amount_algo: amountAlgo,
             });
             const txnsB64: string[] = res.data.txns_b64;
             const txns = txnsB64.map((b64) => {
@@ -770,17 +843,19 @@ function MainApp() {
                     <div className="dash-role-toggle">
                         <button
                             type="button"
-                            onClick={() => setRole('stakeholder')}
+                            onClick={() => switchRole('stakeholder')}
                             className={`dash-role-btn${role === 'stakeholder' ? ' dash-role-btn--stakeholder-active' : ''}`}
                         >
-                            <Eye size={13} style={{ marginRight: 4, verticalAlign: 'middle' }} />Stakeholder
+                            <Eye size={13} style={{ marginRight: 4, verticalAlign: 'middle' }} />
+                            {role === 'stakeholder' ? '● ' : ''}Stakeholder
                         </button>
                         <button
                             type="button"
-                            onClick={() => setRole('supplier')}
+                            onClick={() => switchRole('supplier')}
                             className={`dash-role-btn${role === 'supplier' ? ' dash-role-btn--supplier-active' : ''}`}
                         >
-                            <Truck size={13} style={{ marginRight: 4, verticalAlign: 'middle' }} />Supplier
+                            <Truck size={13} style={{ marginRight: 4, verticalAlign: 'middle' }} />
+                            {role === 'supplier' ? '● ' : ''}Supplier
                         </button>
                     </div>
 
@@ -808,12 +883,99 @@ function MainApp() {
                 <Link to="/navibot">NaviBot</Link>
             </nav>
 
-            {/* ── Role Subtitle ──────────────────────────────── */}
-            <p className="dash-subtitle">
-                {role === 'stakeholder'
-                    ? 'Stakeholder — monitor shipments, run the AI jury, and settle on-chain when ready.'
-                    : 'Supplier — track your shipments and log mitigations.'}
-            </p>
+            <div className={role === 'stakeholder' ? 'role-banner-stakeholder' : 'role-banner-supplier'}>
+                {role === 'stakeholder' ? 'Buyer view — protecting your escrow' : 'Supplier view — tracking your payments'}
+            </div>
+
+            <div className={`dashboard-content${dashboardSwitching ? ' dashboard-content--switching' : ''}`}>
+            <div style={{ marginTop: 18, marginBottom: 6 }}>
+                <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 800, color: '#f8fafc' }}>
+                    {role === 'stakeholder' ? 'Your Escrow Dashboard' : 'Your Supplier Dashboard'}
+                </h2>
+                <p style={{ margin: '6px 0 0', fontSize: '0.82rem', color: '#94a3b8' }}>
+                    {role === 'stakeholder'
+                        ? 'ALGO you have locked in Navi-Trust smart contracts'
+                        : 'Track incoming payments and your on-chain reputation'}
+                </p>
+            </div>
+
+            {role === 'supplier' && accountAddress && !isLoading ? (
+                <section
+                    className="card"
+                    style={{
+                        marginTop: 14,
+                        padding: '18px 20px',
+                        background: 'rgba(15,23,42,0.55)',
+                        border: '1px solid rgba(245,158,11,0.25)',
+                    }}
+                >
+                    <div style={{ fontSize: '0.65rem', fontWeight: 800, letterSpacing: '0.12em', color: '#f59e0b', marginBottom: 10 }}>
+                        SUPPLIER IDENTITY
+                    </div>
+                    <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: '0.85rem', color: '#e2e8f0', marginBottom: 16, wordBreak: 'break-all' }}>
+                        {accountAddress.slice(0, 8)}…{accountAddress.slice(-6)}
+                    </div>
+                    <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#cbd5e1', marginBottom: 8 }}>On-chain reputation score</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+                        <div
+                            style={{
+                                flex: 1,
+                                height: 10,
+                                borderRadius: 5,
+                                background: 'rgba(30,41,59,0.9)',
+                                overflow: 'hidden',
+                            }}
+                        >
+                            <div
+                                style={{
+                                    width: `${Math.min(100, supplierRep?.score ?? 55)}%`,
+                                    height: '100%',
+                                    borderRadius: 5,
+                                    background:
+                                        (supplierRep?.score ?? 55) >= 70
+                                            ? '#22c55e'
+                                            : (supplierRep?.score ?? 55) >= 40
+                                              ? '#f59e0b'
+                                              : '#ef4444',
+                                }}
+                            />
+                        </div>
+                        <span
+                            style={{
+                                fontWeight: 800,
+                                fontSize: '1.1rem',
+                                color:
+                                    (supplierRep?.score ?? 55) >= 70
+                                        ? '#4ade80'
+                                        : (supplierRep?.score ?? 55) >= 40
+                                          ? '#fbbf24'
+                                          : '#f87171',
+                            }}
+                        >
+                            {supplierRep?.score ?? 55} / 100
+                        </span>
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: 12 }}>
+                        Verified in Algorand box storage
+                        {supplierRep?.source ? ` · ${supplierRep.source}` : null}
+                    </div>
+                    {appId ? (
+                        <a
+                            href={`https://lora.algokit.io/testnet/application/${appId}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ fontSize: '0.78rem', fontWeight: 700, color: '#fbbf24' }}
+                        >
+                            View reputation on Lora ↗
+                        </a>
+                    ) : null}
+                    <div style={{ marginTop: 14, fontSize: '0.78rem', color: '#94a3b8' }}>
+                        Completed deliveries: <strong style={{ color: '#e2e8f0' }}>{supplierIdentityCounts.settled}</strong>
+                        {' · '}
+                        Disputes: <strong style={{ color: '#fecaca' }}>{supplierIdentityCounts.disputed}</strong>
+                    </div>
+                </section>
+            ) : null}
 
             {/* ── Last transaction + confirming state ───────── */}
             {(confirmingTxLabel || lastConfirmedTx) && (
@@ -928,30 +1090,38 @@ function MainApp() {
                         </div>
                     ))}
                 </div>
-            ) : (
+            ) : role === 'stakeholder' ? (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginTop: 16 }}>
                     <div className="card" style={{ padding: '14px 18px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                            <Lock size={15} color={stakeholderHasDisputedInEscrow ? '#f59e0b' : '#38bdf8'} />
+                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Your locked escrow</span>
+                        </div>
+                        <div
+                            className="dash-kpi-num"
+                            style={{
+                                fontSize: '1.65rem',
+                                fontWeight: 700,
+                                color: stakeholderHasDisputedInEscrow ? '#fbbf24' : '#7dd3fc',
+                            }}
+                        >
+                            {stakeholderLockedAlgo.toFixed(4)}
+                        </div>
+                        <p style={{ fontSize: '0.68rem', color: '#94a3b8', margin: '8px 0 0' }}>ALGO at risk (in transit + disputed)</p>
+                    </div>
+                    <div className="card" style={{ padding: '14px 18px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                             <Package size={15} color="#38bdf8" />
-                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Shipments</span>
+                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Protected shipments</span>
                         </div>
                         <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700 }}>
-                            {String(
-                                stats.total_shipments != null && stats.total_shipments > 0
-                                    ? stats.total_shipments
-                                    : stats.active_shipments != null
-                                      ? stats.active_shipments
-                                      : shipments.length,
-                            )}
+                            {String(stakeholderProtectedCount)}
                         </div>
-                        {shipments.length === 0 ? (
-                            <p style={{ fontSize: '0.68rem', color: '#94a3b8', margin: '8px 0 0' }}>Register your first shipment below</p>
-                        ) : null}
                     </div>
                     <div className="card" style={{ padding: '14px 18px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                             <CheckCircle size={15} color="#059669" />
-                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Total Settled</span>
+                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Settlements completed</span>
                         </div>
                         <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700 }}>
                             {String(stats.total_settled ?? 0)}
@@ -959,20 +1129,62 @@ function MainApp() {
                     </div>
                     <div className="card" style={{ padding: '14px 18px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                            <AlertTriangle size={15} color="#dc2626" />
-                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Total Disputed</span>
+                            <Wifi size={15} color="#4ade80" />
+                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Blockchain status</span>
+                        </div>
+                        <div style={{ fontSize: '1.05rem', fontWeight: 700, color: chainHealth ? '#34d399' : '#f87171' }}>
+                            {chainHealth ? 'Testnet online' : 'Offline'}
+                        </div>
+                    </div>
+                </div>
+            ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginTop: 16 }}>
+                    <div className="card" style={{ padding: '14px 18px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                            <Coins size={15} color="#38bdf8" />
+                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Pending payments</span>
                         </div>
                         <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700 }}>
-                            {String(stats.total_disputed ?? 0)}
+                            {supplierPendingAlgo != null ? `${supplierPendingAlgo.toFixed(4)} ALGO` : '—'}
                         </div>
                     </div>
                     <div className="card" style={{ padding: '14px 18px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                            <Wifi size={15} color="#4ade80" />
-                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Blockchain</span>
+                            <AlertTriangle size={15} color="#f87171" />
+                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Frozen payments</span>
                         </div>
-                        <div style={{ fontSize: '1.05rem', fontWeight: 700, color: chainHealth ? '#34d399' : '#f87171' }}>
-                            {chainHealth ? 'Testnet online' : 'Offline'}
+                        <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700, color: supplierFrozenAlgo > 0 ? '#f87171' : '#94a3b8' }}>
+                            {supplierFrozenAlgo > 0 ? `${supplierFrozenAlgo.toFixed(4)} ALGO frozen` : '—'}
+                        </div>
+                    </div>
+                    <div className="card" style={{ padding: '14px 18px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                            <CheckCircle size={15} color="#059669" />
+                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Received (settled)</span>
+                        </div>
+                        <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700, color: '#4ade80' }}>
+                            {supplierReceivedAlgo > 0 ? `${supplierReceivedAlgo.toFixed(4)} ALGO` : '—'}
+                        </div>
+                    </div>
+                    <div className="card" style={{ padding: '14px 18px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                            <Activity size={15} color="#f59e0b" />
+                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Reputation score</span>
+                        </div>
+                        <div
+                            className="dash-kpi-num"
+                            style={{
+                                fontSize: '1.65rem',
+                                fontWeight: 700,
+                                color:
+                                    (supplierRep?.score ?? 55) >= 70
+                                        ? '#4ade80'
+                                        : (supplierRep?.score ?? 55) >= 40
+                                          ? '#fbbf24'
+                                          : '#f87171',
+                            }}
+                        >
+                            {supplierRep?.score ?? 55}
                         </div>
                     </div>
                 </div>
@@ -1064,9 +1276,9 @@ function MainApp() {
                 )}
             </section>
 
-            {!isLoading ? <JuryRiskHistoryChart /> : null}
+            {!isLoading && role === 'stakeholder' ? <JuryRiskHistoryChart /> : null}
 
-            {!isLoading && focusVaultShip && (
+            {!isLoading && role === 'stakeholder' && focusVaultShip && (
                 <section className="card" style={{ marginTop: 16, padding: '18px 20px' }} aria-label="Escrow for selected shipment">
                     <div style={{ marginBottom: 14 }}>
                         <div style={{ fontWeight: 700, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1301,7 +1513,7 @@ function MainApp() {
                                     }}
                                 >
                                     <div style={{ fontWeight: 800, fontSize: '0.82rem', color: '#fecaca', letterSpacing: '0.04em', marginBottom: 8 }}>
-                                        ⚠ ESCROW FROZEN
+                                        {role === 'supplier' ? '⚠ PAYMENT FROZEN' : '⚠ ESCROW FROZEN'}
                                     </div>
                                     <div style={{ fontSize: '0.8rem', color: '#e2e8f0', lineHeight: 1.55, marginBottom: 6 }}>
                                         <span style={{ fontWeight: 800, color: '#F59E0B' }}>{(fundsMicro / 1e6).toFixed(4)} ALGO</span>{' '}
@@ -1330,12 +1542,131 @@ function MainApp() {
                                             &ldquo;{jury.sentinel.reasoning_narrative || jury.sentinel.reasoning}&rdquo;
                                         </div>
                                     )}
+                                    {role === 'supplier' && appId ? (
+                                        <a
+                                            href={`https://lora.algokit.io/testnet/application/${appId}`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            style={{ display: 'inline-block', marginTop: 12, fontWeight: 700, fontSize: '0.78rem', color: '#fbbf24' }}
+                                        >
+                                            View dispute on Lora ↗
+                                        </a>
+                                    ) : null}
                                 </div>
                             ) : null}
 
                             <ShipmentDestinationWeatherRow destination={ship.destination} />
 
-                            {typeof ship.supplier_reputation_score === 'number' ? (
+                            {role === 'stakeholder' && ship.stage === 'In_Transit' && fundsMicro === 0 && !terminalOpen ? (
+                                <div
+                                    style={{
+                                        marginBottom: 14,
+                                        padding: 14,
+                                        borderRadius: 10,
+                                        border: '2px solid rgba(56,189,248,0.45)',
+                                        background: 'rgba(14,165,233,0.08)',
+                                    }}
+                                >
+                                    <div style={{ fontWeight: 800, fontSize: '0.88rem', color: '#0c4a6e', marginBottom: 6 }}>No escrow locked</div>
+                                    <p style={{ margin: '0 0 12px', fontSize: '0.8rem', color: '#334155', lineHeight: 1.5 }}>
+                                        Lock ALGO to enable the AI jury and automatic settlement when conditions are met.
+                                    </p>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                        <button
+                                            type="button"
+                                            className="primary-btn"
+                                            disabled={isPaying === ship.shipment_id}
+                                            style={{ fontSize: '0.78rem', padding: '8px 14px' }}
+                                            onClick={() => void handleFundEscrow(ship.shipment_id, 0.5)}
+                                        >
+                                            <Lock size={13} /> Lock 0.5 ALGO
+                                        </button>
+                                        <button
+                                            type="button"
+                                            disabled={isPaying === ship.shipment_id}
+                                            style={{
+                                                fontSize: '0.78rem',
+                                                padding: '8px 14px',
+                                                borderRadius: 8,
+                                                border: '1px solid #0ea5e9',
+                                                background: '#fff',
+                                                color: '#0369a1',
+                                                fontWeight: 600,
+                                                cursor: 'pointer',
+                                            }}
+                                            onClick={() => void handleFundEscrow(ship.shipment_id, 1.0)}
+                                        >
+                                            Custom 1 ALGO
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : null}
+
+                            {role === 'supplier' && !terminalOpen && (ship.stage === 'In_Transit' || ship.stage === 'Settled') ? (
+                                <div
+                                    style={{
+                                        marginBottom: 14,
+                                        padding: 14,
+                                        borderRadius: 10,
+                                        border: '1px solid rgba(148,163,184,0.25)',
+                                        background: 'rgba(248,250,252,0.95)',
+                                    }}
+                                >
+                                    {ship.stage === 'In_Transit' ? (
+                                        <>
+                                            <div style={{ fontSize: '0.8rem', color: '#334155', marginBottom: 6 }}>
+                                                Buyer locked:{' '}
+                                                <strong style={{ color: '#059669' }}>
+                                                    {fundsMicro > 0 ? `${(fundsMicro / 1e6).toFixed(4)} ALGO ✓` : 'No escrow yet — buyer must fund'}
+                                                </strong>
+                                            </div>
+                                            <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: 10 }}>
+                                                {hasVerdictTx ? 'Verdict on record — awaiting settlement flow.' : 'Awaiting AI jury verdict from buyer.'}
+                                            </div>
+                                            {ship.lora_app_url ? (
+                                                <a href={ship.lora_app_url} target="_blank" rel="noreferrer" style={{ fontWeight: 700, fontSize: '0.78rem', color: '#2563eb' }}>
+                                                    View shipment on Lora ↗
+                                                </a>
+                                            ) : null}
+                                        </>
+                                    ) : null}
+                                    {ship.stage === 'Settled' ? (
+                                        <>
+                                            <div style={{ fontWeight: 800, fontSize: '0.85rem', color: '#15803d', marginBottom: 6 }}>✓ PAYMENT RECEIVED</div>
+                                            <div style={{ fontSize: '0.8rem', color: '#334155', marginBottom: 8 }}>
+                                                {(supplierPaidAlgo ?? 2).toFixed(4)} ALGO released to your account (demo settlement)
+                                            </div>
+                                            <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: 10 }}>
+                                                Your reputation score is tracked on-chain (see card above).
+                                            </div>
+                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                                {settleTxId ? (
+                                                    <a
+                                                        href={`https://lora.algokit.io/testnet/transaction/${settleTxId}`}
+                                                        target="_blank"
+                                                        rel="noreferrer"
+                                                        style={{ fontWeight: 700, fontSize: '0.78rem', color: '#15803d' }}
+                                                    >
+                                                        View settlement ↗
+                                                    </a>
+                                                ) : null}
+                                                {certAsa > 0 ? (
+                                                    <a
+                                                        href={`https://lora.algokit.io/testnet/asset/${certAsa}`}
+                                                        target="_blank"
+                                                        rel="noreferrer"
+                                                        style={{ fontWeight: 700, fontSize: '0.78rem', color: '#15803d' }}
+                                                    >
+                                                        View certificate ↗
+                                                    </a>
+                                                ) : null}
+                                            </div>
+                                        </>
+                                    ) : null}
+                                </div>
+                            ) : null}
+
+                            {role === 'stakeholder' && typeof ship.supplier_reputation_score === 'number' ? (
                                 <div style={{ fontSize: '0.75rem', color: '#475569', marginBottom: 8 }}>
                                     Supplier reputation:{' '}
                                     <strong>{ship.supplier_reputation_score}</strong>/100
@@ -1433,14 +1764,14 @@ function MainApp() {
                                 </div>
                             ) : null}
 
-                            {fundsMicro > 0 && (
+                            {role === 'stakeholder' && fundsMicro > 0 && (
                                 <div style={{ marginBottom: 10, fontSize: '0.8rem', color: '#64748b' }}>
                                     Funds locked:{' '}
                                     <span style={{ fontWeight: 600, color: '#0f172a' }}>{(fundsMicro / 1e6).toFixed(2)} ALGO</span>
                                 </div>
                             )}
 
-                            {risk !== null && (
+                            {role === 'stakeholder' && risk !== null && (
                                 <div style={{ marginBottom: 12 }}>
                                     <div style={{ fontSize: '0.7rem', color: '#64748b', marginBottom: 4 }}>AI jury risk</div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -1664,7 +1995,9 @@ function MainApp() {
                                                 <CheckCircle size={13} /> Settle shipment
                                             </button>
                                         ) : null}
-                                        {ship.stage !== 'Not_Registered' && ship.stage !== 'Settled' && (
+                                        {ship.stage !== 'Not_Registered' &&
+                                            ship.stage !== 'Settled' &&
+                                            !(ship.stage === 'In_Transit' && fundsMicro === 0) && (
                                             <button
                                                 type="button"
                                                 disabled={isPaying === ship.shipment_id}
@@ -1674,7 +2007,7 @@ function MainApp() {
                                                     background: '#f0fdf4', color: '#16a34a', border: '1px solid #bbf7d0',
                                                     cursor: 'pointer', fontWeight: 600, whiteSpace: 'nowrap',
                                                 }}
-                                                onClick={() => void handleFundEscrow(ship.shipment_id)}
+                                                onClick={() => void handleFundEscrow(ship.shipment_id, 0.5)}
                                             >
                                                 <Coins size={12} /> {isPaying === ship.shipment_id ? 'Signing…' : 'Lock 0.5 ALGO'}
                                             </button>
@@ -1711,6 +2044,8 @@ function MainApp() {
                 })}
             </div>
             )}
+
+            </div>
 
             {/* ═══════════════════════════════════════════════════
                M O D A L S
@@ -2119,7 +2454,12 @@ function MainApp() {
             </footer>
 
             {accountAddress && (
-                <NaviBotPanel shipmentId={selectedShipment?.shipment_id ?? null} walletAddress={accountAddress} />
+                <NaviBotPanel
+                    shipmentId={selectedShipment?.shipment_id ?? null}
+                    walletAddress={accountAddress}
+                    role={role}
+                    onRequestRunJury={(id) => setJuryTerminalShipmentId(id)}
+                />
             )}
         </div>
         </div>
@@ -2128,13 +2468,15 @@ function MainApp() {
 
 export default function App() {
     return (
-        <Routes>
-            <Route path="/verify/wallet/:wallet" element={<VerifyPage />} />
-            <Route path="/verify/:shipmentId" element={<VerifyPage />} />
-            <Route path="/verify" element={<VerifyPage />} />
-            <Route path="/protocol" element={<ProtocolPage />} />
-            <Route path="/navibot" element={<NaviBotPage />} />
-            <Route path="/" element={<MainApp />} />
-        </Routes>
+        <RoleProvider>
+            <Routes>
+                <Route path="/verify/wallet/:wallet" element={<VerifyPage />} />
+                <Route path="/verify/:shipmentId" element={<VerifyPage />} />
+                <Route path="/verify" element={<VerifyPage />} />
+                <Route path="/protocol" element={<ProtocolPage />} />
+                <Route path="/navibot" element={<NaviBotPage />} />
+                <Route path="/" element={<MainApp />} />
+            </Routes>
+        </RoleProvider>
     );
 }

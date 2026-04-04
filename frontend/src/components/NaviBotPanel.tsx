@@ -1,23 +1,30 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useMutation } from '@tanstack/react-query';
-import axios from 'axios';
-import { Bot, MessageSquare, X } from 'lucide-react';
-import { BACKEND_URL } from '../constants/api';
+import { Bot, MessageSquare, X, Play, Search } from 'lucide-react';
+import { askNavibot, type NavibotHistoryItem } from '../api';
 import './navibot.css';
 
-type Msg = { role: 'user' | 'assistant'; text: string };
+type Msg = { role: 'user' | 'assistant'; content: string };
 
-type NavibotResponse = {
-  text?: string;
-  reply?: string;
-  action?: string | null;
-  audio_url?: string | null;
-  fallback?: boolean;
-};
+type Role = 'stakeholder' | 'supplier';
 
-const PLACEHOLDER_REPLY =
-  'Ask me about a shipment status or say “check SHIP_001”. Use the dashboard to run a jury or settle — I explain, I do not run transactions for you.';
+const SOFT_CATCH =
+  'Ask me about Mumbai (in transit), Chennai (disputed), or Delhi (settled) — or how the AI jury works.';
+
+function sanitizeAssistantText(s: string): string {
+  const t = (s || '').trim();
+  const lower = t.toLowerCase();
+  const banned = [
+    'ai unavailable',
+    'showing system data',
+    'navibot is temporarily unavailable',
+    'temporarily unavailable',
+    'error:',
+    'stack trace',
+  ];
+  if (banned.some((b) => lower.includes(b))) return SOFT_CATCH;
+  return t || SOFT_CATCH;
+}
 
 function readStoredWalletAddress(): string | undefined {
   try {
@@ -28,14 +35,13 @@ function readStoredWalletAddress(): string | undefined {
   }
 }
 
-function RobotAvatar({ speaking, processing }: { speaking: boolean; processing: boolean }) {
+function RobotAvatar({ processing }: { processing: boolean }) {
   return (
     <svg
       width="72"
       height="88"
       viewBox="0 0 72 88"
       aria-hidden
-      className={speaking ? 'navibot-robot--speak' : undefined}
       style={{ display: 'block', margin: '0 auto' }}
     >
       <defs>
@@ -45,13 +51,35 @@ function RobotAvatar({ speaking, processing }: { speaking: boolean; processing: 
         </linearGradient>
       </defs>
       <rect x="12" y="18" width="48" height="44" rx="10" fill="url(#navibot-head)" opacity="0.95" />
-      <rect x="34" y="6" width="4" height="14" rx="2" fill="#38bdf8" className={processing ? 'navibot-antenna' : undefined} />
-      <circle cx="28" cy="36" r="5" fill="#e0f2fe" className={speaking ? 'navibot-eye' : ''} />
-      <circle cx="44" cy="36" r="5" fill="#e0f2fe" className={speaking ? 'navibot-eye' : ''} />
-      <rect x="30" y="48" width="12" height="4" rx="2" fill="#0f172a" className="navibot-mouth" />
+      <rect
+        x="34"
+        y="6"
+        width="4"
+        height="14"
+        rx="2"
+        fill="#38bdf8"
+        className={processing ? 'navibot-antenna' : undefined}
+      />
+      <circle cx="28" cy="36" r="5" fill="#e0f2fe" />
+      <circle cx="44" cy="36" r="5" fill="#e0f2fe" />
+      <rect x="30" y="48" width="12" height="4" rx="2" fill="#0f172a" />
       <rect x="18" y="66" width="36" height="14" rx="6" fill="#0f172a" opacity="0.85" />
     </svg>
   );
+}
+
+function TypingDots() {
+  return (
+    <div className="navibot-typing" aria-hidden>
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+}
+
+function trimMessages(prev: Msg[]): Msg[] {
+  return prev.slice(-10);
 }
 
 export function NaviBotPanel({
@@ -60,101 +88,112 @@ export function NaviBotPanel({
   onClose,
   defaultOpen = true,
   variant = 'fixed',
+  role = 'stakeholder',
+  onRequestRunJury,
 }: {
   shipmentId?: string | null;
   walletAddress?: string | null;
   onClose?: () => void;
   defaultOpen?: boolean;
   variant?: 'fixed' | 'inline';
+  role?: Role;
+  onRequestRunJury?: (shipmentId: string) => void;
 }) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(defaultOpen);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Msg[]>([]);
-  const [caption, setCaption] = useState('');
-  const [displayCaption, setDisplayCaption] = useState('');
-  const [lastAction, setLastAction] = useState<string | null>(null);
-  const [speaking] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [actionSuggestion, setActionSuggestion] = useState<{ action: string; shipmentId: string } | null>(null);
   const panelRef = useRef<HTMLElement | null>(null);
-  const messagesRef = useRef(messages);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const messagesRef = useRef<Msg[]>([]);
   messagesRef.current = messages;
 
-  const mut = useMutation({
-    mutationFn: async (query: string): Promise<NavibotResponse> => {
-      const payload = {
-        message: query,
-        query,
-        shipment_id: shipmentId || undefined,
-        wallet_address: walletAddress?.trim() || readStoredWalletAddress(),
-        history: messagesRef.current.slice(-8).map((m) => ({ role: m.role, text: m.text })),
-      };
+  const greeting = useMemo(() => {
+    if (role === 'supplier') {
+      return (
+        "I'm NaviBot. Your reputation score appears in Supplier view (on-chain, often around 55/100 after the Delhi demo). " +
+        'SHIP_DELHI_003 settled — about 2 ALGO was released to the supplier. SHIP_CHEN_002 is disputed with payment frozen.'
+      );
+    }
+    return (
+      "I'm NaviBot. The demo often shows about 5 ALGO across active escrows; SHIP_CHEN_002 is disputed with about 3 ALGO frozen. " +
+      'Want a verdict on SHIP_MUMBAI_001? Click [Run AI Jury] on its card.'
+    );
+  }, [role]);
+
+  useEffect(() => {
+    setMessages([{ role: 'assistant', content: greeting }]);
+  }, [greeting]);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+  }, [messages, isTyping]);
+
+  const sendMessage = useCallback(
+    async (text: string) => {
+      const t = text.trim();
+      if (!t || pending) return;
+      setInput('');
+      setActionSuggestion(null);
+      setMessages((prev) => trimMessages([...prev, { role: 'user', content: t }]));
+      setIsTyping(true);
+      setPending(true);
+      const historyForApi: NavibotHistoryItem[] = messagesRef.current.slice(-6).map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
+
       try {
-        const res = await axios.post<NavibotResponse>(`${BACKEND_URL}/navibot`, payload, {
-          timeout: 45000,
-          headers: { 'Content-Type': 'application/json' },
-          validateStatus: (s) => s === 200,
+        const res = await askNavibot({
+          query: t,
+          history: historyForApi,
+          shipment_id: shipmentId ?? undefined,
+          wallet_address: walletAddress?.trim() || readStoredWalletAddress(),
+          role,
         });
-        const data = res.data || {};
-        const text = (data.text || data.reply || '').trim();
-        if (res.status === 200 && text) return { ...data, text, reply: text };
-      } catch (e) {
-        if (axios.isAxiosError(e) && e.response?.data && typeof (e.response.data as NavibotResponse).text === 'string') {
-          return e.response.data as NavibotResponse;
+        const raw = (res.text || res.reply || '').trim();
+        const assistant = sanitizeAssistantText(raw);
+        setIsTyping(false);
+        setMessages((prev) => trimMessages([...prev, { role: 'assistant', content: assistant }]));
+        const act = res.action ?? null;
+        const sid = (res.shipment_id || '').trim();
+        if (act && sid && (act === 'run_jury' || act === 'verify')) {
+          setActionSuggestion({ action: act, shipmentId: sid });
         }
+      } catch {
+        setIsTyping(false);
+        setMessages((prev) =>
+          trimMessages([...prev, { role: 'assistant', content: SOFT_CATCH }]),
+        );
+      } finally {
+        setPending(false);
       }
-      return { text: PLACEHOLDER_REPLY, reply: PLACEHOLDER_REPLY, action: null, fallback: true };
     },
-    onSuccess: (data, query) => {
-      const text = (data.text || data.reply || '').trim() || PLACEHOLDER_REPLY;
-      setCaption(text);
-      setLastAction(data.action ?? null);
-      setMessages((prev) => [...prev, { role: 'user', text: query }, { role: 'assistant', text }]);
-    },
-  });
+    [pending, shipmentId, walletAddress, role],
+  );
 
-  useEffect(() => {
-    if (mut.isPending) return;
-    if (!caption) {
-      setDisplayCaption('');
+  const onRunJuryClick = useCallback(() => {
+    if (!actionSuggestion || actionSuggestion.action !== 'run_jury') return;
+    const sid = actionSuggestion.shipmentId;
+    if (onRequestRunJury) {
+      onRequestRunJury(sid);
       return;
     }
-    let i = 0;
-    setDisplayCaption('');
-    const id = window.setInterval(() => {
-      i += 2;
-      setDisplayCaption(caption.slice(0, i));
-      if (i >= caption.length) clearInterval(id);
-    }, 11);
-    return () => clearInterval(id);
-  }, [caption, mut.isPending]);
-
-  const sendText = (q: string) => {
-    const t = q.trim();
-    if (!t || mut.isPending) return;
-    setCaption('');
-    setDisplayCaption('');
-    mut.mutate(t);
-    setInput('');
-  };
-
-  const onAction = (a: string | null | undefined) => {
-    if (a === 'view') {
-      if (shipmentId) navigate(`/verify/${encodeURIComponent(shipmentId)}`);
-      else navigate('/verify');
-      return;
+    try {
+      sessionStorage.setItem('navi_pending_jury', sid);
+    } catch {
+      /* ignore */
     }
-    if (a === 'settle') navigate('/');
-    if (a === 'case') {
-      if (shipmentId) navigate(`/verify/${encodeURIComponent(shipmentId)}`);
-      else navigate('/verify');
-    }
-  };
+    navigate('/');
+  }, [actionSuggestion, onRequestRunJury, navigate]);
 
-  useEffect(() => {
-    if (!speaking) return;
-    panelRef.current?.classList.add('navibot-panel--speaking');
-    return () => panelRef.current?.classList.remove('navibot-panel--speaking');
-  }, [speaking]);
+  const onVerifyClick = useCallback(() => {
+    if (!actionSuggestion || actionSuggestion.action !== 'verify') return;
+    navigate(`/verify/${encodeURIComponent(actionSuggestion.shipmentId)}`);
+  }, [actionSuggestion, navigate]);
 
   if (!open && variant === 'fixed') {
     return (
@@ -188,9 +227,10 @@ export function NaviBotPanel({
   const fixed = variant === 'fixed';
 
   const quickPills = [
-    'Status of SHIP_MUMBAI_001',
-    'Why is SHIP_CHEN_002 disputed?',
-    'Tell me about settled SHIP_DELHI_003',
+    'Why is Chennai frozen?',
+    'Run jury on Mumbai',
+    'How does the AI jury work?',
+    'Show me the settled shipment',
   ];
 
   return (
@@ -227,11 +267,11 @@ export function NaviBotPanel({
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={{ width: 44, height: 52, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-            <RobotAvatar speaking={false} processing={mut.isPending} />
+            <RobotAvatar processing={pending} />
           </div>
           <div>
             <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>NaviBot</div>
-            <div style={{ fontSize: '0.62rem', color: '#94a3b8' }}>Powered by Gemini</div>
+            <div style={{ fontSize: '0.62rem', color: '#94a3b8' }}>Navi-Trust assistant</div>
           </div>
         </div>
         <button
@@ -248,47 +288,9 @@ export function NaviBotPanel({
       </div>
 
       <div
-        className="navibot-caption-block"
-        style={{
-          padding: '12px 14px',
-          background: '#0f172a',
-        }}
+        ref={scrollRef}
+        style={{ flex: 1, overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10, minHeight: 140 }}
       >
-        {mut.isPending ? (
-          <div className="navibot-processing" aria-live="polite">
-            <span className="navibot-spinner" />
-            Thinking…
-          </div>
-        ) : (
-          <div className="navibot-main-caption" aria-live="polite">
-            {displayCaption || caption || PLACEHOLDER_REPLY}
-          </div>
-        )}
-        {lastAction ? (
-          <div className="navibot-action-row">
-            {lastAction === 'settle' && (
-              <button type="button" className="primary-btn" onClick={() => onAction('settle')}>
-                Open dashboard
-              </button>
-            )}
-            {lastAction === 'view' && (
-              <button type="button" className="primary-btn" onClick={() => onAction('view')}>
-                View shipment
-              </button>
-            )}
-            {lastAction === 'case' && (
-              <button type="button" className="primary-btn" onClick={() => onAction('case')}>
-                Open verify
-              </button>
-            )}
-          </div>
-        ) : null}
-      </div>
-
-      <div style={{ flex: 1, overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 8, minHeight: 120 }}>
-        {messages.length === 0 && (
-          <span style={{ color: '#94a3b8', fontSize: '0.82rem' }}>Ask about a shipment on Testnet.</span>
-        )}
         {messages.map((m, i) => (
           <div
             key={i}
@@ -301,20 +303,85 @@ export function NaviBotPanel({
               color: m.role === 'user' ? '#fff' : '#0f172a',
               fontSize: '0.82rem',
               whiteSpace: 'pre-wrap',
+              lineHeight: 1.45,
             }}
           >
-            {m.text}
+            {m.content}
           </div>
         ))}
+        {isTyping ? (
+          <div
+            style={{
+              alignSelf: 'flex-start',
+              padding: '10px 14px',
+              borderRadius: 10,
+              background: '#f1f5f9',
+              fontSize: '0.78rem',
+              color: '#64748b',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+            }}
+          >
+            <TypingDots />
+            <span>NaviBot is thinking…</span>
+          </div>
+        ) : null}
       </div>
+
+      {actionSuggestion ? (
+        <div style={{ padding: '0 12px 8px' }}>
+          {actionSuggestion.action === 'run_jury' ? (
+            <button
+              type="button"
+              className="primary-btn"
+              onClick={onRunJuryClick}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                fontSize: '0.78rem',
+                padding: '10px 12px',
+              }}
+            >
+              <Play size={14} /> Run jury on {actionSuggestion.shipmentId} →
+            </button>
+          ) : null}
+          {actionSuggestion.action === 'verify' ? (
+            <button
+              type="button"
+              onClick={onVerifyClick}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                fontSize: '0.78rem',
+                padding: '10px 12px',
+                borderRadius: 8,
+                border: '1px solid #2563eb',
+                background: '#eff6ff',
+                color: '#1d4ed8',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              <Search size={14} /> View {actionSuggestion.shipmentId} on Verify →
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '0 10px 8px' }}>
         {quickPills.map((p) => (
           <button
             key={p}
             type="button"
-            disabled={mut.isPending}
-            onClick={() => sendText(p)}
+            disabled={pending}
+            onClick={() => void sendMessage(p)}
             style={{
               fontSize: '0.68rem',
               padding: '5px 8px',
@@ -322,7 +389,7 @@ export function NaviBotPanel({
               border: '1px solid #e2e8f0',
               background: '#fff',
               color: '#475569',
-              cursor: mut.isPending ? 'not-allowed' : 'pointer',
+              cursor: pending ? 'not-allowed' : 'pointer',
             }}
           >
             {p}
@@ -335,12 +402,12 @@ export function NaviBotPanel({
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && !mut.isPending && sendText(input)}
+          onKeyDown={(e) => e.key === 'Enter' && !pending && void sendMessage(input)}
           placeholder="Ask NaviBot…"
           style={{ flex: 1, padding: '10px 12px', borderRadius: 8, border: '1px solid #e2e8f0', fontSize: '0.85rem' }}
         />
-        <button type="button" className="primary-btn" disabled={mut.isPending || !input.trim()} onClick={() => sendText(input)}>
-          {mut.isPending ? '…' : 'Send'}
+        <button type="button" className="primary-btn" disabled={pending || !input.trim()} onClick={() => void sendMessage(input)}>
+          {pending ? '…' : 'Send'}
         </button>
       </div>
     </aside>

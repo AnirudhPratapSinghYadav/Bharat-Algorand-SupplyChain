@@ -2,6 +2,8 @@
 
 from typing import List, Optional
 
+from algosdk import encoding as algo_encoding
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -64,8 +66,11 @@ class FundShipmentBuildBody(BaseModel):
 
     @model_validator(mode="after")
     def _wallet_present(self):
-        if not (self.buyer_address or self.payer_address).strip():
+        addr = (self.buyer_address or self.payer_address).strip()
+        if not addr:
             raise ValueError("buyer_address or payer_address is required")
+        if not algo_encoding.is_valid_address(addr):
+            raise ValueError("buyer_address / payer_address must be a valid Algorand address")
         return self
 
     def resolved_payer(self) -> str:
@@ -102,6 +107,7 @@ class NavibotRequest(BaseModel):
     history: List[dict] = Field(default_factory=list)
     shipment_id: Optional[str] = None
     wallet_address: Optional[str] = None
+    role: Optional[str] = None  # stakeholder | supplier (UI hint only)
 
     def effective_text(self) -> str:
         q = (self.query or "").strip()
