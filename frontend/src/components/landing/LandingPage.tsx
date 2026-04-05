@@ -1,12 +1,13 @@
-import { useRef } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import axios from 'axios';
 import './landing.css';
+import { BACKEND_URL, FALLBACK_APP_ID } from '../../constants/api';
 import { useLandingHorizontalScroll } from './useLandingHorizontalScroll';
 import { HeroSection } from './HeroSection';
 import { ProblemSection } from './ProblemSection';
 import { SolutionSection } from './SolutionSection';
 import { StepsSection } from './StepsSection';
-import { ProofSection } from './ProofSection';
 import { DemoStory } from '../DemoStory';
 import { CTASection } from './CTASection';
 import { LandingFooter } from './LandingFooter';
@@ -17,7 +18,18 @@ export type LandingPageProps = {
 
 export function LandingPage({ onConnectWallet }: LandingPageProps) {
   const landingRootRef = useRef<HTMLDivElement>(null);
+  const [landingAppId, setLandingAppId] = useState<number | null>(null);
   useLandingHorizontalScroll(landingRootRef);
+
+  useEffect(() => {
+    axios
+      .get<{ app_id?: number }>(`${BACKEND_URL}/config`, { timeout: 6000 })
+      .then((r) => {
+        const id = r.data?.app_id;
+        setLandingAppId(typeof id === 'number' && id > 0 ? id : FALLBACK_APP_ID);
+      })
+      .catch(() => setLandingAppId(FALLBACK_APP_ID));
+  }, []);
 
   return (
     <div ref={landingRootRef} className="nt-landing">
@@ -48,7 +60,6 @@ export function LandingPage({ onConnectWallet }: LandingPageProps) {
         <ProblemSection />
         <SolutionSection />
         <StepsSection />
-        <ProofSection />
         <DemoStory />
         <div className="section-divider" aria-hidden />
         <CTASection
@@ -57,7 +68,7 @@ export function LandingPage({ onConnectWallet }: LandingPageProps) {
         />
       </main>
 
-      <LandingFooter />
+      <LandingFooter appId={landingAppId} />
     </div>
   );
 }

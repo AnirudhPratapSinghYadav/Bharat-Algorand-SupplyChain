@@ -363,6 +363,22 @@
   color: #0f172a;
 }
 
+.navibot-bubble__time {
+  font-size: 0.65rem;
+  opacity: 0.7;
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.navibot-bubble--user .navibot-bubble__time {
+  text-align: right;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.navibot-bubble--assistant .navibot-bubble__time {
+  color: #64748b;
+}
+
 .navibot-bubble--typing {
   display: flex;
   align-items: center;

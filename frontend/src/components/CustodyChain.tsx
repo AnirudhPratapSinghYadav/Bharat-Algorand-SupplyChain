@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 import { ExternalLink, Link2, PlusCircle } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { BACKEND_URL, API_TIMEOUT } from '../constants/api';
 
 type Entry = {
@@ -17,9 +18,11 @@ type Props = {
   shipmentId: string;
   walletAddress: string | null;
   canAdd: boolean;
+  /** Sign + submit unsigned tx group from Pera; returns confirmed tx id or null */
+  signB64Group?: (txnsB64: string[], label: string) => Promise<string | null>;
 };
 
-export function CustodyChain({ shipmentId, walletAddress, canAdd }: Props) {
+export function CustodyChain({ shipmentId, walletAddress, canAdd, signB64Group }: Props) {
   const [chain, setChain] = useState<Entry[]>([]);
   const [busy, setBusy] = useState(false);
 
@@ -46,16 +49,43 @@ export function CustodyChain({ shipmentId, walletAddress, canAdd }: Props) {
       window.alert('Valid handler address required.');
       return;
     }
+    if (!signB64Group) {
+      window.alert('Wallet signing is not wired for this view. Connect wallet on the dashboard.');
+      return;
+    }
+    const prev = chain.length ? Number(chain[chain.length - 1]?.asa_id || 0) : 0;
     setBusy(true);
     try {
-      await axios.post(
-        `${BACKEND_URL}/custody/handoff`,
-        { shipment_id: shipmentId, handler_address: addr, location: loc, handler_name: name },
-        { timeout: 60000 },
+      const build = await axios.post(
+        `${BACKEND_URL}/custody/handoff/build`,
+        {
+          shipment_id: shipmentId,
+          handler_address: addr,
+          location: loc,
+          handler_name: name,
+          prev_nft_id: prev,
+        },
+        { timeout: 60_000 },
       );
+      const txnsB64: string[] = build.data?.txns_b64 ?? build.data?.txns ?? [];
+      const txId = await signB64Group(txnsB64, 'Custody handoff NFT');
+      if (!txId) {
+        window.alert('Transaction was cancelled or not confirmed.');
+        return;
+      }
+      try {
+        await axios.post(
+          `${BACKEND_URL}/custody/handoff/confirm`,
+          { shipment_id: shipmentId, tx_id: txId },
+          { timeout: 30_000 },
+        );
+      } catch {
+        window.alert('Tx confirmed but indexer sync failed — refresh in a few seconds.');
+      }
       await load();
-    } catch {
-      window.alert('Custody mint failed (oracle / min balance).');
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } };
+      window.alert(err.response?.data?.detail || 'Custody mint failed.');
     } finally {
       setBusy(false);
     }
@@ -73,7 +103,7 @@ export function CustodyChain({ shipmentId, walletAddress, canAdd }: Props) {
             disabled={busy}
             onClick={() => void addHandoff()}
           >
-            <PlusCircle size={14} /> Add handoff
+            <PlusCircle size={14} /> Add handoff (Pera)
           </button>
         ) : null}
       </div>
@@ -105,7 +135,7 @@ export function CustodyChain({ shipmentId, walletAddress, canAdd }: Props) {
                 {c.prev_nft_id ? <span>← prev {c.prev_nft_id}</span> : null}
                 {c.lora_asset_url ? (
                   <a href={c.lora_asset_url} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: '0.7rem' }}>
-                    <ExternalLink size={11} /> NFT on Lora
+                    <ExternalLink size={11} /> NFT proof
                   </a>
                 ) : null}
                 {c.lora_tx_url ? (
@@ -117,6 +147,11 @@ export function CustodyChain({ shipmentId, walletAddress, canAdd }: Props) {
             </div>
           ))
         )}
+      </div>
+      <div style={{ marginTop: 8, fontSize: '0.7rem', color: '#64748b' }}>
+        <Link to={`/verify/${encodeURIComponent(shipmentId)}`} style={{ color: '#2563eb', fontWeight: 600 }}>
+          Public verify page ↗
+        </Link>
       </div>
     </div>
   );

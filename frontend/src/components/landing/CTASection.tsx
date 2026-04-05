@@ -14,7 +14,8 @@ export function CTASection({ onConnectWallet, onCreateShipment }: CTASectionProp
   return (
     <section className="nt-section nt-cta-section" id="nt-cta" aria-labelledby="nt-cta-title" style={ctaSectionStyle}>
       <div className="nt-cta-block">
-        <h2 id="nt-cta-title">Start securing your supply chain today</h2>
+        <h2 id="nt-cta-title">Lock escrow. Run the jury. Verify from your dashboard.</h2>
+        <p className="nt-cta-lead">Connect a wallet to register shipments and fund escrow on testnet.</p>
         <div className="nt-cta-actions">
           <button type="button" className="nt-btn nt-btn--primary" onClick={onConnectWallet}>
             Connect wallet

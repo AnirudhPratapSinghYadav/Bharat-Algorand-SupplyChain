@@ -1,7 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, Route, Routes } from 'react-router-dom';
-import { PeraWalletConnect } from "@perawallet/connect";
 import algosdk from "algosdk";
 import axios from 'axios';
 import {
@@ -24,6 +23,9 @@ import { CustodyChain } from './components/CustodyChain';
 import { ShipmentDestinationWeatherRow } from './components/DestinationWeather';
 import { JuryRiskHistoryChart } from './components/JuryRiskHistoryChart';
 import { LiveVerdictTerminal } from './components/LiveVerdictTerminal';
+import { NewsTicker } from './components/NewsTicker';
+import { ShipmentReportActions } from './components/ShipmentReport';
+import { peraWallet } from './wallet/pera';
 
 const CITIES = ['Mumbai', 'Chennai', 'Delhi', 'Singapore', 'Dubai', 'Rotterdam'] as const;
 
@@ -45,8 +47,6 @@ function timeAgo(iso: string): string {
     if (s < 86400) return `${Math.floor(s / 3600)} hours ago`;
     return `${Math.floor(s / 86400)} days ago`;
 }
-
-const peraWallet = new PeraWalletConnect({ chainId: 416002 });
 
 const ALGOD_SERVER = (import.meta.env.VITE_ALGORAND_NODE as string) || 'https://testnet-api.algonode.cloud';
 
@@ -197,9 +197,8 @@ function MainApp() {
         }
     }, [registerModal, accountAddress]);
 
-    /* ── Backend / algod health (dashboard navbar) ───────────── */
+    /* ── Backend / algod health (poll every 15s while dashboard mounted) ─ */
     useEffect(() => {
-        if (!accountAddress) return;
         const check = async () => {
             try {
                 const r = await fetch(`${BACKEND_URL}/health`);
@@ -210,9 +209,9 @@ function MainApp() {
             }
         };
         void check();
-        const interval = window.setInterval(() => void check(), 30000);
+        const interval = window.setInterval(() => void check(), 15_000);
         return () => window.clearInterval(interval);
-    }, [accountAddress]);
+    }, []);
 
     /* ── Wallet reconnect on mount ─────────────────────────── */
     useEffect(() => {
@@ -524,26 +523,47 @@ function MainApp() {
             setToast('Shipment ID and supplier address are required.');
             return;
         }
+        if (!accountAddress) {
+            setToast('Connect Pera Wallet first — registration is signed in your wallet.');
+            return;
+        }
         setRegisterBusy(true);
         try {
-            const regRes = await axios.post(
-                `${BACKEND_URL}/register-shipment`,
+            setToast('Building transaction… Approve in Pera when prompted.');
+            const buildRes = await axios.post(
+                `${BACKEND_URL}/register-shipment/build`,
                 {
                     shipment_id: regForm.shipment_id.trim(),
                     origin: regForm.origin,
                     destination: regForm.destination,
                     supplier_address: regForm.supplier.trim(),
+                    sender_address: accountAddress,
                 },
                 {
                     headers: { 'Content-Type': 'application/json' },
                     timeout: 120_000,
                 },
             );
-            const tid = (regRes.data as { tx_id?: string })?.tx_id;
-            if (tid) {
-                recordConfirmedTx({ txId: tid, label: 'Shipment registered' });
+            const txnsB64: string[] = buildRes.data?.txns_b64 ?? buildRes.data?.txns ?? [];
+            let confirmedTxId: string | null = null;
+            const ok = await signSendConfirmB64Group(txnsB64, { label: 'Register shipment' }, async (ctx) => {
+                confirmedTxId = ctx.txId;
+                await axios.post(
+                    `${BACKEND_URL}/register-shipment/confirm`,
+                    {
+                        shipment_id: regForm.shipment_id.trim(),
+                        origin: regForm.origin,
+                        destination: regForm.destination,
+                        supplier_address: regForm.supplier.trim(),
+                        tx_id: ctx.txId,
+                    },
+                    { headers: { 'Content-Type': 'application/json' }, timeout: 60_000 },
+                );
+            });
+            if (!ok || !confirmedTxId) {
+                setRegisterBusy(false);
+                return;
             }
-            setToast('Shipment registered.');
             setRegisterModal(false);
             setRegForm((f) => ({ ...f, shipment_id: '' }));
             const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
@@ -551,7 +571,7 @@ function MainApp() {
             axios.get(`${BACKEND_URL}/stats`).then((r) => setStats(r.data)).catch(() => {});
             refreshRecentTxns();
         } catch (e: unknown) {
-            const err = e as { response?: { data?: { detail?: unknown } } };
+            const err = e as { response?: { data?: { detail?: unknown }; status?: number } };
             const d = err.response?.data?.detail;
             let msg = 'Registration failed.';
             if (typeof d === 'string') {
@@ -856,7 +876,7 @@ function MainApp() {
 
                 <div style={{ flex: 1, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
                     <span style={{ fontSize: '0.8rem', fontWeight: 600, color: chainHealth ? '#34d399' : '#f87171' }}>
-                        ● Algorand Testnet
+                        {chainHealth ? '● Algorand Testnet' : '● Offline'}
                     </span>
                 </div>
 
@@ -900,10 +920,29 @@ function MainApp() {
             </header>
 
             <nav className="dash-nav">
-                <Link to="/verify">Verify</Link>
+                <Link to="/verify">🔍 Verify</Link>
                 <Link to="/protocol">Protocol</Link>
                 <Link to="/navibot">NaviBot</Link>
             </nav>
+
+            {!chainHealth ? (
+                <div
+                    style={{
+                        marginTop: 10,
+                        padding: '10px 14px',
+                        borderRadius: 8,
+                        background: 'rgba(248,113,113,0.12)',
+                        border: '1px solid rgba(248,113,113,0.35)',
+                        color: '#fecaca',
+                        fontSize: '0.84rem',
+                        fontWeight: 600,
+                        textAlign: 'center',
+                    }}
+                >
+                    Reconnecting to Algorand… check network or your API / algod configuration.
+                </div>
+            ) : null}
+            <NewsTicker />
 
             <div className={role === 'stakeholder' ? 'role-banner-stakeholder' : 'role-banner-supplier'}>
                 {role === 'stakeholder' ? 'Buyer view — protecting your escrow' : 'Supplier view — tracking your payments'}
@@ -991,16 +1030,6 @@ function MainApp() {
                               ? `Source: ${supplierRep.source}`
                               : null}
                     </div>
-                    {appId ? (
-                        <a
-                            href={`https://lora.algokit.io/testnet/application/${appId}`}
-                            target="_blank"
-                            rel="noreferrer"
-                            style={{ fontSize: '0.78rem', fontWeight: 700, color: '#fbbf24' }}
-                        >
-                            View reputation on Lora ↗
-                        </a>
-                    ) : null}
                     <div style={{ marginTop: 14, fontSize: '0.78rem', color: '#94a3b8' }}>
                         Completed deliveries: <strong style={{ color: '#e2e8f0' }}>{supplierIdentityCounts.settled}</strong>
                         {' · '}
@@ -1165,7 +1194,7 @@ function MainApp() {
                             <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Blockchain status</span>
                         </div>
                         <div style={{ fontSize: '1.05rem', fontWeight: 700, color: chainHealth ? '#34d399' : '#f87171' }}>
-                            {chainHealth ? 'Testnet online' : 'Offline'}
+                            {chainHealth ? 'Algorand Testnet' : 'Offline'}
                         </div>
                     </div>
                 </div>
@@ -1224,7 +1253,7 @@ function MainApp() {
                 </div>
             )}
 
-            {!isLoading && stats.escrow_total_algo != null && stats.lora_contract_account_url ? (
+            {!isLoading && stats.escrow_total_algo != null ? (
                 <div
                     style={{
                         marginTop: 12,
@@ -1243,17 +1272,8 @@ function MainApp() {
                     <Coins size={15} color="#38bdf8" style={{ flexShrink: 0 }} />
                     <span>
                         Contract escrow:{' '}
-                        <strong style={{ color: '#f1f5f9' }}>{stats.escrow_total_algo.toFixed(4)} ALGO</strong> on the app
-                        account
+                        <strong style={{ color: '#f1f5f9' }}>{stats.escrow_total_algo.toFixed(4)} ALGO</strong> on the app account
                     </span>
-                    <a
-                        href={stats.lora_contract_account_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{ fontWeight: 600, color: '#7dd3fc', marginLeft: 'auto' }}
-                    >
-                        View contract account on Lora ↗
-                    </a>
                 </div>
             ) : null}
 
@@ -1294,16 +1314,6 @@ function MainApp() {
                                 <span style={{ color: '#64748b' }}>
                                     {t.timestamp ? timeAgo(t.timestamp) : t.round != null ? `Round ${t.round}` : '—'}
                                 </span>
-                                {t.lora_url ? (
-                                    <a
-                                        href={t.lora_url}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        style={{ color: '#7dd3fc', fontSize: '0.76rem', fontWeight: 600 }}
-                                    >
-                                        ↗ Lora
-                                    </a>
-                                ) : null}
                             </li>
                         ))}
                     </ul>
@@ -1576,16 +1586,12 @@ function MainApp() {
                                             &ldquo;{jury.sentinel.reasoning_narrative || jury.sentinel.reasoning}&rdquo;
                                         </div>
                                     )}
-                                    {role === 'supplier' && appId ? (
-                                        <a
-                                            href={`https://lora.algokit.io/testnet/application/${appId}`}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                            style={{ display: 'inline-block', marginTop: 12, fontWeight: 700, fontSize: '0.78rem', color: '#fbbf24' }}
-                                        >
-                                            View dispute on Lora ↗
-                                        </a>
-                                    ) : null}
+                                    <Link
+                                        to={`/verify/${encodeURIComponent(ship.shipment_id)}`}
+                                        style={{ display: 'inline-block', marginTop: 12, fontWeight: 700, fontSize: '0.78rem', color: '#fbbf24' }}
+                                    >
+                                        View proof ↗
+                                    </Link>
                                 </div>
                             ) : null}
 
@@ -1657,11 +1663,6 @@ function MainApp() {
                                             <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: 10 }}>
                                                 {hasVerdictTx ? 'Verdict on record — awaiting settlement flow.' : 'Awaiting AI jury verdict from buyer.'}
                                             </div>
-                                            {ship.lora_app_url ? (
-                                                <a href={ship.lora_app_url} target="_blank" rel="noreferrer" style={{ fontWeight: 700, fontSize: '0.78rem', color: '#2563eb' }}>
-                                                    View shipment on Lora ↗
-                                                </a>
-                                            ) : null}
                                         </>
                                     ) : null}
                                     {ship.stage === 'Settled' ? (
@@ -1912,10 +1913,8 @@ function MainApp() {
                                         ) : null}
                                     </div>
                                     {jury.on_chain_tx_id ? (
-                                        <a
-                                            href={`https://lora.algokit.io/testnet/transaction/${jury.on_chain_tx_id}`}
-                                            target="_blank"
-                                            rel="noreferrer"
+                                        <Link
+                                            to={`/verify/${encodeURIComponent(ship.shipment_id)}`}
                                             style={{
                                                 display: 'inline-block',
                                                 fontSize: '0.78rem',
@@ -1924,8 +1923,8 @@ function MainApp() {
                                                 textDecoration: 'none',
                                             }}
                                         >
-                                            View verdict on Lora ↗
-                                        </a>
+                                            View proof ↗
+                                        </Link>
                                     ) : null}
                                 </div>
                             )}
@@ -1934,11 +1933,18 @@ function MainApp() {
                             {role === 'stakeholder' && (
                                 <WeatherCourt shipmentId={ship.shipment_id} destinationLabel={ship.destination || ''} />
                             )}
-                            {role === 'supplier' && (
+                            {(role === 'stakeholder' || role === 'supplier') && (
                                 <CustodyChain
                                     shipmentId={ship.shipment_id}
                                     walletAddress={accountAddress}
                                     canAdd={Boolean(accountAddress)}
+                                    signB64Group={async (b64, label) => {
+                                        let tid: string | null = null;
+                                        const ok = await signSendConfirmB64Group(b64, { label }, (ctx) => {
+                                            tid = ctx.txId;
+                                        });
+                                        return ok ? tid : null;
+                                    }}
                                 />
                             )}
 
@@ -2071,6 +2077,13 @@ function MainApp() {
                                     </button>
                                 )}
                             </div>
+                            <ShipmentReportActions
+                                shipment={ship}
+                                appId={appId}
+                                verifyBaseUrl={
+                                    typeof window !== 'undefined' ? `${window.location.origin}/verify` : 'https://navitrustapp.vercel.app/verify'
+                                }
+                            />
                             </>
                             )}
                         </div>
@@ -2321,7 +2334,7 @@ function MainApp() {
                                 Cancel
                             </button>
                             <button type="button" className="primary-btn" disabled={registerBusy} onClick={() => void handleRegisterShipment()}>
-                                {registerBusy ? 'Registering…' : 'Register on Algorand'}
+                                {registerBusy ? 'Open Pera…' : 'Register in Pera'}
                             </button>
                         </div>
                     </div>
@@ -2481,7 +2494,7 @@ function MainApp() {
             <footer className="dash-footer">
                 <span className="dash-footer-brand">Navi-Trust</span>
                 <nav className="dash-footer-nav" aria-label="Footer">
-                    <Link to="/verify">Verify</Link>
+                    <Link to="/verify">🔍 Verify</Link>
                     <Link to="/protocol">Protocol</Link>
                     <Link to="/navibot">NaviBot</Link>
                 </nav>

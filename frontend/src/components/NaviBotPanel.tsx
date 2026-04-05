@@ -11,7 +11,7 @@ import './navibot.css';
 
 type Role = 'stakeholder' | 'supplier';
 
-type ChatLine = { role: 'user' | 'assistant'; text: string };
+type ChatLine = { role: 'user' | 'assistant'; text: string; at: number };
 
 const MAX_MESSAGES = 10;
 
@@ -61,7 +61,7 @@ export function NaviBotPanel({
   );
 
   useEffect(() => {
-    const seed: ChatLine = { role: 'assistant', text: intro };
+    const seed: ChatLine = { role: 'assistant', text: intro, at: Date.now() };
     setLines([seed]);
   }, [intro]);
 
@@ -75,7 +75,7 @@ export function NaviBotPanel({
       if (!text || busy) return;
       setInput('');
       setSuggest(null);
-      setLines((prev) => [...prev, { role: 'user' as const, text }].slice(-MAX_MESSAGES));
+      setLines((prev) => [...prev, { role: 'user' as const, text, at: Date.now() }].slice(-MAX_MESSAGES));
       setBusy(true);
       try {
         const history = linesRef.current.slice(-6).map((m) => ({ role: m.role, content: m.text }));
@@ -87,7 +87,7 @@ export function NaviBotPanel({
           role,
         });
         const reply = (res.text || res.reply || '').trim() || 'Try asking about Mumbai, Chennai, or Delhi shipments.';
-        setLines((prev) => [...prev, { role: 'assistant' as const, text: reply }].slice(-MAX_MESSAGES));
+        setLines((prev) => [...prev, { role: 'assistant' as const, text: reply, at: Date.now() }].slice(-MAX_MESSAGES));
         const act = res.action;
         const sid = (res.shipment_id || '').trim();
         if (act && sid && (act === 'run_jury' || act === 'verify')) {
@@ -97,6 +97,7 @@ export function NaviBotPanel({
         const errLine: ChatLine = {
           role: 'assistant',
           text: 'Could not reach the server. Is the API running on your BACKEND_URL?',
+          at: Date.now(),
         };
         setLines((prev) => [...prev, errLine].slice(-MAX_MESSAGES));
       } finally {
@@ -139,7 +140,8 @@ export function NaviBotPanel({
   }
 
   const fixed = variant === 'fixed';
-  const pills = ['Why is Chennai frozen?', 'Run jury on Mumbai', 'How does escrow work?', 'Delhi settled proof'];
+  const pills = ['Hi', 'How does escrow work?', 'Status of Mumbai?', 'Why is Chennai frozen?'];
+  const showQuickPills = !lines.some((l) => l.role === 'user');
 
   return (
     <aside
@@ -161,8 +163,9 @@ export function NaviBotPanel({
 
       <div ref={listRef} className="navibot-panel__messages">
         {lines.map((m, i) => (
-          <div key={i} className={`navibot-bubble navibot-bubble--${m.role}`}>
-            {m.text}
+          <div key={`${m.at}-${i}`} className={`navibot-bubble navibot-bubble--${m.role}`}>
+            <div>{m.text}</div>
+            <div className="navibot-bubble__time">{new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
           </div>
         ))}
         {busy ? (
@@ -192,13 +195,15 @@ export function NaviBotPanel({
         </div>
       ) : null}
 
-      <div className="navibot-panel__pills">
-        {pills.map((p) => (
-          <button key={p} type="button" className="navibot-pill" disabled={busy} onClick={() => void send(p)}>
-            {p}
-          </button>
-        ))}
-      </div>
+      {showQuickPills ? (
+        <div className="navibot-panel__pills">
+          {pills.map((p) => (
+            <button key={p} type="button" className="navibot-pill" disabled={busy} onClick={() => void send(p)}>
+              {p}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <footer className="navibot-panel__inputrow">
         <MessageSquare size={16} className="navibot-panel__input-icon" aria-hidden />
