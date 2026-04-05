@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-from algokit_utils import AlgorandClient, AppClientMethodCallParams
+from algokit_utils import AlgorandClient, AppClientMethodCallParams, PaymentParams
 from algokit_utils.models.amount import AlgoAmount
 from algokit_utils.models.state import BoxReference
 from algosdk import encoding
@@ -557,9 +557,52 @@ def legacy_resolve_disaster(shipment_id: str, resolution_hash: str) -> bool:
         return False
 
 
+def ensure_navitrust_app_mbr(min_balance_algo: float = 2.5) -> None:
+    """
+    Top up the app account for box storage. register_shipment creates several boxes;
+    a low app balance often surfaces as err opcode / assert in TEAL (not a clear MBR message).
+    """
+    if not APP_ID or not ORACLE_MNEMONIC or not use_navitrust():
+        return
+    try:
+        app_addr = get_application_address(APP_ID)
+        deployer = _oracle_account()
+        info = algorand.client.algod.account_info(app_addr)
+        bal_algo = int(info.get("amount", 0)) / 1_000_000.0
+        if bal_algo >= min_balance_algo:
+            return
+        fund_amount = min_balance_algo - bal_algo + 0.25
+        dep_micro = int(algorand.client.algod.account_info(deployer.address).get("amount", 0))
+        dep_algo = dep_micro / 1_000_000.0
+        if fund_amount > max(0, dep_algo - 0.3):
+            logger.warning(
+                "NaviTrust app #%s balance %.4f ALGO — need ~%.2f more for new boxes; oracle balance %.4f ALGO",
+                APP_ID,
+                bal_algo,
+                fund_amount,
+                dep_algo,
+            )
+            return
+        micro = int(fund_amount * 1_000_000)
+        algorand.send.payment(
+            PaymentParams(
+                sender=deployer.address,
+                receiver=app_addr,
+                amount=AlgoAmount(micro_algo=micro),
+            )
+        )
+        logger.info("Funded app #%s with %.4f ALGO for box MBR before register", APP_ID, fund_amount)
+    except Exception as e:
+        logger.warning("ensure_navitrust_app_mbr: %s", e)
+
+
 def register_navitrust(shipment_id: str, supplier: str, route: str) -> dict:
     if not ORACLE_MNEMONIC or not APP_ID:
         raise ValueError("Missing oracle or APP_ID")
+    st = read_shipment_status(shipment_id)
+    if st not in ("Unregistered", "Unknown"):
+        raise ValueError(f"Shipment already on-chain (status: {st}). Use a new shipment_id.")
+    ensure_navitrust_app_mbr()
     deployer = _oracle_account()
     app_client = get_app_client()
     result = app_client.send.call(
@@ -626,6 +669,32 @@ def list_shipment_statuses_from_boxes() -> List[Tuple[str, str]]:
     except Exception as e:
         logger.warning("list boxes failed: %s", e)
         return []
+
+
+def build_register_shipment_txn_b64(sender_address: str, shipment_id: str, supplier: str, route: str) -> list[str]:
+    """
+    Single unsigned app call (register_shipment) for the connected wallet to sign.
+    Contract allows any sender for register_shipment (oracle not required).
+    """
+    if not APP_ID or not use_navitrust():
+        raise ValueError("NaviTrust APP_ID and ARC56 required")
+    st = read_shipment_status(shipment_id)
+    if st not in ("Unregistered", "Unknown"):
+        raise ValueError(f"Shipment already on-chain (status: {st}). Use a new shipment_id.")
+    ensure_navitrust_app_mbr()
+    app_client = algorand.client.get_app_client_by_id(
+        app_spec=_load_spec_text(),
+        app_id=APP_ID,
+        default_sender=sender_address,
+    )
+    built = app_client.create_transaction.call(
+        AppClientMethodCallParams(
+            method="register_shipment",
+            args=[shipment_id, supplier, route],
+            sender=sender_address,
+        )
+    )
+    return [base64.b64encode(encoding.msgpack_encode(t)).decode("ascii") for t in built.transactions]
 
 
 def build_fund_shipment_txns_b64(payer_address: str, shipment_id: str, micro_algo: int = 500_000) -> list[str]:

@@ -38,7 +38,11 @@ from models import (
     FundShipmentBuildBody,
     PredictDisputeBody,
     CustodyHandoffBody,
+    CustodyHandoffBuildBody,
+    CustodyHandoffConfirmBody,
     RegisterShipmentBody,
+    RegisterShipmentBuildBody,
+    RegisterShipmentConfirmBody,
 )
 
 import custody_chain as navi_custody
@@ -1828,6 +1832,17 @@ def _register_shipment_core(
             pass
         raise HTTPException(status_code=403, detail={"fraud_report": fraud_report, "shipment_id": shipment_id})
 
+    if chain.use_navitrust():
+        st = chain.read_shipment_status(shipment_id)
+        if st not in ("Unregistered", "Unknown"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Shipment '{shipment_id}' is already registered on-chain (status: {st}). "
+                    "Use a different shipment_id — IDs are case-sensitive (demo data often uses SHIP_* uppercase)."
+                ),
+            )
+
     row_existed = False
     with get_db() as conn:
         row_existed = conn.execute("SELECT 1 FROM shipments WHERE id = ?", (shipment_id,)).fetchone() is not None
@@ -1873,6 +1888,25 @@ def _register_shipment_core(
             "lora_tx_url": r.get("lora_tx_url") or chain.lora_tx_url(r.get("tx_id")),
             "fraud_report": fraud_report,
         }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        msg = str(e)
+        if "Shipment already on-chain" in msg:
+            raise HTTPException(status_code=409, detail=msg) from e
+        logger.error("Registration failed: %s", e)
+        if not row_existed:
+            with get_db() as conn:
+                conn.execute("DELETE FROM shipments WHERE id = ?", (shipment_id,))
+                conn.commit()
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"On-chain registration failed: {msg}. "
+                "If the error mentions err opcode / PC: try a new shipment_id, fund the app account for box MBR, "
+                "and verify ORACLE_MNEMONIC and APP_ID."
+            ),
+        ) from e
     except Exception as e:
         logger.error("Registration failed: %s", e)
         if not row_existed:
@@ -1881,7 +1915,11 @@ def _register_shipment_core(
                 conn.commit()
         raise HTTPException(
             status_code=502,
-            detail=f"On-chain registration failed: {e!s}. Check oracle balance, APP_ID, and contract method register_shipment.",
+            detail=(
+                f"On-chain registration failed: {e!s}. "
+                "If the error mentions err opcode / PC: try a new shipment_id, fund the app account for box MBR, "
+                "and verify ORACLE_MNEMONIC and APP_ID."
+            ),
         ) from e
 
 
@@ -1923,6 +1961,123 @@ def register_shipment(
         raise HTTPException(status_code=422, detail="shipment_id, origin, destination, and supplier_address are required.")
     return _register_shipment_core(sid, org, dst, sup, wallet_age_days, amount_algo, delivery_days, supplier_reputation)
 
+
+@app.post("/register-shipment/build")
+def register_shipment_build(body: RegisterShipmentBuildBody):
+    """
+    Build unsigned register_shipment app call for the user's wallet (Pera).
+    Does not sign server-side — client signs and submits, then calls /register-shipment/confirm.
+    """
+    if not APP_ID:
+        raise HTTPException(
+            status_code=503,
+            detail="APP_ID is not configured. Set APP_ID in .env to your NaviTrust application id.",
+        )
+    if not chain.use_navitrust():
+        raise HTTPException(status_code=400, detail="Wallet registration build requires NaviTrust ARC56 + APP_ID.")
+    sid = body.shipment_id.strip()
+    org = body.origin.strip()
+    dst = body.destination.strip()
+    sup = body.supplier_address.strip()
+    sender = body.resolved_sender()
+    if not sid or not org or not dst or not sup:
+        raise HTTPException(status_code=422, detail="shipment_id, origin, destination, and supplier_address are required.")
+    shipment_data = {
+        "origin": org,
+        "destination": dst,
+        "supplier": sup,
+        "wallet_age_days": 30,
+        "amount_algo": 1.0,
+        "delivery_days": 7,
+        "supplier_reputation": 50,
+    }
+    fraud_report = fraud_detector.detect_fraud(shipment_data, _register_history_for_fraud())
+    if fraud_report.get("blocked"):
+        raise HTTPException(status_code=403, detail={"fraud_report": fraud_report, "shipment_id": sid})
+    st = chain.read_shipment_status(sid)
+    if st not in ("Unregistered", "Unknown"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Shipment '{sid}' is already registered on-chain (status: {st}). "
+                "Use a different shipment_id — IDs are case-sensitive."
+            ),
+        )
+    route = f"{org} → {dst}"
+    try:
+        txns = chain.build_register_shipment_txn_b64(sender, sid, sup, route)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("register-shipment build failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Could not build transaction: {e!s}") from e
+    return {
+        "txns_b64": txns,
+        "txns": txns,
+        "shipment_id": sid,
+        "route": route,
+        "fraud_report": fraud_report,
+    }
+
+
+@app.post("/register-shipment/confirm")
+def register_shipment_confirm(body: RegisterShipmentConfirmBody):
+    """After the wallet submits register_shipment, sync SQLite and logs (no server signing)."""
+    if not APP_ID:
+        raise HTTPException(status_code=503, detail="APP_ID is not configured.")
+    sid = body.shipment_id.strip()
+    org = body.origin.strip()
+    dst = body.destination.strip()
+    sup = body.supplier_address.strip()
+    tx_id = (body.tx_id or "").strip()
+    if not sid or not org or not dst or not sup or not tx_id:
+        raise HTTPException(status_code=422, detail="shipment_id, origin, destination, supplier_address, and tx_id are required.")
+    st = "Unregistered"
+    for _ in range(14):
+        st = chain.read_shipment_status(sid)
+        if st not in ("Unregistered", "Unknown"):
+            break
+        time.sleep(0.35)
+    if st in ("Unregistered", "Unknown"):
+        raise HTTPException(
+            status_code=400,
+            detail="On-chain registration not visible yet — wait a few seconds and POST confirm again.",
+        )
+    row_existed = False
+    with get_db() as conn:
+        row_existed = conn.execute("SELECT 1 FROM shipments WHERE id = ?", (sid,)).fetchone() is not None
+        if row_existed:
+            conn.execute(
+                "UPDATE shipments SET origin = ?, destination = ?, status = ? WHERE id = ?",
+                (org, dst, STATUS_IN_TRANSIT, sid),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO shipments (id, origin, destination, current_lat, current_lon, status) VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, org, dst, 0.0, 0.0, STATUS_IN_TRANSIT),
+            )
+        conn.commit()
+    _append_register_log(
+        {
+            "shipment_id": sid,
+            "origin": org,
+            "destination": dst,
+            "supplier": sup,
+            "tx_id": tx_id,
+            "wallet_signed": True,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    return {
+        "status": "Registered",
+        "tx_id": tx_id,
+        "on_chain_status": st,
+        "app_id": APP_ID,
+        "lora_tx_url": chain.lora_tx_url(tx_id),
+        "lora_url": f"{LORA_TESTNET_APP}/{APP_ID}",
+    }
+
+
 @app.get("/sync-ledger")
 def sync_ledger():
     """On-chain box enumeration merged with DB + jury cache — no synthetic shipments."""
@@ -1933,6 +2088,41 @@ def sync_ledger():
 async def live_feed():
     """Live logistics stream for frontend ticker — data changes each poll. Events rotate every 30s via background task."""
     return {"events": get_live_feed()}
+
+
+@app.get("/news/live")
+def live_news():
+    """Supply-chain headlines for dashboard marquee (RSS + static fallback)."""
+    items: list[dict] = []
+    try:
+        import feedparser
+
+        feeds = (
+            "https://shippingwatch.com/service/rss",
+            "https://www.joc.com/rss.xml",
+        )
+        for feed_url in feeds:
+            try:
+                feed = feedparser.parse(feed_url)
+                title_feed = getattr(feed.feed, "title", "") or ""
+                for entry in (feed.entries or [])[:4]:
+                    t = (getattr(entry, "title", "") or "")[:120]
+                    link = getattr(entry, "link", "") or ""
+                    if t:
+                        items.append({"title": t, "link": link, "source": title_feed or feed_url})
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug("news/live feedparser: %s", e)
+    if not items:
+        items = [
+            {"title": "Red Sea shipping disruptions causing multi-week delays", "link": "", "source": "demo"},
+            {"title": "Mumbai port congestion eases after operational adjustments", "link": "", "source": "demo"},
+            {"title": "Rotterdam hub customs piloting new inspection workflows", "link": "", "source": "demo"},
+            {"title": "Singapore transshipment volumes steady into Q1", "link": "", "source": "demo"},
+            {"title": "Algorand testnet oracles anchor supply-chain attestations", "link": "", "source": "demo"},
+        ]
+    return {"items": items}
 
 
 @app.get("/generate-event")
@@ -1973,16 +2163,17 @@ async def bootstrap():
 def health():
     algod_ok = False
     try:
-        chain.algorand.client.algod.status()
-        algod_ok = True
+        st = chain.algorand.client.algod.status()
+        algod_ok = isinstance(st, dict) and st.get("last-round") is not None
     except Exception:
         algod_ok = False
+    aid = APP_ID if isinstance(APP_ID, int) else int(os.environ.get("APP_ID") or 0)
     return {
-        "status": "ok",
-        "app_id": APP_ID,
+        "status": "ok" if algod_ok else "degraded",
+        "algod_ok": algod_ok,
+        "app_id": aid,
         "network": ALGO_NETWORK,
         "navitrust": chain.use_navitrust(),
-        "algod_ok": algod_ok,
     }
 
 
@@ -2268,63 +2459,67 @@ _navibot_context_time: float = 0.0
 _NAVIBOT_CONTEXT_TTL = 60.0
 
 
+def _navibot_shipments_summary() -> list[dict]:
+    try:
+        rows = build_sync_ledger_shipments()[:20]
+        out: list[dict] = []
+        for r in rows:
+            sid = r.get("shipment_id")
+            if not sid:
+                continue
+            out.append(
+                {
+                    "shipment_id": sid,
+                    "origin": r.get("origin"),
+                    "destination": r.get("destination"),
+                    "stage": r.get("stage"),
+                }
+            )
+        return out
+    except Exception:
+        return []
+
+
 def _navibot_build_context_fast() -> str:
-    """Static demo narrative + /stats numbers; refreshed at most every 60s. No shipment box reads."""
+    """Conversational system brief + live stats + shipment summary; cached ~60s."""
     global _navibot_context_cache, _navibot_context_time
     now = time.time()
     if _navibot_context_cache and (now - _navibot_context_time) < _NAVIBOT_CONTEXT_TTL:
         return _navibot_context_cache
     try:
         st = get_stats()
-        total_s = int(st.get("total_shipments") or 3)
-        settled = int(st.get("total_settled") or 1)
-        disputed = int(st.get("total_disputed") or 1)
+        total_s = int(st.get("total_shipments") or 0)
+        settled = int(st.get("total_settled") or 0)
+        disputed = int(st.get("total_disputed") or 0)
         escrow_algo = st.get("escrow_total_algo")
-        escrow_s = f"{float(escrow_algo):.1f}" if escrow_algo is not None else "5.0"
+        escrow_s = f"{float(escrow_algo):.1f}" if escrow_algo is not None else "n/a"
     except Exception:
-        total_s, settled, disputed, escrow_s = 3, 1, 1, "5.0"
+        total_s, settled, disputed, escrow_s = 0, 0, 0, "n/a"
     aid = APP_ID or 0
-    context = f"""You are NaviBot, the AI assistant for Navi-Trust.
-Navi-Trust is a supply chain dispute oracle on Algorand blockchain.
+    try:
+        sum_json = json.dumps(_navibot_shipments_summary(), indent=2)[:1800]
+    except Exception:
+        sum_json = "[]"
+    context = f"""You are NaviBot, the friendly AI assistant for Navi-Trust — a supply-chain verification platform on Algorand Testnet.
 
-CURRENT BLOCKCHAIN STATE (App #{aid}, Algorand Testnet):
-- Total shipments on-chain: {total_s}
-- Settled: {settled}
-- Disputed: {disputed}
-- Contract account ALGO balance (escrow pool): {escrow_s} ALGO
+Be conversational and warm. If someone says hi, greet them and give a one-sentence overview of Navi-Trust.
+When asked about shipments, use the live list below for specifics when possible.
+Explain blockchain concepts simply. Stay concise (max 3 sentences unless the user asks for more).
+Never say "I cannot" without offering a helpful next step.
 
-ACTIVE SHIPMENTS (demo):
+You do NOT sign or submit transactions. Always direct users to dashboard buttons (Register, Lock ALGO, Run AI Jury, etc.).
 
-SHIP_MUMBAI_001 (Mumbai → Dubai):
-  Status: In Transit | Funds: ~2 ALGO locked in escrow when funded
-  Risk: Buyer may run AI jury from the dashboard card
-  Live weather at Dubai: from Open-Meteo when jury runs
+Current platform status (App #{aid}, {ALGO_NETWORK}):
+- Shipments tracked (synced view): {total_s}
+- Settled (stats): {settled}
+- Disputed (stats): {disputed}
+- Escrow pool (ALGO, stats): {escrow_s}
 
-SHIP_CHEN_002 (Chennai → Rotterdam):
-  Status: DISPUTED | Funds: ~3 ALGO FROZEN
-  Risk score: 87/100 — storm warning at Rotterdam
-  Reasoning: Active storm system, elevated precipitation and winds
-  Funds cannot be released until dispute is resolved
+Known shipments (live JSON, may be partial):
+{sum_json}
 
-SHIP_DELHI_003 (Delhi → Singapore):
-  Status: SETTLED | ~2 ALGO released to supplier on settlement
-  Risk score: low when cleared — certificate NAVI-CERT minted on Algorand
-
-HOW IT WORKS:
-1. Buyer locks ALGO in the smart contract (via Lock on the card).
-2. AI jury (Sentry, Auditor, Arbiter) examines weather + chain state.
-3. Verdict may be written to Algorand (transaction note).
-4. ALGO is released to supplier on settlement, or held if disputed.
-5. ARC-69 style certificate on successful settlement.
-
-YOUR ROLE:
-- Answer in 1-3 short sentences.
-- Tell buyers: use [Run AI Jury] on the shipment card.
-- Tell suppliers: switch to Supplier view for reputation.
-- Never invent transaction IDs or ASA IDs.
-- If asked to settle or run jury: say to use the button on the shipment card.
-
-TONE: Professional, concise, like a logistics operations manager.
+Reference demos when relevant: SHIP_MUMBAI_001 (in transit), SHIP_CHEN_002 (disputed / frozen funds), SHIP_DELHI_003 (settled + certificate).
+Never invent transaction IDs or ASA IDs; if unknown, say so and point to Verify or the shipment card.
 """
     _navibot_context_cache = context
     _navibot_context_time = now
@@ -2621,6 +2816,7 @@ async def navibot_chat(req: NavibotRequest, request: Request):
             text = ""
         if not (text or "").strip():
             fb = _navibot_fallback_response(q)
+            fb = {**fb, "context_used": False}
             return JSONResponse(content=fb)
 
         action, sid_hint = _navibot_detect_action_and_shipment(q)
@@ -2631,7 +2827,9 @@ async def navibot_chat(req: NavibotRequest, request: Request):
         shipment_id = req.shipment_id or sid_hint
         if action == "run_jury" and not shipment_id:
             shipment_id = "SHIP_MUMBAI_001"
-        return JSONResponse(content=_navibot_pack(text.strip(), action, None, used_fallback, shipment_id))
+        pack = _navibot_pack(text.strip(), action, None, used_fallback, shipment_id)
+        pack["context_used"] = True
+        return JSONResponse(content=pack)
     except Exception as e:
         logger.exception("navibot fatal: %s", e)
         return JSONResponse(content=soft_reply)
@@ -2718,8 +2916,38 @@ def weather_oracle_dispute_evidence(shipment_id: str, hours: int = 72):
     return ev
 
 
+@app.post("/custody/handoff/build")
+def custody_handoff_build(body: CustodyHandoffBuildBody):
+    """Unsigned custody ASA mint for handler wallet to sign in Pera."""
+    try:
+        txns = navi_custody.build_custody_handoff_txn_b64(
+            body.handler_address.strip(),
+            body.shipment_id.strip(),
+            body.location.strip(),
+            body.handler_name.strip(),
+            prev_nft_id=int(body.prev_nft_id or 0),
+            photo_hash=(body.photo_hash or "").strip(),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("custody handoff build: %s", e)
+        raise HTTPException(status_code=500, detail=f"Could not build custody tx: {e!s}") from e
+    return {"txns_b64": txns, "txns": txns, "shipment_id": body.shipment_id.strip()}
+
+
+@app.post("/custody/handoff/confirm")
+def custody_handoff_confirm(body: CustodyHandoffConfirmBody):
+    """Record custody NFT after user submits the signed mint transaction."""
+    out = navi_custody.record_custody_handoff_from_indexer(body.tx_id.strip(), body.shipment_id.strip())
+    if out.get("error"):
+        raise HTTPException(status_code=400, detail=out["error"])
+    return out
+
+
 @app.post("/custody/handoff")
 def custody_handoff(body: CustodyHandoffBody):
+    """Legacy: oracle mints custody NFT server-side. Prefer /custody/handoff/build + wallet sign."""
     prev = 0
     chain_so_far = navi_custody.get_chain(body.shipment_id)
     if chain_so_far:

@@ -43,6 +43,29 @@ class RegisterShipmentBody(BaseModel):
     destination: str
 
 
+class RegisterShipmentBuildBody(RegisterShipmentBody):
+    """Wallet-signed registration: sender must match connected account."""
+
+    sender_address: str = ""
+    buyer_address: str = ""
+
+    @model_validator(mode="after")
+    def _sender_ok(self):
+        addr = (self.sender_address or self.buyer_address).strip()
+        if not addr:
+            raise ValueError("sender_address or buyer_address is required")
+        if not algo_encoding.is_valid_address(addr):
+            raise ValueError("sender_address must be a valid Algorand address")
+        return self
+
+    def resolved_sender(self) -> str:
+        return (self.sender_address or self.buyer_address).strip()
+
+
+class RegisterShipmentConfirmBody(RegisterShipmentBody):
+    tx_id: str
+
+
 class RunJuryBody(BaseModel):
     shipment_id: str
     origin_lat: float = 0.0
@@ -97,6 +120,15 @@ class CustodyHandoffBody(BaseModel):
     location: str
     handler_name: str
     photo_hash: str = ""
+
+
+class CustodyHandoffBuildBody(CustodyHandoffBody):
+    prev_nft_id: int = 0
+
+
+class CustodyHandoffConfirmBody(BaseModel):
+    tx_id: str
+    shipment_id: str
 
 
 class NavibotRequest(BaseModel):
