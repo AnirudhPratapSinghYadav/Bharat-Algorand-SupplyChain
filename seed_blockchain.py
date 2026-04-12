@@ -104,13 +104,25 @@ def _maybe_retry_settle_pending(sid: str, spec: dict, summary: dict[str, dict]) 
     if not spec.get("settle"):
         return
     status = chain.read_shipment_status(sid)
-    if status in ("Unregistered", "Unknown", "Settled"):
-        return
-    if status == "Disputed":
-        return
     full = chain.read_shipment_full(sid)
     funds = int(full.get("funds_microalgo") or 0)
+    logger.info(
+        "settle-retry probe: %s chain_status=%s funds_microalgo=%s",
+        sid,
+        status,
+        funds,
+    )
+    if status in ("Unregistered", "Unknown", "Settled"):
+        logger.info("  -> no settle retry (already terminal: %s)", status)
+        return
+    if status == "Disputed":
+        logger.info("  -> no settle retry (Disputed — settle not attempted)")
+        return
     if funds < 100_000:
+        logger.warning(
+            "  -> no settle retry (escrow %s < 100000 microAlgo — fund or inspect fn_ box)",
+            funds,
+        )
         return
     logger.info(
         "=== Retry settle_shipment %s (status=%s, escrow=%s microAlgo) ===",
