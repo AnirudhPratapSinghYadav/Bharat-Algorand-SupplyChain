@@ -17,9 +17,6 @@ import NaviBotPage from './pages/NaviBotPage';
 import { NaviBotPanel } from './components/NaviBotPanel';
 import { RoleProvider, useRole } from './context/RoleContext';
 import { LandingPage } from './components/landing/LandingPage';
-import { WitnessPanel } from './components/WitnessPanel';
-import { WeatherCourt } from './components/WeatherCourt';
-import { CustodyChain } from './components/CustodyChain';
 import { ShipmentDestinationWeatherRow } from './components/DestinationWeather';
 import { JuryRiskHistoryChart } from './components/JuryRiskHistoryChart';
 import { LiveVerdictTerminal } from './components/LiveVerdictTerminal';
@@ -1927,25 +1924,6 @@ function MainApp() {
                                         </Link>
                                     ) : null}
                                 </div>
-                            )}
-
-                            <WitnessPanel shipmentId={ship.shipment_id} oracleAddress={oracleAddress} />
-                            {role === 'stakeholder' && (
-                                <WeatherCourt shipmentId={ship.shipment_id} destinationLabel={ship.destination || ''} />
-                            )}
-                            {(role === 'stakeholder' || role === 'supplier') && (
-                                <CustodyChain
-                                    shipmentId={ship.shipment_id}
-                                    walletAddress={accountAddress}
-                                    canAdd={Boolean(accountAddress)}
-                                    signB64Group={async (b64, label) => {
-                                        let tid: string | null = null;
-                                        const ok = await signSendConfirmB64Group(b64, { label }, (ctx) => {
-                                            tid = ctx.txId;
-                                        });
-                                        return ok ? tid : null;
-                                    }}
-                                />
                             )}
 
                             {/* Supplier: simple event summary instead of verdict */}

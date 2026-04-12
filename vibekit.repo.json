@@ -15,8 +15,7 @@
     "contract_source": "smart_contracts/navi_trust/smart_contracts/navi_trust/contract.py"
   },
   "chain_artifacts": {
-    "navitrust_arc56": "artifacts/NaviTrust.arc56.json",
-    "legacy_escrow_arc56": "artifacts/AgriSupplyChainEscrow.arc56.json"
+    "navitrust_arc56": "artifacts/NaviTrust.arc56.json"
   },
   "environment": {
     "dotenv": ".env",

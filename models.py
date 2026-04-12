@@ -106,31 +106,6 @@ class FundShipmentBuildBody(BaseModel):
         return max(500_000, int(round(float(algo) * 1_000_000)))
 
 
-class PredictDisputeBody(BaseModel):
-    supplier_reputation: int = 50
-    route_risk: int = 30
-    destination_city: str = "Dubai"
-    amount_algo: float = 1.0
-    shipment_id: str | None = None
-
-
-class CustodyHandoffBody(BaseModel):
-    shipment_id: str
-    handler_address: str
-    location: str
-    handler_name: str
-    photo_hash: str = ""
-
-
-class CustodyHandoffBuildBody(CustodyHandoffBody):
-    prev_nft_id: int = 0
-
-
-class CustodyHandoffConfirmBody(BaseModel):
-    tx_id: str
-    shipment_id: str
-
-
 class NavibotRequest(BaseModel):
     """Accept `query` (legacy) or `message` (alias) — at least one should be non-empty for best results."""
 

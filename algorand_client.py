@@ -1,6 +1,6 @@
 """
 Algorand reads/writes for Navi-Trust.
-Uses artifacts/NaviTrust.arc56.json when present, else AgriSupplyChainEscrow.arc56.json.
+Requires artifacts/NaviTrust.arc56.json (legacy escrow ABI removed).
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent
 NAVITRUST_SPEC = ROOT / "artifacts" / "NaviTrust.arc56.json"
-LEGACY_SPEC = ROOT / "artifacts" / "AgriSupplyChainEscrow.arc56.json"
 
 APP_ID = int(os.environ.get("APP_ID", 0) or os.environ.get("VITE_APP_ID", 0))
 ALGO_NETWORK = os.environ.get("ALGO_NETWORK", "testnet")
@@ -226,7 +225,9 @@ def use_navitrust() -> bool:
 def arc56_spec_path() -> Path:
     if use_navitrust():
         return NAVITRUST_SPEC
-    return LEGACY_SPEC
+    raise FileNotFoundError(
+        "artifacts/NaviTrust.arc56.json is required. Copy from smart_contracts build output."
+    )
 
 
 def _load_spec_text() -> str:
@@ -269,7 +270,7 @@ def verify_oracle_setup() -> Optional[str]:
     if not mnemonic_str or len(mnemonic_str.split()) != 25:
         raise RuntimeError(
             "ORACLE_MNEMONIC not set or invalid. "
-            "Run: python generate_oracle.py"
+            "Add a funded TestNet deployer mnemonic to .env (see .env.example)."
         )
     try:
         pk = algosdk_mnemonic.to_private_key(mnemonic_str)
@@ -622,21 +623,10 @@ def register_navitrust(shipment_id: str, supplier: str, route: str) -> dict:
 
 
 def register_legacy(shipment_id: str, _supplier: str = "") -> dict:
-    """AgriSupplyChainEscrow add_shipment(shipment_id) only."""
-    deployer = _oracle_account()
-    app_client = algorand.client.get_app_client_by_id(
-        app_spec=_load_spec_text(),
-        app_id=APP_ID,
-        default_sender=deployer.address,
+    """Legacy escrow contract support removed; use NaviTrust + artifacts/NaviTrust.arc56.json."""
+    raise RuntimeError(
+        "Legacy AgriSupplyChainEscrow flow removed. Deploy NaviTrust and keep artifacts/NaviTrust.arc56.json."
     )
-    result = app_client.send.call(
-        params=AppClientMethodCallParams(
-            method="add_shipment",
-            args=[shipment_id],
-            sender=deployer.address,
-        )
-    )
-    return {"tx_id": result.tx_ids[0] if result.tx_ids else None, "app_id": APP_ID}
 
 
 def list_shipment_statuses_from_boxes() -> List[Tuple[str, str]]:
