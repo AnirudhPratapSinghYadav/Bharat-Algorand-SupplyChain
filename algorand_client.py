@@ -355,16 +355,33 @@ def _navi_rep_box_name(supplier_address: str) -> bytes:
     return b"rp_" + encoding.decode_address(supplier_address)
 
 
-def navitrust_shipment_box_refs(shipment_id: str, include_supplier_rep: bool) -> list[BoxReference]:
-    """Box references for a shipment (string-keyed maps + optional supplier reputation box)."""
+def navitrust_shipment_box_refs(shipment_id: str) -> list[BoxReference]:
+    """
+    All per-shipment box keys (8 refs — Algorand max per application call).
+    Does not include rp_ (supplier rep); use navitrust_settle_shipment_box_refs for settle_shipment.
+    """
     if not APP_ID:
         return []
     prefixes = (b"st_", b"sp_", b"by_", b"fn_", b"rs_", b"vd_", b"rt_", b"ce_")
-    refs = [BoxReference(APP_ID, _navi_str_key_box_name(pr, shipment_id)) for pr in prefixes]
-    if include_supplier_rep:
-        sup = read_navitrust_supplier_address(shipment_id)
-        if sup:
-            refs.append(BoxReference(APP_ID, _navi_rep_box_name(sup)))
+    return [BoxReference(APP_ID, _navi_str_key_box_name(pr, shipment_id)) for pr in prefixes]
+
+
+def navitrust_settle_shipment_box_refs(shipment_id: str) -> list[BoxReference]:
+    """
+    Boxes read/written by settle_shipment (contract.py) plus rp_ for reputation update.
+    Stays at or below 8 refs: st_, sp_, fn_, ce_, rp_ (5) — never combine with full 8-prefix list.
+    """
+    if not APP_ID:
+        return []
+    refs: list[BoxReference] = [
+        BoxReference(APP_ID, _navi_str_key_box_name(b"st_", shipment_id)),
+        BoxReference(APP_ID, _navi_str_key_box_name(b"sp_", shipment_id)),
+        BoxReference(APP_ID, _navi_str_key_box_name(b"fn_", shipment_id)),
+        BoxReference(APP_ID, _navi_str_key_box_name(b"ce_", shipment_id)),
+    ]
+    sup = read_navitrust_supplier_address(shipment_id)
+    if sup:
+        refs.append(BoxReference(APP_ID, _navi_rep_box_name(sup)))
     return refs
 
 
@@ -462,7 +479,7 @@ def record_verdict_chain(
                 args=[shipment_id, verdict_json[:3500], risk_score],
                 sender=deployer.address,
                 note=note[:1000] if note else None,
-                box_references=navitrust_shipment_box_refs(shipment_id, include_supplier_rep=False),
+                box_references=navitrust_shipment_box_refs(shipment_id),
                 extra_fee=AlgoAmount(micro_algo=1000),
             )
         )
@@ -510,7 +527,7 @@ def settle_shipment_chain(shipment_id: str) -> Optional[dict]:
                 method="settle_shipment",
                 args=[shipment_id],
                 sender=deployer.address,
-                box_references=navitrust_shipment_box_refs(shipment_id, include_supplier_rep=True),
+                box_references=navitrust_settle_shipment_box_refs(shipment_id),
                 extra_fee=AlgoAmount(micro_algo=4000),
             )
         )
@@ -610,7 +627,7 @@ def register_navitrust(shipment_id: str, supplier: str, route: str) -> dict:
             method="register_shipment",
             args=[shipment_id, supplier, route],
             sender=deployer.address,
-            box_references=navitrust_shipment_box_refs(shipment_id, include_supplier_rep=False),
+            box_references=navitrust_shipment_box_refs(shipment_id),
             extra_fee=AlgoAmount(micro_algo=4000),
         )
     )
@@ -695,7 +712,7 @@ def build_fund_shipment_txns_b64(payer_address: str, shipment_id: str, micro_alg
             method="fund_shipment",
             args=[shipment_id, twos],
             sender=payer_address,
-            box_references=navitrust_shipment_box_refs(shipment_id, include_supplier_rep=False),
+            box_references=navitrust_shipment_box_refs(shipment_id),
             extra_fee=AlgoAmount(micro_algo=1000),
         )
     )
