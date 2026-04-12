@@ -5,6 +5,8 @@ const BULLETS = [
   'AI-powered dispute resolution',
   'Automatic escrow settlement',
   'Immutable verification records',
+  'Per-shipment audit trail you can point to in coverage and arbitration',
+  'Weather, telemetry, and on-chain state in one jury-ready record',
 ];
 
 export function SolutionSection() {
@@ -14,7 +16,7 @@ export function SolutionSection() {
         Navi-Trust fixes this
       </h2>
       <p className="nt-section-lead">
-        One protocol for evidence, verdicts, and settlement—anchored on Algorand.
+        One protocol for evidence, verdicts, and settlement, anchored on Algorand.
       </p>
       <div className="nt-split">
         <div>

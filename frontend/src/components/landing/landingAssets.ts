@@ -27,10 +27,7 @@ export const LANDING_IMAGES = {
     /** Port crane / container handling */
     load: PX(1117210, 'pexels-photo-1117210', '&h=675&fit=crop'),
     contract: US('1558494949-ef010cbdcc31'),
-    ai: US('1551288049-bebda4e38f71'),
     delivery: PX(5025667, 'pexels-photo-5025667', '&h=800&fit=crop'),
   },
 
-  /** Dark terminal / security ops aesthetic */
-  proofBg: US('1550751827-4bd374c3f58b'),
 } as const;

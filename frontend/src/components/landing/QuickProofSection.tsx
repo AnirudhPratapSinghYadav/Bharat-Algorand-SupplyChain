@@ -13,7 +13,7 @@ export function QuickProofSection() {
           </Link>
         ))}
       </div>
-      <p className="nt-quick-proof-hint">Each link opens the public verify page — no wallet required.</p>
+      <p className="nt-quick-proof-hint">Each link opens the public verify page. No wallet required.</p>
     </section>
   );
 }

@@ -10,7 +10,7 @@ const ITEMS = [
   },
   {
     title: 'Port congestion & delay',
-    text: 'Stacks and berth queues stretch timelines—stakeholders need a single clock everyone trusts.',
+    text: 'Stacks and berth queues stretch timelines, so stakeholders need a single clock everyone trusts.',
     img: LANDING_IMAGES.problem.congestion,
     alt: 'Dense stacks of shipping containers at a container terminal',
   },
@@ -32,10 +32,10 @@ export function ProblemSection() {
   return (
     <section className="nt-section" aria-labelledby="nt-problem-title">
       <h2 id="nt-problem-title" className="nt-section-title">
-        Global trade runs on trust — but trust is broken
+        Global trade runs on trust, but trust is broken
       </h2>
       <p className="nt-section-lead">
-        Navi-Trust exists so milestones, risk, and release conditions meet an auditable record—not a thread of emails.
+        Navi-Trust exists so milestones, risk, and release conditions meet an auditable record, not a thread of emails.
       </p>
       <div className="scroll-wrapper scroll-wrapper--problem">
         <div className="scroll-wrapper__strip nt-problem-scroll nt-problem-scroll--four">

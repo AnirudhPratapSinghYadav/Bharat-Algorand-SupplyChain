@@ -2,12 +2,14 @@ import { useRef, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import './landing.css';
-import { BACKEND_URL, FALLBACK_APP_ID } from '../../constants/api';
+import { BACKEND_URL } from '../../constants/api';
 import { useLandingHorizontalScroll } from './useLandingHorizontalScroll';
 import { HeroSection } from './HeroSection';
+import { GeopoliticalStakesSection } from './GeopoliticalStakesSection';
 import { ProblemSection } from './ProblemSection';
 import { SolutionSection } from './SolutionSection';
 import { StepsSection } from './StepsSection';
+import { QuickProofSection } from './QuickProofSection';
 import { DemoStory } from '../DemoStory';
 import { CTASection } from './CTASection';
 import { LandingFooter } from './LandingFooter';
@@ -26,9 +28,9 @@ export function LandingPage({ onConnectWallet }: LandingPageProps) {
       .get<{ app_id?: number }>(`${BACKEND_URL}/config`, { timeout: 6000 })
       .then((r) => {
         const id = r.data?.app_id;
-        setLandingAppId(typeof id === 'number' && id > 0 ? id : FALLBACK_APP_ID);
+        setLandingAppId(typeof id === 'number' && id > 0 ? id : null);
       })
-      .catch(() => setLandingAppId(FALLBACK_APP_ID));
+      .catch(() => setLandingAppId(null));
   }, []);
 
   return (
@@ -57,15 +59,14 @@ export function LandingPage({ onConnectWallet }: LandingPageProps) {
 
       <main>
         <HeroSection />
+        <GeopoliticalStakesSection />
         <ProblemSection />
         <SolutionSection />
         <StepsSection />
+        <QuickProofSection />
         <DemoStory />
         <div className="section-divider" aria-hidden />
-        <CTASection
-          onConnectWallet={onConnectWallet}
-          onCreateShipment={onConnectWallet}
-        />
+        <CTASection onCreateShipment={onConnectWallet} />
       </main>
 
       <LandingFooter appId={landingAppId} />

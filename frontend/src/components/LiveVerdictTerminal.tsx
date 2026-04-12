@@ -14,20 +14,55 @@ export type RunJuryApiResponse = {
     shipment_id: string;
     origin?: string;
     destination?: string;
-    weather?: { temperature?: number; precipitation?: number; weather_code?: number };
+    verdict?: string;
+    reasoning?: string;
+    weather?: {
+        temperature?: number;
+        precipitation?: number;
+        weather_code?: number;
+        city?: string;
+        wind_kmh?: number;
+        precipitation_mm?: number;
+    };
     sentinel?: {
         risk_score?: number;
         reasoning_narrative?: string;
         reasoning?: string;
         anomaly_detected?: boolean;
         mitigation?: string;
+        recommendation?: string;
     };
-    auditor?: { blockchain_status?: string; audit_report?: string; fraud_flag?: boolean };
-    chief_justice?: { trigger_contract?: boolean; judgment?: string; reasoning_narrative?: string };
+    auditor?: {
+        blockchain_status?: string;
+        chain_status?: string;
+        audit_report?: string;
+        fraud_flag?: boolean;
+        risk_score?: number;
+        compliance_passed?: boolean;
+    };
+    fraud_detector?: {
+        fraud_risk_score?: number;
+        supplier_credibility?: string;
+        recommendation?: string;
+    };
+    arbiter?: {
+        final_risk_score?: number;
+        verdict?: string;
+        reasoning?: string;
+        weighted_score?: number;
+    };
+    chief_justice?: {
+        trigger_contract?: boolean;
+        judgment?: string;
+        reasoning_narrative?: string;
+        final_risk_score?: number;
+    };
+    supplier_reputation?: { score?: number };
     trigger_contract?: boolean;
     on_chain_tx_id?: string | null;
     confirmed_round?: number | null;
     explorer_url?: string | null;
+    lora_tx_url?: string | null;
     agent_dialogue?: { agent: string; message: string }[];
 };
 
@@ -66,16 +101,20 @@ function wmoDescription(code: number | undefined): string {
 }
 
 function verdictKind(d: RunJuryApiResponse): 'SETTLE' | 'DISPUTE' | 'HOLD' {
-    const rs = d.sentinel?.risk_score ?? 0;
-    if (rs > 65) return 'DISPUTE';
-    if (d.trigger_contract) return 'SETTLE';
+    const raw =
+        d.verdict ||
+        d.arbiter?.verdict ||
+        (d.chief_justice as { judgment?: string } | undefined)?.judgment ||
+        '';
+    const u = String(raw).toUpperCase();
+    if (u === 'SETTLE' || u === 'DISPUTE' || u === 'HOLD') return u;
     return 'HOLD';
 }
 
 function riskBand(rs: number): string {
-    if (rs > 80) return 'HIGH';
-    if (rs > 50) return 'MEDIUM';
-    return 'LOW';
+    if (rs > 80) return 'HIGH RISK';
+    if (rs > 50) return 'MEDIUM RISK';
+    return 'LOW RISK';
 }
 
 function BlinkCursor() {
@@ -183,7 +222,7 @@ export function LiveVerdictTerminal({
     destinationCity,
     originCity,
     fundsLockedMicroalgo = 0,
-    appId,
+    appId: _appId,
     onComplete,
     onClose,
     onSettle,
@@ -194,6 +233,7 @@ export function LiveVerdictTerminal({
     const [bootDone, setBootDone] = useState(false);
     const [secSentry, setSecSentry] = useState(false);
     const [secAuditor, setSecAuditor] = useState(false);
+    const [secFraud, setSecFraud] = useState(false);
     const [secArbiter, setSecArbiter] = useState(false);
     const [showChain, setShowChain] = useState(false);
     const [showCta, setShowCta] = useState(false);
@@ -217,7 +257,11 @@ export function LiveVerdictTerminal({
     useEffect(() => {
         let cancelled = false;
         axios
-            .post<RunJuryApiResponse>(`${BACKEND_URL}/run-jury`, { shipment_id: shipmentId }, { timeout: 120_000 })
+            .post<RunJuryApiResponse>(
+                `${BACKEND_URL}/run-jury`,
+                { shipment_id: shipmentId, destination_city: destinationCity },
+                { timeout: 120_000 },
+            )
             .then((res) => {
                 if (!cancelled) setApiData(res.data);
             })
@@ -230,7 +274,7 @@ export function LiveVerdictTerminal({
         return () => {
             cancelled = true;
         };
-    }, [shipmentId]);
+    }, [shipmentId, destinationCity]);
 
     useEffect(() => {
         if (!secArbiter || !apiData) return;
@@ -249,66 +293,84 @@ export function LiveVerdictTerminal({
     }, [showChain, apiData, runComplete]);
 
     const bootLines: TermLine[] = [
-        { text: 'NAVI-TRUST ORACLE', color: CYAN },
-        { text: `Initiating jury for ${shipmentId}`, color: '#94a3b8' },
-        { text: `Destination: ${destinationCity}`, color: '#94a3b8' },
-        { text: 'Fetching live weather from Open-Meteo...', color: '#94a3b8' },
+        { text: `Initiating 4-agent jury for ${shipmentId}...`, color: CYAN },
+        { text: `Destination hub: ${destinationCity}`, color: '#94a3b8' },
     ];
 
     const fundsAlgo = fundsLockedMicroalgo / 1e6;
-    const appIdStr = appId && appId > 0 ? String(appId) : '—';
 
     const buildSentryLines = (d: RunJuryApiResponse): TermLine[] => {
         const w = d.weather ?? {};
         const s = d.sentinel ?? {};
         const rs = s.risk_score ?? 0;
         const temp = w.temperature ?? '—';
-        const precip = w.precipitation ?? '—';
+        const precip = (w as { precipitation_mm?: number }).precipitation_mm ?? w.precipitation ?? '—';
+        const wind = (w as { wind_kmh?: number }).wind_kmh ?? '—';
         const wc = wmoDescription(w.weather_code);
-        const route = `${d.origin ?? originCity ?? '—'} → ${d.destination ?? destinationCity ?? '—'}`;
-        const rec = s.anomaly_detected
-            ? 'HOLD — elevated anomaly signals'
-            : rs > 65
-              ? 'DISPUTE — risk above threshold'
-              : 'PROCEED ✓';
+        const city = w.city || destinationCity;
+        const rec = String(s.recommendation || s.reasoning_narrative || '').slice(0, 120) || '—';
         return [
-            { text: '[SENTRY AGENT]  Analyzing physical transport risk', color: CYAN },
-            { text: `Weather at ${destinationCity}: ${temp}°C · ${precip}mm precip · (${wc})`, color: CYAN },
-            { text: `Route: ${route}`, color: CYAN },
-            { text: `Sentry risk score: ${rs} / 100`, color: CYAN },
-            { text: `Recommendation: ${rec}`, color: CYAN },
+            { text: `[🛰 WEATHER SENTINEL] Fetching live weather for ${city}...`, color: CYAN },
+            { text: `Weather at ${city}: ${temp}°C · ${precip}mm · ${wind}km/h`, color: CYAN },
+            { text: `Sentinel risk: ${rs}/100 · ${rec}`, color: CYAN },
         ];
     };
 
     const buildAuditorLines = (d: RunJuryApiResponse): TermLine[] => {
         const a = d.auditor ?? {};
-        const st = a.blockchain_status ?? '—';
-        const passed = !a.fraud_flag;
+        const st = a.blockchain_status ?? a.chain_status ?? '—';
+        const ars = typeof a.risk_score === 'number' ? a.risk_score : 0;
+        const passed = a.compliance_passed !== undefined ? a.compliance_passed : !a.fraud_flag;
         return [
-            { text: '[AUDITOR]  Reading Algorand blockchain state', color: AMBER },
-            { text: `App #${appIdStr} · Box ${shipmentId}_status (ledger)`, color: AMBER },
-            { text: `On-chain status: ${st}`, color: AMBER },
-            { text: `Funds locked: ${fundsAlgo.toFixed(4)} ALGO`, color: AMBER },
-            { text: `Fraud check: ${passed ? 'PASSED ✓' : 'FLAGGED'}`, color: AMBER },
+            { text: '[📋 COMPLIANCE AUDITOR] Reading Algorand box storage...', color: AMBER },
+            { text: `On-chain status: ${st} · Funds: ${fundsAlgo.toFixed(4)} ALGO`, color: AMBER },
+            { text: `Auditor risk: ${ars}/100 · ${passed ? 'PASSED' : 'ISSUES FOUND'}`, color: AMBER },
+        ];
+    };
+
+    const buildFraudLines = (d: RunJuryApiResponse): TermLine[] => {
+        const f = d.fraud_detector ?? {};
+        const fr = f.fraud_risk_score ?? 0;
+        const rep =
+            typeof d.supplier_reputation?.score === 'number' && !Number.isNaN(d.supplier_reputation.score)
+                ? d.supplier_reputation.score
+                : 50;
+        const cred = f.supplier_credibility || f.recommendation || 'assessed';
+        return [
+            { text: '[🔍 FRAUD DETECTOR] Analyzing supplier history...', color: '#a78bfa' },
+            { text: `Supplier reputation: ${rep}/100`, color: '#a78bfa' },
+            { text: `Fraud risk: ${fr}/100 · ${cred}`, color: '#a78bfa' },
         ];
     };
 
     const buildArbiterLines = (d: RunJuryApiResponse): TermLine[] => {
-        const s = d.sentinel?.risk_score ?? 0;
+        const arb = d.arbiter;
+        const finalScore =
+            arb?.final_risk_score ??
+            (d.chief_justice as { final_risk_score?: number } | undefined)?.final_risk_score ??
+            d.sentinel?.risk_score ??
+            0;
+        const weighted = arb?.weighted_score ?? finalScore;
         const cj = d.chief_justice ?? {};
         const v = verdictKind(d);
-        const band = riskBand(s);
-        const quote = (cj.reasoning_narrative || cj.judgment || d.sentinel?.reasoning_narrative || '').slice(0, 280);
+        const band = riskBand(finalScore);
+        const quote = (
+            d.reasoning ||
+            arb?.reasoning ||
+            cj.reasoning_narrative ||
+            cj.judgment ||
+            d.sentinel?.reasoning_narrative ||
+            ''
+        ).slice(0, 400);
         const vk = v === 'SETTLE' ? GREEN : v === 'DISPUTE' ? RED : HOLD_COLOR;
         const lines: TermLine[] = [
-            { text: '[ARBITER]  Delivering final verdict', color: '#e2e8f0' },
-            { text: `Sentry score: ${s} / 100  ·  Trigger on-chain: ${d.trigger_contract ? 'YES' : 'NO'}`, color: '#e2e8f0' },
+            { text: '[⚖ CHIEF ARBITER] Delivering final verdict...', color: '#e2e8f0' },
+            { text: `Weighted score: ${weighted}/100`, color: '#e2e8f0' },
             { text: '— — — — — — — — — — — — — — —', color: '#475569' },
-            { text: `VERDICT: ${v}`, color: vk },
-            { text: `Risk: ${s} / 100  ${band}`, color: vk },
+            { text: `VERDICT: ${v}   RISK: ${finalScore}/100   ${band}`, color: vk },
         ];
         if (quote) {
-            lines.push({ text: `"${quote}${quote.length >= 280 ? '…' : ''}"`, color: vk });
+            lines.push({ text: `"${quote}${quote.length >= 400 ? '…' : ''}"`, color: vk });
         }
         lines.push({ text: '— — — — — — — — — — — — — — —', color: '#475569' });
         return lines;
@@ -330,6 +392,8 @@ export function LiveVerdictTerminal({
 
     const txId = apiData?.on_chain_tx_id ?? '';
     const roundN = apiData?.confirmed_round;
+    const loraVerdictUrl =
+        apiData?.lora_tx_url || apiData?.explorer_url || (txId ? `https://lora.algokit.io/testnet/transaction/${txId}` : '');
 
     return (
         <div
@@ -423,7 +487,25 @@ export function LiveVerdictTerminal({
                     </div>
                 )}
 
-                {apiData && secAuditor && !secArbiter && (
+                {apiData && secAuditor && !secFraud && (
+                    <div style={{ marginTop: 16 }}>
+                        <TypingLines
+                            instanceKey={`fraud-${shipmentId}`}
+                            lines={buildFraudLines(apiData)}
+                            charMs={16}
+                            startDelayMs={100}
+                            onDone={() => setSecFraud(true)}
+                        />
+                    </div>
+                )}
+
+                {apiData && secFraud && (
+                    <div style={{ marginTop: 16 }}>
+                        <StaticLines lines={buildFraudLines(apiData)} />
+                    </div>
+                )}
+
+                {apiData && secFraud && !secArbiter && (
                     <div style={{ marginTop: 16 }}>
                         <TypingLines
                             instanceKey={`arbiter-${shipmentId}`}
@@ -490,27 +572,27 @@ export function LiveVerdictTerminal({
                             <p style={{ margin: '0 0 16px', color: '#94a3b8', fontSize: '0.82rem' }}>
                                 No one can change it. Open Lora and read the Note tab (NAVI_VERDICT JSON).
                             </p>
-                            {txId ? (
-                                <a
-                                    href={`https://lora.algokit.io/testnet/transaction/${txId}`}
-                                    target="_blank"
-                                    rel="noreferrer"
+                            {loraVerdictUrl ? (
+                                <button
+                                    type="button"
+                                    onClick={() => window.open(loraVerdictUrl, '_blank', 'noopener,noreferrer')}
                                     style={{
                                         display: 'block',
                                         width: '100%',
                                         textAlign: 'center',
                                         padding: '14px 16px',
                                         borderRadius: 8,
-                                        background: CYAN,
-                                        color: BG,
+                                        background: 'var(--accent, #00C2FF)',
+                                        color: '#000',
                                         fontWeight: 800,
                                         fontSize: '0.88rem',
-                                        textDecoration: 'none',
                                         letterSpacing: '0.02em',
+                                        border: 'none',
+                                        cursor: 'pointer',
                                     }}
                                 >
                                     OPEN VERDICT ON LORA EXPLORER →
-                                </a>
+                                </button>
                             ) : (
                                 <p style={{ color: '#94a3b8', fontSize: '0.8rem', margin: 0 }}>
                                     Use Audit trail or Lora application history to inspect prior verdict transactions.
@@ -547,7 +629,7 @@ export function LiveVerdictTerminal({
                                         fontSize: '0.82rem',
                                     }}
                                 >
-                                    Settle shipment
+                                    💰 Settle Shipment
                                 </button>
                             ) : null}
                             {vk === 'DISPUTE' && onViewDispute ? (
@@ -565,9 +647,25 @@ export function LiveVerdictTerminal({
                                         fontSize: '0.82rem',
                                     }}
                                 >
-                                    View dispute details
+                                    View Dispute Details
                                 </button>
                             ) : null}
+                            <button
+                                type="button"
+                                onClick={onClose}
+                                style={{
+                                    padding: '10px 14px',
+                                    borderRadius: 8,
+                                    border: '1px solid rgba(148,163,184,0.35)',
+                                    background: 'transparent',
+                                    color: '#94a3b8',
+                                    fontWeight: 600,
+                                    cursor: 'pointer',
+                                    fontSize: '0.82rem',
+                                }}
+                            >
+                                ✕ Close
+                            </button>
                         </div>
                     </div>
                 )}

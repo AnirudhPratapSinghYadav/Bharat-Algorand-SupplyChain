@@ -1,6 +1,6 @@
 /**
  * Scripted insulin/ghost demos were removed with legacy backend modules.
- * Landing still links here — keep a short CTA to the live dashboard.
+ * Landing still links here: short CTA to the live dashboard.
  */
 export function DemoStory() {
   return (
@@ -9,7 +9,8 @@ export function DemoStory() {
         See it in action
       </h2>
       <p className="nt-section-lead nt-demo-section-lead">
-        Register a shipment, run the AI jury, and verify proofs on Algorand TestNet from the app dashboard.
+        Register a shipment, run the AI jury, settle to mint a NAVI-CERT on Lora, and verify proofs from the app dashboard on
+        Algorand Testnet.
       </p>
     </section>
   );

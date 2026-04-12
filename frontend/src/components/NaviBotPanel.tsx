@@ -1,7 +1,5 @@
 /**
- * NaviBot — minimal chat assistant (rebuilt).
- * Uses POST /navibot via askNavibot(). Configure GEMINI_API_KEY on the server for LLM replies;
- * otherwise the API returns rule-based fallbacks (still useful for demos).
+ * NaviBot — text chat; POST /navibot. Instant role-aware greeting; last 10 messages.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -33,6 +31,19 @@ function readWallet(): string | undefined {
   }
 }
 
+const GREETING_STAKEHOLDER =
+  'You have 5 ALGO locked across 2 shipments. SHIP_CHEN_002 is disputed — 3 ALGO frozen. Run AI jury on SHIP_MUMBAI_001 to get a live verdict.';
+
+const GREETING_SUPPLIER =
+  'Your on-chain reputation is 55/100. SHIP_DELHI_003 settled — 2 ALGO received. SHIP_CHEN_002 payment is frozen at 3 ALGO.';
+
+const QUICK_PILLS = [
+  'Why is Chennai frozen?',
+  'How does the 4-agent jury work?',
+  'Check Delhi certificate',
+  'What is the risk score?',
+];
+
 export function NaviBotPanel({
   shipmentId,
   walletAddress,
@@ -46,19 +57,13 @@ export function NaviBotPanel({
   const [open, setOpen] = useState(defaultOpen);
   const [input, setInput] = useState('');
   const [lines, setLines] = useState<ChatLine[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
   const [suggest, setSuggest] = useState<{ action: string; shipmentId: string } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const linesRef = useRef(lines);
   linesRef.current = lines;
 
-  const intro = useMemo(
-    () =>
-      role === 'supplier'
-        ? 'Ask about your shipments, reputation, or frozen payments. I only explain — use dashboard buttons for transactions.'
-        : 'Ask about escrow, a shipment ID, or the AI jury. Use Run AI Jury / Lock ALGO on the cards — I do not sign transactions.',
-    [role],
-  );
+  const intro = useMemo(() => (role === 'supplier' ? GREETING_SUPPLIER : GREETING_STAKEHOLDER), [role]);
 
   useEffect(() => {
     const seed: ChatLine = { role: 'assistant', text: intro, at: Date.now() };
@@ -67,16 +72,16 @@ export function NaviBotPanel({
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
-  }, [lines, busy]);
+  }, [lines, isTyping]);
 
   const send = useCallback(
     async (raw: string) => {
       const text = raw.trim();
-      if (!text || busy) return;
+      if (!text || isTyping) return;
       setInput('');
       setSuggest(null);
       setLines((prev) => [...prev, { role: 'user' as const, text, at: Date.now() }].slice(-MAX_MESSAGES));
-      setBusy(true);
+      setIsTyping(true);
       try {
         const history = linesRef.current.slice(-6).map((m) => ({ role: m.role, content: m.text }));
         const res = await askNavibot({
@@ -86,7 +91,9 @@ export function NaviBotPanel({
           wallet_address: walletAddress?.trim() || readWallet(),
           role,
         });
-        const reply = (res.text || res.reply || '').trim() || 'Try asking about Mumbai, Chennai, or Delhi shipments.';
+        const reply =
+          (res.text || res.reply || '').trim() ||
+          'Here is what I can share: check the dashboard cards for live escrow and shipment status.';
         setLines((prev) => [...prev, { role: 'assistant' as const, text: reply, at: Date.now() }].slice(-MAX_MESSAGES));
         const act = res.action;
         const sid = (res.shipment_id || '').trim();
@@ -94,17 +101,21 @@ export function NaviBotPanel({
           setSuggest({ action: act, shipmentId: sid });
         }
       } catch {
-        const errLine: ChatLine = {
-          role: 'assistant',
-          text: 'Could not reach the server. Is the API running on your BACKEND_URL?',
-          at: Date.now(),
-        };
-        setLines((prev) => [...prev, errLine].slice(-MAX_MESSAGES));
+        setLines((prev) =>
+          [
+            ...prev,
+            {
+              role: 'assistant' as const,
+              text: 'I could not reach the assistant just now. Please try again in a moment.',
+              at: Date.now(),
+            },
+          ].slice(-MAX_MESSAGES),
+        );
       } finally {
-        setBusy(false);
+        setIsTyping(false);
       }
     },
-    [busy, shipmentId, walletAddress, role],
+    [isTyping, shipmentId, walletAddress, role],
   );
 
   const onJury = useCallback(() => {
@@ -128,19 +139,13 @@ export function NaviBotPanel({
 
   if (!open && variant === 'fixed') {
     return (
-      <button
-        type="button"
-        aria-label="Open NaviBot"
-        onClick={() => setOpen(true)}
-        className="navibot-fab"
-      >
+      <button type="button" aria-label="Open NaviBot" onClick={() => setOpen(true)} className="navibot-fab">
         <Bot size={26} />
       </button>
     );
   }
 
   const fixed = variant === 'fixed';
-  const pills = ['Hi', 'How does escrow work?', 'Status of Mumbai?', 'Why is Chennai frozen?'];
   const showQuickPills = !lines.some((l) => l.role === 'user');
 
   return (
@@ -156,7 +161,15 @@ export function NaviBotPanel({
             <div className="navibot-panel__sub">Help &amp; shipment Q&amp;A</div>
           </div>
         </div>
-        <button type="button" className="navibot-panel__close" onClick={() => { setOpen(false); onClose?.(); }} aria-label="Close">
+        <button
+          type="button"
+          className="navibot-panel__close"
+          onClick={() => {
+            setOpen(false);
+            onClose?.();
+          }}
+          aria-label="Close"
+        >
           <X size={18} />
         </button>
       </header>
@@ -165,17 +178,16 @@ export function NaviBotPanel({
         {lines.map((m, i) => (
           <div key={`${m.at}-${i}`} className={`navibot-bubble navibot-bubble--${m.role}`}>
             <div>{m.text}</div>
-            <div className="navibot-bubble__time">{new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+            <div className="navibot-bubble__time">
+              {new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </div>
           </div>
         ))}
-        {busy ? (
-          <div className="navibot-bubble navibot-bubble--assistant navibot-bubble--typing">
-            <span className="navibot-typing" aria-hidden>
-              <span />
-              <span />
-              <span />
-            </span>
-            Thinking…
+        {isTyping ? (
+          <div className="navibot-bubble navibot-bubble--assistant navibot-bubble--typing" aria-busy>
+            <span className="typing-dot" />
+            <span className="typing-dot" />
+            <span className="typing-dot" />
           </div>
         ) : null}
       </div>
@@ -197,8 +209,8 @@ export function NaviBotPanel({
 
       {showQuickPills ? (
         <div className="navibot-panel__pills">
-          {pills.map((p) => (
-            <button key={p} type="button" className="navibot-pill" disabled={busy} onClick={() => void send(p)}>
+          {QUICK_PILLS.map((p) => (
+            <button key={p} type="button" className="navibot-pill" disabled={isTyping} onClick={() => void send(p)}>
               {p}
             </button>
           ))}
@@ -210,11 +222,11 @@ export function NaviBotPanel({
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && !busy && void send(input)}
+          onKeyDown={(e) => e.key === 'Enter' && !isTyping && void send(input)}
           placeholder="Message…"
           className="navibot-panel__input"
         />
-        <button type="button" className="navibot-btn navibot-btn--send" disabled={busy || !input.trim()} onClick={() => void send(input)}>
+        <button type="button" className="navibot-btn navibot-btn--send" disabled={isTyping || !input.trim()} onClick={() => void send(input)}>
           Send
         </button>
       </footer>

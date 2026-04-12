@@ -9,7 +9,7 @@ export function HeroSection() {
           <span className="nt-hero-highlight">The AI Court for Supply Chain Disputes</span>
         </h1>
         <p className="nt-hero-sub">
-          Buyer locks ALGO. The AI jury examines the evidence. The verdict is written to Algorand — forever.
+          Buyer locks ALGO. The AI jury examines the evidence. The verdict is written to Algorand and stays there permanently.
         </p>
       </div>
       <div className="nt-hero-visual">

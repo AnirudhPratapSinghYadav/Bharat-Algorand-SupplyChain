@@ -4,22 +4,15 @@ import { LANDING_IMAGES } from './landingAssets';
 const STEPS = [
   {
     n: '01',
-    title: 'Lock escrow',
-    desc: 'Buyer sends ALGO to the smart contract — not to us. Funds stay locked until the rules pass.',
+    title: 'Escrow',
+    desc: 'Buyer sends ALGO to the smart contract, not to us. Funds stay locked until the rules pass.',
     img: LANDING_IMAGES.steps.contract,
     alt: 'Smart contract securing funds',
   },
   {
     n: '02',
-    title: 'AI jury decides',
-    desc: 'Agents read weather, telemetry, and on-chain state. The outcome is prepared for the oracle call.',
-    img: LANDING_IMAGES.steps.ai,
-    alt: 'Analytics and AI risk assessment',
-  },
-  {
-    n: '03',
     title: 'Auto settlement',
-    desc: 'Verdict on-chain, escrow released or held, and a unique certificate ASA when you settle.',
+    desc: 'Verdict on-chain, escrow released or held, and a NAVI-CERT digital goods certificate (ASA) you can open on Lora.',
     img: LANDING_IMAGES.steps.delivery,
     alt: 'Delivery and settlement',
   },
@@ -32,7 +25,7 @@ export function StepsSection() {
         How it works
       </h2>
       <p className="nt-section-lead">
-        Three steps: escrow, jury, settlement — all verifiable on Algorand.
+        Escrow first, then settlement with on-chain proof. Each step is verifiable on Algorand.
       </p>
       <div className="scroll-wrapper scroll-wrapper--steps">
         <div className="scroll-wrapper__strip nt-steps-scroll">
