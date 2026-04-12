@@ -13,6 +13,7 @@ import logging
 import os
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -31,6 +32,7 @@ AUDIT_PATH = os.path.join(ROOT, "audit_trail.json")
 
 LORA_TX = "https://lora.algokit.io/testnet/transaction"
 LORA_APP = "https://lora.algokit.io/testnet/application"
+LORA_ACCOUNT = "https://lora.algokit.io/testnet/account"
 LORA_ASSET = "https://lora.algokit.io/testnet/asset"
 
 VERDICT_CHEN = (
@@ -134,10 +136,22 @@ def _maybe_retry_settle_pending(sid: str, spec: dict, summary: dict[str, dict]) 
     if not res:
         logger.warning("settle_shipment retry failed for %s", sid)
         return
+    cid_raw = res.get("certificate_asa_id")
+    try:
+        cid = int(cid_raw) if cid_raw is not None else 0
+    except (TypeError, ValueError):
+        cid = 0
+    if cid <= 1:
+        logger.error("settle retry: invalid certificate ASA id %r", cid_raw)
+        sys.exit(1)
+    stx = res.get("tx_id")
+    if stx and not _verify_settle_inner_txns(stx):
+        logger.error("settle retry: indexer missing inner pay+acfg on %s", stx)
+        sys.exit(1)
     summary.setdefault(sid, {})
     summary[sid]["skipped"] = True
-    summary[sid]["settle_tx"] = res.get("tx_id")
-    summary[sid]["cert_asa"] = res.get("certificate_asa_id")
+    summary[sid]["settle_tx"] = stx
+    summary[sid]["cert_asa"] = cid_raw
     summary[sid]["recovered_settle"] = True
     _merge_audit(
         {
@@ -156,28 +170,29 @@ def _maybe_retry_settle_pending(sid: str, spec: dict, summary: dict[str, dict]) 
 
 
 def _fund_contract_mbr(algorand: AlgorandClient, deployer_addr: str, app_address: str) -> None:
+    """If app account balance < 2M microAlgo, top up with 2 ALGO (box MBR headroom)."""
     deployer_bal = float(algorand.account.get_information(deployer_addr).amount.algo)
-    app_bal = float(algorand.account.get_information(app_address).amount.algo)
+    info = algorand.client.algod.account_info(app_address)
+    micro = int(info.get("amount", 0))
+    app_bal = micro / 1_000_000.0
     logger.info("Deployer balance : %s ALGO", deployer_bal)
-    logger.info("Contract balance : %s ALGO", app_bal)
-    # Extra headroom for box growth + inner ASA mint after escrow payout (settle).
-    mbr_needed = max(0, 1.2 - app_bal)
-    fund_amount = min(mbr_needed, deployer_bal - 0.15) if mbr_needed > 0 else 0
-    if fund_amount > 0.01:
-        logger.info("Funding contract with %.3f ALGO for box MBR...", fund_amount)
+    logger.info("Contract balance : %s ALGO (%s microAlgo)", app_bal, micro)
+    # Boxes cost ~base_mbr + per_box; 2 ALGO top-up when below 2M µAlgo keeps register/settle safe.
+    if micro < 2_000_000:
+        logger.info("Funding contract with 2 ALGO (balance < 2M microAlgo)...")
         try:
             algorand.send.payment(
                 PaymentParams(
                     sender=deployer_addr,
                     receiver=app_address,
-                    amount=AlgoAmount(micro_algo=int(fund_amount * 1_000_000)),
+                    amount=AlgoAmount(micro_algo=2_000_000),
                 )
             )
-            logger.info("Funded successfully.")
+            logger.info("MBR top-up sent.")
         except Exception as e:
-            logger.warning("Funding skipped: %s", e)
+            logger.warning("MBR top-up skipped: %s", e)
     else:
-        logger.info("Contract already funded — skipping MBR payment.")
+        logger.info("Contract balance ≥ 2M microAlgo — skipping MBR payment.")
 
 
 def _merge_audit(updates: dict[str, list]) -> None:
@@ -202,59 +217,172 @@ def _merge_audit(updates: dict[str, list]) -> None:
     logger.info("Merged %s shipment key(s) into audit_trail.json", len(updates))
 
 
-def _sqlite_upsert_demo_rows() -> None:
+def _sqlite_upsert_demo_rows(oracle_addr: str) -> None:
     if not os.path.isfile(DB_PATH):
         logger.warning("shipments.db not found — start the API once to create schema, then re-run seed")
         return
+    created = datetime.now(timezone.utc).isoformat()
     conn = sqlite3.connect(DB_PATH)
     for r in DEMO_ROWS:
         conn.execute(
             """
-            INSERT INTO shipments (id, origin, destination, current_lat, current_lon, status)
-            VALUES (?, ?, ?, ?, ?, 'In_Transit')
+            INSERT INTO shipments (
+                id, origin, destination, current_lat, current_lon, status,
+                dest_lat, dest_lon, supplier_address, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'In_Transit', ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 origin = excluded.origin,
                 destination = excluded.destination,
                 current_lat = excluded.current_lat,
-                current_lon = excluded.current_lon
+                current_lon = excluded.current_lon,
+                dest_lat = excluded.dest_lat,
+                dest_lon = excluded.dest_lon,
+                supplier_address = COALESCE(excluded.supplier_address, supplier_address),
+                created_at = COALESCE(shipments.created_at, excluded.created_at)
             """,
-            (r["id"], r["origin"], r["destination"], r["lat"], r["lon"]),
-        )
-        conn.execute(
-            "UPDATE shipments SET dest_lat = ?, dest_lon = ? WHERE id = ?",
-            (r["dlat"], r["dlon"], r["id"]),
+            (
+                r["id"],
+                r["origin"],
+                r["destination"],
+                r["lat"],
+                r["lon"],
+                r["dlat"],
+                r["dlon"],
+                oracle_addr,
+                created,
+            ),
         )
     conn.commit()
     conn.close()
-    logger.info("SQLite: upserted 3 demo shipment rows")
+    logger.info("SQLite: upserted 3 demo shipment rows (supplier_address + created_at)")
 
 
 def _stats_check(app_id: int) -> None:
-    bases = [
-        os.environ.get("NAVITRUST_STATS_URL", "").strip(),
-        "http://127.0.0.1:12445",
-        "http://127.0.0.1:8000",
-    ]
-    for base in bases:
-        if not base:
+    env_url = os.environ.get("NAVITRUST_STATS_URL", "").strip()
+    bases = [env_url, "http://127.0.0.1:8000", "http://127.0.0.1:12445"]
+    seen: set[str] = set()
+    for raw in bases:
+        if not raw:
             continue
-        base = base.rstrip("/")
+        base = raw.rstrip("/")
+        if base in seen:
+            continue
+        seen.add(base)
         try:
             stats = requests.get(f"{base}/stats", timeout=5).json()
             logger.info("Stats from API (%s): %s", base, stats)
             ts = int(stats.get("total_shipments") or 0)
-            if ts >= 3:
-                logger.info("Stats OK: total_shipments=%s", ts)
+            settled = int(stats.get("total_settled") or 0)
+            disputed = int(stats.get("total_disputed") or 0)
+            if ts == 3 and settled == 1 and disputed == 1:
+                logger.info("Stats OK: total_shipments=3, total_settled=1, total_disputed=1")
             else:
                 logger.warning(
-                    "Stats total_shipments=%s (expected >= 3 after seed). Is the API using the same APP_ID=%s?",
+                    "Stats mismatch (want total_shipments=3, total_settled=1, total_disputed=1): got ts=%s settled=%s disputed=%s. Same APP_ID=%s?",
                     ts,
+                    settled,
+                    disputed,
                     app_id,
                 )
             return
         except Exception as e:
             logger.debug("stats check %s: %s", base, e)
-    logger.warning("Could not GET /stats from NAVITRUST_STATS_URL, :12445, or :8000 — skip assert")
+    logger.warning("Could not GET /stats — start API on :8000 with matching APP_ID or set NAVITRUST_STATS_URL")
+
+
+def _verify_settle_inner_txns(settle_tx_id: str) -> bool:
+    """Indexer check: settle group should include inner pay + asset config (NAVI-CERT)."""
+    if not settle_tx_id or not chain.INDEXER_URL:
+        return False
+    url = f"{chain.INDEXER_URL.rstrip('/')}/v2/transactions/{settle_tx_id.strip()}"
+    for attempt in range(4):
+        try:
+            r = requests.get(url, timeout=15)
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            tx = r.json().get("transaction") or {}
+            inner = tx.get("inner-txns") or []
+            has_pay = any(x.get("tx-type") == "pay" for x in inner)
+            has_acfg = any(x.get("tx-type") == "acfg" for x in inner)
+            if has_pay and has_acfg:
+                return True
+        except Exception as e:
+            logger.debug("settle inner verify attempt %s: %s", attempt, e)
+        if attempt < 3:
+            time.sleep(2.0)
+    return False
+
+
+def _write_lora_proof(app_id: int, app_address: str, summary: dict[str, dict]) -> None:
+    """Write LORA_PROOF.md with tx links from this seed run (Lora URLs)."""
+    path = os.path.join(ROOT, "LORA_PROOF.md")
+
+    def tx_line(tid: str | None) -> str:
+        return f"`{LORA_TX}/{tid}`" if tid else "`(n/a)`"
+
+    m = summary.get("SHIP_MUMBAI_001", {})
+    c = summary.get("SHIP_CHEN_002", {})
+    d = summary.get("SHIP_DELHI_003", {})
+
+    cert = d.get("cert_asa")
+    cert_line = f"`{LORA_ASSET}/{cert}`" if cert and int(cert) > 0 else "`(n/a)`"
+
+    body = f"""# Navi-Trust — on-chain proof (Lora)
+
+Generated by `python seed_blockchain.py`. Open each link in [Lora](https://lora.algokit.io/testnet).
+
+## Application
+
+- **App:** `{LORA_APP}/{app_id}`
+- **Contract account (escrow):** `{LORA_ACCOUNT}/{app_address}`
+
+---
+
+## SHIP_MUMBAI_001 — in transit, 2 ALGO locked
+
+| Step     | Lora link |
+|----------|-----------|
+| Register | {tx_line(m.get("register_tx"))} |
+| Fund     | {tx_line(m.get("fund_tx"))} |
+
+---
+
+## SHIP_CHEN_002 — disputed, 3 ALGO locked, risk 87
+
+| Step     | Lora link |
+|----------|-----------|
+| Register | {tx_line(c.get("register_tx"))} |
+| Fund     | {tx_line(c.get("fund_tx"))} |
+| Verdict  | {tx_line(c.get("verdict_tx"))} |
+
+---
+
+## SHIP_DELHI_003 — settled, certificate minted
+
+| Step        | Lora link |
+|-------------|-----------|
+| Register    | {tx_line(d.get("register_tx"))} |
+| Fund        | {tx_line(d.get("fund_tx"))} |
+| Verdict     | {tx_line(d.get("verdict_tx"))} |
+| Settle      | {tx_line(d.get("settle_tx"))} |
+| Cert (ASA)  | {cert_line} |
+
+**Check:** open the settle transaction → **Inner transactions** → (1) payment to supplier, (2) asset config creating **NAVI-CERT** / **NCERT**.
+
+---
+
+## Quick verification
+
+```bash
+curl -s http://127.0.0.1:8000/stats
+# Expect total_shipments=3, total_settled=1, total_disputed=1
+```
+"""
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(body)
+    logger.info("Wrote %s", path)
 
 
 def main() -> None:
@@ -278,6 +406,15 @@ def main() -> None:
     logger.info("Oracle : %s", oracle_addr)
     logger.info("APP_ID : %s", app_id)
     logger.info("Lora app: %s/%s", LORA_APP, app_id)
+
+    oracle_micro = int(algorand.client.algod.account_info(oracle_addr).get("amount", 0))
+    if oracle_micro < 8_000_000:
+        logger.error(
+            "Oracle balance is %s microAlgo — need at least 8 ALGO (8_000_000 microAlgo) before seeding. "
+            "Fund the oracle on testnet and retry.",
+            oracle_micro,
+        )
+        sys.exit(1)
 
     _fund_contract_mbr(algorand, oracle_addr, app_address)
 
@@ -331,7 +468,25 @@ def main() -> None:
                 logger.error("settle_shipment failed for %s", sid)
                 sys.exit(1)
             summary[sid]["settle_tx"] = st.get("tx_id")
-            summary[sid]["cert_asa"] = st.get("certificate_asa_id")
+            cert_id = st.get("certificate_asa_id")
+            summary[sid]["cert_asa"] = cert_id
+            try:
+                cid = int(cert_id) if cert_id is not None else 0
+            except (TypeError, ValueError):
+                cid = 0
+            if cid <= 1:
+                logger.error(
+                    "settle_shipment returned invalid certificate ASA id %r (expected > 1). Inspect contract/client.",
+                    cert_id,
+                )
+                sys.exit(1)
+            settle_txid = st.get("tx_id")
+            if settle_txid and not _verify_settle_inner_txns(settle_txid):
+                logger.error(
+                    "Indexer did not show inner pay + acfg on settle tx %s — check Lora or INDEXER_URL.",
+                    settle_txid,
+                )
+                sys.exit(1)
             audit_merge.setdefault(sid, []).append(
                 {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -346,7 +501,7 @@ def main() -> None:
     if audit_merge:
         _merge_audit(audit_merge)
 
-    _sqlite_upsert_demo_rows()
+    _sqlite_upsert_demo_rows(oracle_addr)
 
     print()
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -401,6 +556,7 @@ def main() -> None:
 
     print(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
+    _write_lora_proof(app_id, app_address, summary)
     _stats_check(app_id)
 
 
