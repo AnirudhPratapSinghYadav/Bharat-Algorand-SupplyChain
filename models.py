@@ -28,6 +28,7 @@ class BlockchainState(BaseModel):
 
 class RunJuryRequest(BaseModel):
     shipment_id: str
+    destination_city: Optional[str] = None
 
 
 class SubmitMitigationRequest(BaseModel):

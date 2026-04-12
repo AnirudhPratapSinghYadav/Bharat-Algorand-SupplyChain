@@ -1198,6 +1198,510 @@ def _read_supplier_address(shipment_id: str) -> Optional[str]:
         return None
 
 
+# ═══════════════════════════════════════════════════════════════════
+#   4 - A G E N T   J U R Y   (live Open-Meteo + Algorand + Gemini)
+# ═══════════════════════════════════════════════════════════════════
+
+JURY_CITY_COORDS: dict[str, tuple[float, float]] = {
+    "Mumbai": (19.076, 72.877),
+    "Dubai": (25.276, 55.296),
+    "Rotterdam": (51.924, 4.477),
+    "Singapore": (1.352, 103.819),
+    "Chennai": (13.082, 80.270),
+    "Delhi": (28.614, 77.209),
+    "Shanghai": (31.230, 121.473),
+    "Amsterdam": (52.370, 4.895),
+    "London": (51.507, -0.127),
+    "New York": (40.712, -74.005),
+    "Colombo": (6.927, 79.861),
+}
+
+
+def fetch_live_weather(city: str) -> dict:
+    """
+    Fetch live weather from Open-Meteo. No API key needed.
+    Raises ValueError if city unknown or network/API fails.
+    """
+    city_clean = city.split(",")[0].strip()
+    if not city_clean:
+        raise ValueError("destination city is empty")
+    coords = None
+    for name, ll in JURY_CITY_COORDS.items():
+        if name.lower() == city_clean.lower():
+            coords = ll
+            city_clean = name
+            break
+    if not coords:
+        raise ValueError(f"City {city_clean!r} not in supported list. Add to JURY_CITY_COORDS.")
+    lat, lon = coords
+    resp = requests.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": lat,
+            "longitude": lon,
+            "current": "temperature_2m,precipitation,weather_code,wind_speed_10m,visibility",
+            "timezone": "auto",
+            "windspeed_unit": "kmh",
+        },
+        timeout=8,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    c = body.get("current") or {}
+    if not c:
+        raise ValueError("Open-Meteo returned no current conditions")
+    code = int(c.get("weather_code", 0))
+    if code == 0:
+        desc = "Clear sky"
+    elif code <= 3:
+        desc = "Partly cloudy"
+    elif code <= 49:
+        desc = "Foggy conditions"
+    elif code <= 67:
+        desc = "Rain"
+    elif code <= 77:
+        desc = "Snow"
+    elif code <= 82:
+        desc = "Heavy showers"
+    elif code <= 99:
+        desc = "Thunderstorm"
+    else:
+        desc = "Severe weather"
+    precip = float(c.get("precipitation") or 0)
+    wind_kmh = float(c.get("wind_speed_10m") or 0)
+    is_risky = precip > 5 or wind_kmh > 50
+    return {
+        "city": city_clean,
+        "temp_c": float(c.get("temperature_2m", 0)),
+        "precipitation_mm": precip,
+        "wind_kmh": wind_kmh,
+        "weather_code": code,
+        "description": desc,
+        "is_risky": is_risky,
+        "fetched_at": str(c.get("time") or ""),
+        "source": "open-meteo.com/live",
+    }
+
+
+def _clean_json_response(raw: str) -> dict:
+    """Strip markdown fences and parse JSON from Gemini / OpenAI response."""
+    text = (raw or "").strip()
+    if not text:
+        raise ValueError("empty model response")
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if len(lines) >= 2:
+            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    m = re.search(r"\{[\s\S]*\}", text)
+    if not m:
+        raise ValueError("no JSON object in model response")
+    return json.loads(m.group(0))
+
+
+def _jury_gemini_generate_text(prompt: str) -> str:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY missing")
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    response = client.models.generate_content(
+        model="gemini-1.5-flash",
+        contents=prompt,
+    )
+    out = (response.text or "").strip()
+    if not out:
+        raise RuntimeError("Gemini returned empty text")
+    return out
+
+
+def _jury_llm_json(prompt: str) -> dict:
+    """Gemini → OpenAI → raise (caller supplies deterministic fallback)."""
+    try:
+        return _clean_json_response(_jury_gemini_generate_text(prompt))
+    except Exception as e:
+        logger.warning("Jury Gemini JSON failed: %s", e)
+    try:
+        oai = _openai_chat(
+            prompt + "\n\nReturn ONLY valid JSON, no markdown."
+        )
+        if oai:
+            return _clean_json_response(oai)
+    except Exception as e2:
+        logger.warning("Jury OpenAI JSON failed: %s", e2)
+    raise RuntimeError("LLM jury step failed (Gemini and OpenAI unavailable or unparseable)")
+
+
+def _chain_snapshot_for_jury(shipment_id: str) -> dict:
+    """Real on-chain + DB-derived context for agents (no fabricated ledger fields)."""
+    oc = chain.read_shipment_full(shipment_id) if APP_ID else {}
+    st = (oc.get("status") or "").strip()
+    if st in ("", "Unregistered"):
+        st = "Not_Found"
+    micro = int(oc.get("funds_microalgo") or 0)
+    sup = _read_supplier_address(shipment_id) or ""
+    vraw = oc.get("verdict")
+    return {
+        "shipment_id": shipment_id,
+        "status": st,
+        "funds_microalgo": micro,
+        "funds_algo": micro / 1_000_000.0,
+        "verdict_json": vraw,
+        "supplier_address": sup,
+        "route": oc.get("route") or "",
+        "risk_on_chain": int(oc.get("risk_score") or 0),
+    }
+
+
+def get_supplier_reputation_score(supplier_address: str) -> dict:
+    """On-chain rp_ box score; score may be None until first settlement."""
+    if not supplier_address:
+        return {"score": 50, "source": "default_no_supplier"}
+    rep = chain.read_supplier_reputation_on_chain(supplier_address)
+    sc = rep.get("score")
+    if sc is None:
+        return {"score": 50, "source": rep.get("source") or "no_box", "address": supplier_address}
+    return {"score": int(sc), "source": rep.get("source") or "algorand_box_storage", "address": supplier_address}
+
+
+def _fallback_weather_sentinel(weather: dict, chain_state: dict) -> dict:
+    wflag = bool(weather.get("is_risky"))
+    base = 72 if wflag else 24
+    return {
+        "agent": "weather_sentinel",
+        "risk_score": base,
+        "primary_risk": "Heavy precipitation or wind per live Open-Meteo." if wflag else "Conditions within normal operating range.",
+        "weather_flag": wflag,
+        "conditions_summary": f"{weather.get('description')} at {weather.get('city')}",
+        "recommendation": "FLAG" if wflag else "PROCEED",
+        "confidence": 55,
+        "_fallback": True,
+    }
+
+
+def run_weather_sentinel(
+    shipment_id: str,
+    destination_city: str,
+    weather: dict,
+    chain_state: dict,
+) -> dict:
+    prompt = f"""You are the Weather Sentinel AI agent for Navi-Trust supply chain oracle.
+Analyze ONLY physical transport and weather risk. Be objective and data-driven.
+
+Shipment: {shipment_id}
+Destination: {destination_city}
+Live weather at destination (source: {weather['source']}):
+  Temperature: {weather['temp_c']}°C
+  Precipitation: {weather['precipitation_mm']}mm
+  Wind speed: {weather['wind_kmh']}km/h
+  Conditions: {weather['description']}
+  Fetched at: {weather['fetched_at']}
+
+Current on-chain status: {chain_state['status']}
+Funds locked: {chain_state.get('funds_algo', 0)} ALGO
+
+Assess physical delivery risk. Consider:
+- Can goods be safely delivered in these conditions?
+- Does precipitation risk cargo damage?
+- Does wind risk port operations?
+
+Return ONLY valid JSON. No text before or after the JSON:
+{{
+  "agent": "weather_sentinel",
+  "risk_score": <integer 0-100>,
+  "primary_risk": "<one sentence describing main risk>",
+  "weather_flag": <true if precipitation > 5mm OR wind > 50km/h>,
+  "conditions_summary": "<brief weather summary>",
+  "recommendation": "PROCEED" or "HOLD" or "FLAG",
+  "confidence": <integer 0-100>
+}}"""
+    try:
+        result = _jury_llm_json(prompt)
+        assert isinstance(result.get("risk_score"), int), "risk_score must be int"
+        assert 0 <= result["risk_score"] <= 100, "risk_score out of range"
+        result["agent"] = "weather_sentinel"
+        return result
+    except Exception as e:
+        logger.warning("Weather Sentinel LLM fallback: %s", e)
+        return _fallback_weather_sentinel(weather, chain_state)
+
+
+def run_compliance_auditor(
+    shipment_id: str,
+    chain_state: dict,
+    sentinel_report: dict,
+) -> dict:
+    status = chain_state.get("status", "Unknown")
+    funds = float(chain_state.get("funds_algo") or 0)
+    vj = chain_state.get("verdict_json")
+    has_verdict = vj is not None and str(vj).strip() not in ("", "{}", "null")
+
+    issues: List[str] = []
+    if funds <= 0:
+        issues.append("No escrow locked")
+    if status == "Disputed":
+        issues.append("Shipment already in disputed state")
+    if has_verdict:
+        issues.append("Prior verdict exists on-chain")
+    if sentinel_report.get("weather_flag"):
+        issues.append("Weather sentinel flagged risky conditions")
+
+    blocking = [x for x in issues if x != "Prior verdict exists on-chain"]
+    compliance_passed = len(blocking) == 0
+
+    if status == "Disputed":
+        risk_score = 85
+    elif not compliance_passed:
+        risk_score = 68
+    else:
+        risk_score = 22
+
+    return {
+        "agent": "compliance_auditor",
+        "chain_status": status,
+        "funds_locked_algo": funds,
+        "has_prior_verdict": has_verdict,
+        "compliance_passed": compliance_passed,
+        "issues": issues,
+        "risk_score": risk_score,
+        "source": "algorand_box_storage",
+        "app_id": APP_ID,
+    }
+
+
+def _fallback_fraud_detector(
+    supplier_rep: int,
+    sentinel_report: dict,
+    auditor_report: dict,
+) -> dict:
+    anom = bool(sentinel_report.get("weather_flag")) and not auditor_report.get("compliance_passed")
+    fr = 55 if anom else 28
+    return {
+        "agent": "fraud_detector",
+        "fraud_risk_score": fr,
+        "supplier_credibility": "HIGH" if supplier_rep >= 70 else ("MEDIUM" if supplier_rep >= 45 else "LOW"),
+        "anomaly_detected": anom,
+        "fraud_indicators": ["weather/compliance stress"] if anom else [],
+        "analysis": "Deterministic blend of live agent outputs without LLM.",
+        "recommendation": "SUSPECT" if fr >= 50 else "CLEAR",
+        "_fallback": True,
+    }
+
+
+def run_fraud_detector(
+    shipment_id: str,
+    chain_state: dict,
+    sentinel_report: dict,
+    auditor_report: dict,
+    supplier_reputation: int,
+) -> dict:
+    prompt = f"""You are the Fraud Detector AI agent for Navi-Trust supply chain oracle.
+Analyze fraud risk and supplier credibility. Be skeptical but fair.
+
+Shipment: {shipment_id}
+Supplier on-chain reputation score: {supplier_reputation}/100
+  (Score is stored in Algorand box storage when available; otherwise neutral 50 is used.)
+
+Weather Sentinel report:
+  Risk score: {sentinel_report['risk_score']}/100
+  Weather flag: {sentinel_report.get('weather_flag')}
+  Recommendation: {sentinel_report.get('recommendation')}
+
+Compliance Auditor report:
+  Chain status: {auditor_report['chain_status']}
+  Compliance passed: {auditor_report['compliance_passed']}
+  Issues found: {auditor_report['issues']}
+  Funds locked: {auditor_report['funds_locked_algo']} ALGO
+
+Analyze:
+- Is the supplier's reputation score consistent with clean deliveries?
+- Are there anomaly patterns (weather risk + compliance issues together)?
+- Does the evidence suggest genuine logistics problems vs attempted fraud?
+
+Return ONLY valid JSON:
+{{
+  "agent": "fraud_detector",
+  "fraud_risk_score": <integer 0-100>,
+  "supplier_credibility": "HIGH" or "MEDIUM" or "LOW",
+  "anomaly_detected": <true or false>,
+  "fraud_indicators": ["<indicator1>", "<indicator2>"],
+  "analysis": "<2 sentence explanation>",
+  "recommendation": "CLEAR" or "SUSPECT" or "FRAUD"
+}}"""
+    try:
+        result = _jury_llm_json(prompt)
+        assert isinstance(result.get("fraud_risk_score"), int)
+        assert 0 <= result["fraud_risk_score"] <= 100
+        result["agent"] = "fraud_detector"
+        return result
+    except Exception as e:
+        logger.warning("Fraud Detector LLM fallback: %s", e)
+        return _fallback_fraud_detector(supplier_reputation, sentinel_report, auditor_report)
+
+
+def _enforce_chief_verdict(
+    result: dict,
+    weighted_score: int,
+    chain_status: str,
+    detector: dict,
+) -> dict:
+    v = str(result.get("verdict") or "").upper()
+    if chain_status == "Disputed" or detector.get("recommendation") == "FRAUD":
+        v = "DISPUTE"
+    elif weighted_score >= 70:
+        v = "DISPUTE"
+    elif weighted_score < 30:
+        v = "SETTLE"
+    elif v not in ("SETTLE", "HOLD", "DISPUTE"):
+        v = "HOLD"
+    result["verdict"] = v
+    return result
+
+
+def _fallback_chief_arbiter(
+    weighted_score: int,
+    sentinel: dict,
+    auditor: dict,
+    detector: dict,
+    chain_status: str,
+) -> dict:
+    if chain_status == "Disputed" or detector.get("recommendation") == "FRAUD":
+        verdict = "DISPUTE"
+    elif weighted_score >= 70:
+        verdict = "DISPUTE"
+    elif weighted_score < 30:
+        verdict = "SETTLE"
+    else:
+        verdict = "HOLD"
+    fs = int(max(0, min(100, weighted_score)))
+    return {
+        "agent": "chief_arbiter",
+        "final_risk_score": fs,
+        "verdict": verdict,
+        "reasoning": (
+            f"Weighted score {weighted_score} from sentinel/auditor/fraud. "
+            f"Chain={chain_status}, fraud={detector.get('recommendation')}."
+        )[:500],
+        "confidence": 60,
+        "weighted_score": weighted_score,
+        "_fallback": True,
+    }
+
+
+def run_chief_arbiter(
+    shipment_id: str,
+    sentinel: dict,
+    auditor: dict,
+    detector: dict,
+    weather: dict,
+    weighted_score: int,
+    chain_status: str,
+) -> dict:
+    prompt = f"""You are the Chief Arbiter AI agent for Navi-Trust.
+You receive reports from 3 specialist agents and deliver the FINAL BINDING VERDICT.
+This verdict will be written permanently to the Algorand blockchain.
+
+Shipment: {shipment_id}
+
+WEATHER SENTINEL REPORT:
+  Risk score: {sentinel['risk_score']}/100
+  Primary risk: {sentinel.get('primary_risk', '')}
+  Recommendation: {sentinel.get('recommendation')}
+  Weather: {weather['description']} at {weather['city']}
+
+COMPLIANCE AUDITOR REPORT:
+  Chain status: {auditor['chain_status']}
+  Compliance passed: {auditor['compliance_passed']}
+  Issues: {auditor['issues']}
+  Funds locked: {auditor['funds_locked_algo']} ALGO
+
+FRAUD DETECTOR REPORT:
+  Fraud risk: {detector['fraud_risk_score']}/100
+  Supplier credibility: {detector.get('supplier_credibility')}
+  Anomaly detected: {detector.get('anomaly_detected')}
+  Recommendation: {detector.get('recommendation')}
+
+WEIGHTED COMBINED SCORE: {weighted_score}/100
+
+VERDICT RULES (mandatory):
+  If weighted_score >= 70 → verdict MUST be "DISPUTE"
+  If weighted_score < 30 → verdict MUST be "SETTLE"
+  If 30-69 → use judgment → "SETTLE", "HOLD", or "DISPUTE"
+  If chain status is already "Disputed" → verdict MUST be "DISPUTE"
+  If fraud_recommendation is "FRAUD" → verdict MUST be "DISPUTE"
+
+Return ONLY valid JSON. This will be stored on Algorand blockchain:
+{{
+  "agent": "chief_arbiter",
+  "final_risk_score": <integer 0-100>,
+  "verdict": "SETTLE" or "HOLD" or "DISPUTE",
+  "reasoning": "<exactly 2 sentences explaining the decision>",
+  "confidence": <integer 0-100>,
+  "weighted_score": {weighted_score}
+}}"""
+    try:
+        result = _jury_llm_json(prompt)
+        fr = result.get("final_risk_score", weighted_score)
+        result["final_risk_score"] = int(fr) if isinstance(fr, (int, float)) else int(weighted_score)
+        result["final_risk_score"] = max(0, min(100, result["final_risk_score"]))
+        vv = str(result.get("verdict", "HOLD")).strip().upper()
+        if vv not in ("SETTLE", "HOLD", "DISPUTE"):
+            vv = "HOLD"
+        result["verdict"] = vv
+        result["agent"] = "chief_arbiter"
+        result["weighted_score"] = weighted_score
+        return _enforce_chief_verdict(result, weighted_score, chain_status, detector)
+    except Exception as e:
+        logger.warning("Chief Arbiter LLM fallback: %s", e)
+        return _fallback_chief_arbiter(weighted_score, sentinel, auditor, detector, chain_status)
+
+
+def run_four_agent_jury(shipment_id: str, destination_city: str) -> dict:
+    """Sequential 4-agent pipeline. Raises ValueError if live inputs unavailable."""
+    weather = fetch_live_weather(destination_city)
+    chain_state = _chain_snapshot_for_jury(shipment_id)
+    if chain_state["status"] in ("Not_Found", "Unknown"):
+        raise ValueError(f"Shipment {shipment_id} not found on Algorand (no registered boxes).")
+
+    sup_addr = chain_state.get("supplier_address") or ""
+    rep_data = get_supplier_reputation_score(sup_addr)
+    supplier_rep = int(rep_data.get("score") or 50)
+
+    sentinel = run_weather_sentinel(shipment_id, destination_city, weather, chain_state)
+    auditor = run_compliance_auditor(shipment_id, chain_state, sentinel)
+    detector = run_fraud_detector(shipment_id, chain_state, sentinel, auditor, supplier_rep)
+
+    weighted_score = int(
+        sentinel["risk_score"] * 0.35 + auditor["risk_score"] * 0.35 + detector["fraud_risk_score"] * 0.30
+    )
+    arbiter = run_chief_arbiter(
+        shipment_id,
+        sentinel,
+        auditor,
+        detector,
+        weather,
+        weighted_score,
+        chain_state["status"],
+    )
+
+    return {
+        "shipment_id": shipment_id,
+        "weather": weather,
+        "sentinel": sentinel,
+        "auditor": auditor,
+        "fraud_detector": detector,
+        "arbiter": arbiter,
+        "final_score": arbiter["final_risk_score"],
+        "verdict": arbiter["verdict"],
+        "reasoning": arbiter["reasoning"],
+        "all_data_real": True,
+        "source": "gemini_4_agent_jury_live_data",
+        "supplier_reputation": rep_data,
+    }
+
+
 class MitigationAuditorAgent:
     """AI Agent to validate supplier mitigation strategies."""
     
@@ -1362,160 +1866,149 @@ def get_shipments():
 @app.post("/run-jury")
 def run_jury(req: RunJuryRequest):
     """
-    Full MAS pipeline — Blockchain-AI Convergence (80%+ Algorand).
-
-    Flow: 1) Pre-flight: Auditor reads Box Storage BEFORE Sentry — blockchain gates AI.
-    2) Sentry (Gemini/OpenAI) analyzes weather + live feed → risk_score.
-    3) Arbiter adjudicates; 4) ATC atomic TX → Box Storage update.
-    5) Webhook fires only after TX confirmed in block (confirmed_round).
+    Four-agent jury: Weather Sentinel → Compliance Auditor → Fraud Detector → Chief Arbiter.
+    Live Open-Meteo + real Algorand boxes; Gemini with OpenAI + deterministic fallbacks for JSON.
     """
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM shipments WHERE id = ?", (req.shipment_id,)
-        ).fetchone()
+    shipment_id = (req.shipment_id or "").strip()
+    if not shipment_id:
+        raise HTTPException(status_code=400, detail="shipment_id required")
 
-    # Orphan fallback: shipment on-chain but not in DB — use generic prompt, no crash
-    if not row:
-        row = {
-            "id": req.shipment_id,
-            "origin": "Unknown",
-            "destination": "Unknown",
-            "current_lat": 0.0,
-            "current_lon": 0.0,
-            "status": STATUS_IN_TRANSIT,
-        }
-        logger.warning(f"[ORPHAN] {req.shipment_id} not in DB — using fallback metadata")
-
-    events = get_events_for(req.shipment_id)
-
-    # ── PRE-FLIGHT: Compliance Auditor checks ledger BEFORE Sentry runs ─
-    state = ComplianceAuditorAgent.audit(req.shipment_id, sentry_prediction=None)
-    if _status_is_flagged(state["blockchain_status"]):
-        logger.warning(f"[PRE-FLIGHT ABORT] {req.shipment_id} — already flagged on-chain, AI analysis skipped")
+    destination_city = (req.destination_city or "").strip()
+    if not destination_city:
+        with get_db() as conn:
+            row = conn.execute("SELECT destination FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
+        if row and row["destination"]:
+            destination_city = str(row["destination"]).split(",")[0].strip()
+    if not destination_city:
         raise HTTPException(
             status_code=400,
-            detail="Shipment already flagged on Algorand. Blockchain is source of truth — no AI override.",
+            detail="destination_city required (or save destination on the shipment row in SQLite).",
         )
 
-    weather = fetch_weather(row["current_lat"], row["current_lon"])
-    if not weather:
-        weather = WeatherData(temperature=22.0, precipitation=0.0, weather_code=0)
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
+    origin = str(row["origin"]) if row else "—"
+    destination = str(row["destination"]) if row else destination_city
 
-    # ── Step 1: Logistics Sentry — risk analysis (with live logistics feed) ─
-    live_ctx = get_live_logistics_context()
-    prediction = LogisticsSentryAgent.analyze(req.shipment_id, weather, events, live_context=live_ctx)
+    try:
+        jury_result = run_four_agent_jury(shipment_id, destination_city)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"error": str(e), "all_data_real": False}) from e
+    except Exception as e:
+        logger.exception("run-jury failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"Jury failed: {e!s}", "all_data_real": False},
+        ) from e
 
-    # ── Step 2: Compliance Auditor (full report with Sentry context for Arbiter) ─
-    state = ComplianceAuditorAgent.audit(req.shipment_id, sentry_prediction=prediction)
+    arbiter = jury_result["arbiter"]
+    sentinel = jury_result["sentinel"]
+    weather = jury_result["weather"]
+    auditor = jury_result["auditor"]
+    fraud = jury_result["fraud_detector"]
 
-    # Fraud halt: if Auditor detected an existing claim, short-circuit
-    fraud_detected = _status_is_flagged(state["blockchain_status"])
-    if fraud_detected:
-        logger.warning(f"[FRAUD HALT] {req.shipment_id} — Auditor found disaster_reported=True, aborting settlement")
-
-    # ── Step 3: Settlement Arbiter — final adjudication ────────
-    judgment = SettlementArbiterAgent.deliberate(prediction, state)
-
-    # ── Step 4: Atomic on-chain transition via ATC ─────────────
-    on_chain_tx_id: Optional[str] = None
-    confirmed_round: Optional[int] = None
-    if judgment["trigger_contract"] and row["status"] == STATUS_IN_TRANSIT and not fraud_detected:
-        with get_db() as conn:
-            conn.execute(
-                "UPDATE shipments SET status = ? WHERE id = ?",
-                (_db_flagged_status(), req.shipment_id),
-            )
-            conn.commit()
-        
-        reasoning_hash = judgment.get("reasoning_hash", "0")
-        reasoning_txt = _sanitize_llm_text(judgment.get("reasoning_narrative", judgment.get("judgment", "")))
-        navi_note_ctx = None
-        if chain.use_navitrust():
-            row_map = {k: row[k] for k in row.keys()}
-            navi_note_ctx = (prediction, weather, judgment, row_map)
-        flag_result = _flag_shipment_on_chain(
-            req.shipment_id,
-            reasoning_hash,
-            reasoning_txt,
-            risk_score=prediction.risk_score,
-            navi_note_ctx=navi_note_ctx,
-        )
-        
-        if flag_result:
-            on_chain_tx_id = flag_result.get("tx_id")
-            confirmed_round = flag_result.get("confirmed_round")
-            # Fire n8n webhook ONLY after Algorand confirmation (control tower)
-            _fire_webhook("settlement_confirmed", {
-                "shipment_id": req.shipment_id,
-                "risk_score": prediction.risk_score,
-                "reasoning_narrative": reasoning_txt,
-                "TX_ID": on_chain_tx_id,
-                "explorer_url": f"{LORA_TESTNET_TX}/{on_chain_tx_id}" if on_chain_tx_id else None,
-            })
-
-    j_judgment = _sanitize_llm_text(judgment.get("judgment", ""))
-    j_reasoning = _sanitize_llm_text(judgment.get("reasoning_narrative", j_judgment))
-    agent_dialogue = [
-        {
-            "agent": "Logistics Sentry",
-            "message": (
-                f"Risk Score: {prediction.risk_score}/100\n"
-                f"{prediction.reasoning_narrative}\n"
-                f"Mitigation: {prediction.mitigation}\n"
-                "[Passing to Compliance Auditor for on-chain verification]"
-            ),
+    verdict_note = {
+        "type": "NAVI_VERDICT",
+        "v": "3",
+        "app": APP_ID,
+        "sid": shipment_id,
+        "score": arbiter["final_risk_score"],
+        "verdict": arbiter["verdict"],
+        "reason": (arbiter["reasoning"] or "")[:180],
+        "agents": {
+            "sentinel": sentinel["risk_score"],
+            "auditor": auditor["risk_score"],
+            "fraud": fraud["fraud_risk_score"],
+            "arbiter": arbiter["final_risk_score"],
         },
-        {
-            "agent": "Compliance Auditor",
-            "message": (
-                f"On-Chain Status: {state['blockchain_status']}\n"
-                f"{state['audit_report']}\n"
-                "[Passing to Settlement Arbiter for final verdict]"
-            ),
+        "weather": {
+            "city": weather["city"],
+            "precip": weather["precipitation_mm"],
+            "wind": weather["wind_kmh"],
+            "desc": weather["description"],
         },
-        {
-            "agent": "Settlement Arbiter",
-            "message": (
-                f"Decision: {'AUTHORIZED' if judgment['trigger_contract'] else 'REJECTED'}\n"
-                f"{j_judgment}\n"
-                f"[Verdict based on Sentry risk assessment + Auditor Box Storage verification]"
-            ),
-        },
-    ]
-    verdict = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "sentinel_score": prediction.risk_score,
-        "auditor_status": state["blockchain_status"],
-        "verdict": "APPROVED" if judgment["trigger_contract"] else "REJECTED",
-        "summary": j_judgment[:200],
-        "reasoning_narrative": j_reasoning,
-        "mitigation_strategy": judgment.get("mitigation_strategy", ""),
-        "tx_id": on_chain_tx_id,
-        "confirmed_round": confirmed_round,
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
-    AUDIT_TRAIL.setdefault(req.shipment_id, []).append(verdict)
-    save_verdict_history()
+    note_bytes = json.dumps(verdict_note, separators=(",", ":")).encode("utf-8")
+    if len(note_bytes) > 1000:
+        verdict_note["reason"] = (arbiter["reasoning"] or "")[:80]
+        note_bytes = json.dumps(verdict_note, separators=(",", ":")).encode("utf-8")
 
-    chief_justice_out = {**judgment, "judgment": j_judgment, "reasoning_narrative": j_reasoning}
+    verdict_json_str = json.dumps(
+        {
+            "verdict": arbiter["verdict"],
+            "score": arbiter["final_risk_score"],
+            "reasoning": arbiter["reasoning"],
+            "sentinel_score": sentinel["risk_score"],
+            "fraud_score": fraud["fraud_risk_score"],
+        },
+        separators=(",", ":"),
+    )
+
+    tx_result = chain.record_verdict_chain(
+        shipment_id=shipment_id,
+        verdict_json=verdict_json_str,
+        risk_score=int(arbiter["final_risk_score"]),
+        note=note_bytes,
+    )
+    if not tx_result or not tx_result.get("tx_id"):
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "On-chain record_verdict failed (oracle APP_ID / mnemonic / boxes)."},
+        )
+    tx_id = str(tx_result["tx_id"])
+    confirmed_round = tx_result.get("confirmed_round")
+
+    audit_entry = {
+        "shipment_id": shipment_id,
+        "verdict": arbiter["verdict"],
+        "score": arbiter["final_risk_score"],
+        "reasoning": arbiter["reasoning"],
+        "sentinel_score": sentinel["risk_score"],
+        "auditor_score": auditor["risk_score"],
+        "fraud_score": fraud["fraud_risk_score"],
+        "weather": weather,
+        "tx_id": tx_id,
+        "lora_tx_url": f"{LORA_TESTNET_TX}/{tx_id}",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    AUDIT_TRAIL.setdefault(shipment_id, []).append(audit_entry)
+    try:
+        save_verdict_history()
+    except Exception:
+        logger.warning("save_verdict_history failed after jury", exc_info=True)
+
+    agent_dialogue = [
+        {"agent": "Weather Sentinel", "message": json.dumps(sentinel, indent=2)[:1200]},
+        {"agent": "Compliance Auditor", "message": json.dumps(auditor, indent=2)[:1200]},
+        {"agent": "Fraud Detector", "message": json.dumps(fraud, indent=2)[:1200]},
+        {"agent": "Chief Arbiter", "message": json.dumps(arbiter, indent=2)[:1200]},
+    ]
+    chief_justice_out = {
+        "judgment": arbiter["verdict"],
+        "reasoning_narrative": arbiter["reasoning"],
+        "weighted_score": arbiter.get("weighted_score"),
+        "final_risk_score": arbiter["final_risk_score"],
+    }
 
     payload = {
-        "shipment_id": req.shipment_id,
-        "origin": row["origin"],
-        "destination": row["destination"],
-        "weather": weather.model_dump(),
-        "sentinel": prediction.model_dump(),
-        "auditor": state,
-        "chief_justice": chief_justice_out,
-        "trigger_contract": judgment["trigger_contract"],
-        "agent_dialogue": agent_dialogue,
-        "logistics_events_used": len(events),
-        "on_chain_tx_id": on_chain_tx_id,
+        **jury_result,
+        "origin": origin,
+        "destination": destination,
+        "tx_id": tx_id,
+        "on_chain_tx_id": tx_id,
         "confirmed_round": confirmed_round,
-        "explorer_url": f"{LORA_TESTNET_TX}/{on_chain_tx_id}" if on_chain_tx_id else None,
+        "lora_tx_url": f"{LORA_TESTNET_TX}/{tx_id}",
+        "explorer_url": f"{LORA_TESTNET_TX}/{tx_id}",
+        "note_bytes": len(note_bytes),
+        "verdict_on_chain": True,
+        "chief_justice": chief_justice_out,
+        "agent_dialogue": agent_dialogue,
+        "trigger_contract": arbiter["verdict"] == "DISPUTE",
         "oracle_stake": None,
         "stake_tx_id": None,
     }
-    JURY_CACHE[req.shipment_id] = payload
+    JURY_CACHE[shipment_id] = payload
     return payload
 
 
