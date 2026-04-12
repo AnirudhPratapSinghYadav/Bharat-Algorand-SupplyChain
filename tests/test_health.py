@@ -10,4 +10,5 @@ def test_health_ok():
         body = r.json()
         assert body.get("status") == "ok"
         assert "app_id" in body
-        assert "navitrust" in body
+        assert "network" in body
+        assert "algod_ok" in body

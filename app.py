@@ -236,6 +236,8 @@ def init_db():
         for ddl in (
             "ALTER TABLE shipments ADD COLUMN dest_lat REAL",
             "ALTER TABLE shipments ADD COLUMN dest_lon REAL",
+            "ALTER TABLE shipments ADD COLUMN supplier_address TEXT",
+            "ALTER TABLE shipments ADD COLUMN created_at TEXT",
         ):
             try:
                 conn.execute(ddl)
@@ -438,24 +440,29 @@ def _append_register_log(entry: dict) -> None:
 
 
 def get_shipment_from_chain(shipment_id: str) -> dict:
-    """Full chain read + SQLite metadata (Phase 3 public /verify + /shipment)."""
-    oc = chain.read_shipment_full(shipment_id) if APP_ID else {}
+    """API envelope: definitive box+SQLite read from algorand_client + full DB row."""
+    oc = chain.get_shipment_from_chain(shipment_id) if APP_ID else {}
     with get_db() as conn:
         row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
     rowd = dict(row) if row else {}
     cert = oc.get("certificate_asa") if isinstance(oc, dict) else None
     cid = int(cert) if cert else 0
+    vj = oc.get("verdict_json") if isinstance(oc, dict) else None
+    if vj is None and isinstance(oc, dict):
+        vj = oc.get("verdict")
     return {
         "shipment_id": shipment_id,
-        "origin": rowd.get("origin") or "",
-        "destination": rowd.get("destination") or "",
+        "origin": rowd.get("origin") or oc.get("origin") if isinstance(oc, dict) else "",
+        "destination": rowd.get("destination") or (oc.get("destination") if isinstance(oc, dict) else ""),
         "status": oc.get("status") if isinstance(oc, dict) else "",
         "risk_score": int(oc.get("risk_score") or 0) if isinstance(oc, dict) else 0,
-        "verdict_json": oc.get("verdict") if isinstance(oc, dict) else None,
+        "verdict_json": vj,
         "on_chain": oc,
         "database": rowd,
         "certificate_asa_id": cid or None,
-        "lora_cert_url": f"https://lora.algokit.io/testnet/asset/{cid}" if cid else None,
+        "lora_cert_url": oc.get("lora_cert_url") if isinstance(oc, dict) and oc.get("lora_cert_url") else (
+            f"https://lora.algokit.io/testnet/asset/{cid}" if cid else None
+        ),
     }
 
 def _generate_reasoning_hash(text: str) -> str:
@@ -2138,7 +2145,21 @@ def _stats_compute() -> dict:
     contract_algo = None
     contract_app_address: Optional[str] = None
     lora_contract_account_url: Optional[str] = None
-    if APP_ID:
+    active_shipments = 0
+    total_settled_k = 0
+    total_disputed_k = 0
+    total_shipments_count = 0
+    if APP_ID and chain.use_navitrust():
+        g_navitrust = chain.global_stats_navitrust()
+        if g_navitrust.get("escrow_total_algo") is not None:
+            contract_algo = float(g_navitrust["escrow_total_algo"])
+        contract_app_address = g_navitrust.get("contract_app_address")
+        lora_contract_account_url = g_navitrust.get("lora_contract_url")
+        total_shipments_count = int(g_navitrust.get("total_shipments") or 0)
+        total_settled_k = int(g_navitrust.get("total_settled") or 0)
+        total_disputed_k = int(g_navitrust.get("total_disputed") or 0)
+        active_shipments = max(0, total_shipments_count - total_settled_k - total_disputed_k)
+    elif APP_ID:
         try:
             app_addr = get_application_address(APP_ID)
             contract_app_address = app_addr
@@ -2147,17 +2168,6 @@ def _stats_compute() -> dict:
             contract_algo = float(bal.algo) if hasattr(bal, "algo") else None
         except Exception as e:
             logger.warning(f"Could not fetch contract balance: {e}")
-
-    active_shipments = 0
-    total_settled_k = 0
-    total_disputed_k = 0
-    total_shipments_count = 0
-    if APP_ID and chain.use_navitrust():
-        g = chain.global_stats_navitrust()
-        total_shipments_count = int(g.get("total_shipments") or 0)
-        total_settled_k = int(g.get("total_settled") or 0)
-        total_disputed_k = int(g.get("total_disputed") or 0)
-        active_shipments = max(0, total_shipments_count - total_settled_k - total_disputed_k)
 
     escrow_total_algo = round(contract_algo, 4) if contract_algo is not None else None
     return {

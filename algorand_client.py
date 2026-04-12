@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -30,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent
 NAVITRUST_SPEC = ROOT / "artifacts" / "NaviTrust.arc56.json"
+# Same DB file as app.py (metadata only: origin, destination, supplier_address, created_at).
+SHIPMENTS_DB_PATH = ROOT / "shipments.db"
 
 APP_ID = int(os.environ.get("APP_ID", 0) or os.environ.get("VITE_APP_ID", 0))
 ALGO_NETWORK = os.environ.get("ALGO_NETWORK", "testnet")
@@ -355,6 +358,130 @@ def _navi_rep_box_name(supplier_address: str) -> bytes:
     return b"rp_" + encoding.decode_address(supplier_address)
 
 
+def _get_shipment_meta_sqlite(shipment_id: str) -> Dict[str, str]:
+    """SQLite metadata only (registration-time fields). Columns may be absent on old DBs."""
+    meta: Dict[str, str] = {
+        "origin": "",
+        "destination": "",
+        "supplier_address": "",
+        "created_at": "",
+    }
+    if not SHIPMENTS_DB_PATH.is_file():
+        return meta
+    try:
+        conn = sqlite3.connect(str(SHIPMENTS_DB_PATH))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
+        conn.close()
+        if not row:
+            return meta
+        r = dict(row)
+        meta["origin"] = str(r.get("origin") or "")
+        meta["destination"] = str(r.get("destination") or "")
+        if r.get("supplier_address") is not None:
+            meta["supplier_address"] = str(r.get("supplier_address") or "").strip()
+        if r.get("created_at") is not None:
+            meta["created_at"] = str(r.get("created_at") or "").strip()
+    except Exception as e:
+        logger.debug("_get_shipment_meta_sqlite: %s", e)
+    return meta
+
+
+def get_shipment_from_chain(shipment_id: str) -> Dict[str, Any]:
+    """
+    Single source of truth for NaviTrust: shipment state from Algorand boxes (st_, sp_, fn_, rs_, vd_, rt_, ce_).
+    SQLite supplies: origin, destination, supplier_address (optional), created_at (optional).
+    """
+    app_id = int(os.environ.get("APP_ID", os.environ.get("VITE_APP_ID", "0")) or 0) or APP_ID
+    meta = _get_shipment_meta_sqlite(shipment_id)
+    sid = shipment_id.encode("utf-8")
+
+    result: Dict[str, Any] = {
+        "shipment_id": shipment_id,
+        "status": "Not_Found",
+        "funds_microalgo": 0,
+        "funds_algo": 0.0,
+        "risk_score": 0,
+        "route": "",
+        "verdict_json": None,
+        "origin": meta.get("origin", ""),
+        "destination": meta.get("destination", ""),
+        "supplier_address": (meta.get("supplier_address") or "").strip(),
+        "created_at": meta.get("created_at", ""),
+        "app_id": app_id,
+        "lora_app_url": f"https://lora.algokit.io/testnet/application/{app_id}" if app_id else "",
+        "source": "algorand_box_storage",
+    }
+
+    if not app_id:
+        return result
+
+    if not use_navitrust():
+        try:
+            st = read_shipment_status(shipment_id)
+            result["status"] = st if st not in ("Unregistered",) else "Not_Found"
+            if st in ("Unregistered", "Unknown"):
+                result["status"] = "Not_Found"
+        except Exception:
+            pass
+        sup = result["supplier_address"] or (read_navitrust_supplier_address(shipment_id) or "")
+        result["supplier_address"] = sup
+        result["lora_url"] = f"{LORA_TESTNET_APP}/{app_id}"
+        return result
+
+    algod = algorand.client.algod
+
+    def read_box(prefix: bytes) -> Optional[bytes]:
+        try:
+            name = prefix + sid
+            r = algod.application_box_by_name(app_id, name)
+            return base64.b64decode(r["value"])
+        except Exception:
+            return None
+
+    def read_uint_box(prefix: bytes) -> Optional[int]:
+        val = read_box(prefix)
+        if not val or len(val) != 8:
+            return None
+        return int.from_bytes(val, "big")
+
+    raw_st = read_box(b"st_")
+    status = _decode_arc4_string(raw_st) if raw_st else ""
+    if not status.strip():
+        result["status"] = "Not_Found"
+        sup_on = read_navitrust_supplier_address(shipment_id)
+        if sup_on:
+            result["supplier_address"] = result["supplier_address"] or sup_on
+        return result
+
+    result["status"] = status
+    funds_micro = read_uint_box(b"fn_") or 0
+    risk_score = read_uint_box(b"rs_") or 0
+    verdict_raw = read_box(b"vd_")
+    verdict_json = _decode_arc4_string(verdict_raw) if verdict_raw else None
+    route_raw = read_box(b"rt_")
+    route = _decode_arc4_string(route_raw) if route_raw else ""
+    cert_id = read_uint_box(b"ce_")
+
+    result["funds_microalgo"] = int(funds_micro)
+    result["funds_algo"] = round(funds_micro / 1_000_000.0, 4)
+    result["risk_score"] = int(risk_score)
+    result["route"] = route
+    result["verdict_json"] = verdict_json
+
+    sup_on = read_navitrust_supplier_address(shipment_id)
+    if sup_on:
+        result["supplier_address"] = result["supplier_address"] or sup_on
+
+    if cert_id:
+        cid = int(cert_id)
+        result["certificate_asa"] = cid
+        result["lora_cert_url"] = f"https://lora.algokit.io/testnet/asset/{cid}"
+
+    result["lora_url"] = f"{LORA_TESTNET_APP}/{app_id}"
+    return result
+
+
 def navitrust_shipment_box_refs(shipment_id: str) -> list[BoxReference]:
     """
     All per-shipment box keys (8 refs — Algorand max per application call).
@@ -420,45 +547,12 @@ def read_shipment_status(shipment_id: str) -> str:
 
 
 def read_shipment_full(shipment_id: str) -> dict[str, Any]:
-    """NaviTrust: decode status box + optional route via get_shipment simulate would be ideal; use boxes."""
-    status = read_shipment_status(shipment_id)
-    out: dict[str, Any] = {
-        "shipment_id": shipment_id,
-        "status": status if status != "Unregistered" else "Not_Found",
-        "funds_microalgo": 0,
-        "risk_score": 0,
-        "route": "",
-        "verdict": None,
-        "certificate_asa": None,
-        "app_id": APP_ID,
-        "source": "algorand_box_storage",
-        "lora_url": f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else "",
-    }
-    if not APP_ID or status in ("Unknown", "Unregistered", "Not_Found"):
-        return out
-    if use_navitrust():
-        for prefix, key in (
-            ("fn_", "funds_microalgo"),
-            ("rs_", "risk_score"),
-            ("rt_", "route"),
-            ("vd_", "verdict"),
-            ("ce_", "certificate_asa"),
-        ):
-            try:
-                name = _navi_str_key_box_name(prefix.encode("utf-8"), shipment_id)
-                box_resp = algorand.client.algod.application_box_by_name(APP_ID, name)
-                raw = base64.b64decode(box_resp["value"])
-                if key in ("funds_microalgo", "risk_score", "certificate_asa"):
-                    if len(raw) == 8:
-                        out[key] = int.from_bytes(raw, "big")
-                else:
-                    out[key] = _decode_arc4_string(raw)
-            except Exception as e:
-                logger.debug("box read %s: %s", key, e)
-        cert = out.get("certificate_asa")
-        if cert:
-            cid = int(cert)
-            out["lora_cert_url"] = f"https://lora.algokit.io/testnet/asset/{cid}"
+    """Thin wrapper: single source is get_shipment_from_chain (boxes + SQLite metadata)."""
+    out = get_shipment_from_chain(shipment_id)
+    vj = out.get("verdict_json")
+    out["verdict"] = vj
+    if not out.get("lora_url") and out.get("app_id"):
+        out["lora_url"] = f"{LORA_TESTNET_APP}/{int(out['app_id'])}"
     return out
 
 
@@ -468,6 +562,10 @@ def record_verdict_chain(
     risk_score: int,
     note: Optional[bytes] = None,
 ) -> Optional[dict]:
+    """
+    Submit record_verdict via Algokit AppClient (not raw AtomicTransactionComposer).
+    Truncates verdict JSON to 4000 chars (ARC4 string budget; contract stores bytes).
+    """
     if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
         return None
     try:
@@ -476,7 +574,7 @@ def record_verdict_chain(
         result = app_client.send.call(
             params=AppClientMethodCallParams(
                 method="record_verdict",
-                args=[shipment_id, verdict_json[:3500], risk_score],
+                args=[shipment_id, verdict_json[:4000], risk_score],
                 sender=deployer.address,
                 note=note[:1000] if note else None,
                 box_references=navitrust_shipment_box_refs(shipment_id),
@@ -517,6 +615,10 @@ def legacy_report_disaster(shipment_id: str, reasoning_hash: str) -> Optional[di
 
 
 def settle_shipment_chain(shipment_id: str) -> Optional[dict]:
+    """
+    Submit settle_shipment via Algokit; certificate ASA ID from result.abi_return
+    (Algokit equivalent of ATC abi_results[0].return_value).
+    """
     if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
         return None
     try:
@@ -812,15 +914,29 @@ def indexer_recent_app_txns(limit: int = 20) -> List[dict]:
 
 
 def global_stats_navitrust() -> dict:
-    out = {
+    """Global counters from chain global state (preferred) or box enumeration; includes escrow + Lora URLs."""
+    out: Dict[str, Any] = {
         "total_shipments": 0,
         "total_settled": 0,
         "total_disputed": 0,
         "app_id": APP_ID,
         "source": "algorand_box_enumeration",
+        "escrow_total_algo": None,
+        "contract_app_address": None,
+        "lora_contract_url": None,
     }
     if not APP_ID:
         return out
+    try:
+        app_addr = get_application_address(APP_ID)
+        acct = algorand.client.algod.account_info(app_addr)
+        escrow_algo = round(int(acct.get("amount", 0)) / 1_000_000.0, 4)
+        out["escrow_total_algo"] = escrow_algo
+        out["contract_app_address"] = app_addr
+        out["lora_contract_url"] = f"https://lora.algokit.io/testnet/account/{app_addr}"
+    except Exception as e:
+        logger.debug("global_stats_navitrust balance: %s", e)
+
     gs = get_display_global_state(APP_ID)
     if gs and "total_shipments" in gs:
         out["total_shipments"] = int(gs.get("total_shipments") or 0)
