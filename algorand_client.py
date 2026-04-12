@@ -610,6 +610,8 @@ def register_navitrust(shipment_id: str, supplier: str, route: str) -> dict:
             method="register_shipment",
             args=[shipment_id, supplier, route],
             sender=deployer.address,
+            box_references=navitrust_shipment_box_refs(shipment_id, include_supplier_rep=False),
+            extra_fee=AlgoAmount(micro_algo=4000),
         )
     )
     tx_id = result.tx_ids[0] if result.tx_ids else None
@@ -693,6 +695,8 @@ def build_fund_shipment_txns_b64(payer_address: str, shipment_id: str, micro_alg
             method="fund_shipment",
             args=[shipment_id, twos],
             sender=payer_address,
+            box_references=navitrust_shipment_box_refs(shipment_id, include_supplier_rep=False),
+            extra_fee=AlgoAmount(micro_algo=1000),
         )
     )
     txn_mod.assign_group_id(built.transactions)
