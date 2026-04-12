@@ -20,6 +20,7 @@ def test_navitrust_abi_methods():
         "fund_shipment",
         "record_verdict",
         "settle_shipment",
-        "get_shipment",
+        "update_oracle",
+        "get_global_stats",
     ):
         assert required in names, f"missing ABI method {required}"

@@ -1,6 +1,7 @@
-"""Deploy NaviTrust to the network selected by AlgoKit environment (.env)."""
+"""Deploy NaviTrust to Algorand TestNet (public algod; deployer from DEPLOYER_MNEMONIC)."""
 
 import logging
+import os
 
 import algokit_utils
 
@@ -10,7 +11,12 @@ logger = logging.getLogger(__name__)
 def deploy() -> None:
     from smart_contracts.artifacts.navi_trust.navi_trust_client import NaviTrustFactory
 
-    algorand = algokit_utils.AlgorandClient.from_environment()
+    # Use public TestNet algod — from_environment() often points at localnet (127.0.0.1) and breaks deploy.
+    net = (os.environ.get("ALGO_NETWORK") or "testnet").strip().lower()
+    if net == "mainnet":
+        algorand = algokit_utils.AlgorandClient.mainnet()
+    else:
+        algorand = algokit_utils.AlgorandClient.testnet()
     deployer_ = algorand.account.from_environment("DEPLOYER")
 
     factory = algorand.client.get_typed_app_factory(

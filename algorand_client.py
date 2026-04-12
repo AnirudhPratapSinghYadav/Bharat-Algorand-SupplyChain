@@ -95,16 +95,16 @@ def _arc4_method_selector_hex(signature: str) -> str:
 def _build_navitrust_arc4_name_map() -> Dict[str, str]:
     """Map 8-char hex selector -> method name for NaviTrust ARC-4 methods."""
     specs = [
-        ("register_shipment", ["string", "address", "string"]),
-        ("fund_shipment", ["string", "pay"]),
-        ("record_verdict", ["string", "string", "uint64"]),
-        ("settle_shipment", ["string"]),
-        ("get_shipment", ["string"]),
-        ("get_global_stats", []),
+        ("register_shipment", ["string", "address", "string"], "void"),
+        ("fund_shipment", ["string", "pay"], "void"),
+        ("record_verdict", ["string", "string", "uint64"], "void"),
+        ("settle_shipment", ["string"], "uint64"),
+        ("update_oracle", ["address"], "void"),
+        ("get_global_stats", [], "(uint64,uint64,uint64)"),
     ]
     out: Dict[str, str] = {}
-    for name, types in specs:
-        sig = f"{name}({','.join(types)})"
+    for name, types, ret in specs:
+        sig = f"{name}({','.join(types)}){ret}"
         out[_arc4_method_selector_hex(sig)] = name
     return out
 
@@ -117,7 +117,7 @@ METHOD_ACTION_LABELS = {
     "record_verdict": "Verdict recorded",
     "settle_shipment": "Shipment settled",
     "fund_shipment": "Escrow funded",
-    "get_shipment": "Shipment lookup",
+    "update_oracle": "Oracle address updated",
     "get_global_stats": "Global stats lookup",
 }
 
@@ -342,9 +342,8 @@ def _decode_arc4_string(raw: bytes) -> str:
 
 
 def _navi_str_key_box_name(prefix: bytes, shipment_id: str) -> bytes:
-    """BoxMap(String, _) key encoding: prefix + u16_be(len) + utf8 id."""
-    b = shipment_id.encode("utf-8")
-    return prefix + len(b).to_bytes(2, "big") + b
+    """BoxMap key encoding: prefix + UTF-8 shipment id (matches Puya BoxMap[Bytes] keys)."""
+    return prefix + shipment_id.encode("utf-8")
 
 
 def _navi_status_box_name(shipment_id: str) -> bytes:
@@ -360,7 +359,7 @@ def navitrust_shipment_box_refs(shipment_id: str, include_supplier_rep: bool) ->
     """Box references for a shipment (string-keyed maps + optional supplier reputation box)."""
     if not APP_ID:
         return []
-    prefixes = (b"st_", b"sp_", b"by_", b"fn_", b"rk_", b"vd_", b"rt_", b"ce_")
+    prefixes = (b"st_", b"sp_", b"by_", b"fn_", b"rs_", b"vd_", b"rt_", b"ce_")
     refs = [BoxReference(APP_ID, _navi_str_key_box_name(pr, shipment_id)) for pr in prefixes]
     if include_supplier_rep:
         sup = read_navitrust_supplier_address(shipment_id)
@@ -423,7 +422,7 @@ def read_shipment_full(shipment_id: str) -> dict[str, Any]:
     if use_navitrust():
         for prefix, key in (
             ("fn_", "funds_microalgo"),
-            ("rk_", "risk_score"),
+            ("rs_", "risk_score"),
             ("rt_", "route"),
             ("vd_", "verdict"),
             ("ce_", "certificate_asa"),
@@ -644,10 +643,9 @@ def list_shipment_statuses_from_boxes() -> List[Tuple[str, str]]:
                 if not name_raw.startswith(prefix):
                     continue
                 rest = name_raw[len(prefix) :]
-                if len(rest) < 2:
+                if len(rest) < 1:
                     continue
-                ln = int.from_bytes(rest[:2], "big")
-                sid = rest[2 : 2 + ln].decode("utf-8", errors="ignore")
+                sid = rest.decode("utf-8", errors="ignore")
                 if sid in seen:
                     continue
                 seen.add(sid)
@@ -663,39 +661,22 @@ def list_shipment_statuses_from_boxes() -> List[Tuple[str, str]]:
 
 def build_register_shipment_txn_b64(sender_address: str, shipment_id: str, supplier: str, route: str) -> list[str]:
     """
-    Single unsigned app call (register_shipment) for the connected wallet to sign.
-    Contract allows any sender for register_shipment (oracle not required).
+    NaviTrust register_shipment is oracle-only on-chain; use POST /register-shipment (server-signed).
     """
-    if not APP_ID or not use_navitrust():
-        raise ValueError("NaviTrust APP_ID and ARC56 required")
-    st = read_shipment_status(shipment_id)
-    if st not in ("Unregistered", "Unknown"):
-        raise ValueError(f"Shipment already on-chain (status: {st}). Use a new shipment_id.")
-    ensure_navitrust_app_mbr()
-    app_client = algorand.client.get_app_client_by_id(
-        app_spec=_load_spec_text(),
-        app_id=APP_ID,
-        default_sender=sender_address,
+    raise ValueError(
+        "register_shipment must be sent by the oracle account. Use POST /register-shipment with server signing."
     )
-    built = app_client.create_transaction.call(
-        AppClientMethodCallParams(
-            method="register_shipment",
-            args=[shipment_id, supplier, route],
-            sender=sender_address,
-        )
-    )
-    return [base64.b64encode(encoding.msgpack_encode(t)).decode("ascii") for t in built.transactions]
 
 
 def build_fund_shipment_txns_b64(payer_address: str, shipment_id: str, micro_algo: int = 500_000) -> list[str]:
     """
     Unsigned payment + fund_shipment app call (same group) for wallet signing.
-    Min 500_000 micro-ALGO per contract.
+    Min 100_000 micro-ALGO (0.1 ALGO) per on-chain contract rule.
     """
     if not APP_ID or not use_navitrust():
         raise ValueError("NaviTrust APP_ID and ARC56 required")
-    if micro_algo < 500_000:
-        raise ValueError("Minimum funding is 500000 microAlgo (0.5 ALGO)")
+    if micro_algo < 100_000:
+        raise ValueError("Minimum funding is 100000 microAlgo (0.1 ALGO)")
     app_addr = get_application_address(APP_ID)
     sp = algorand.client.algod.suggested_params()
     pay = txn_mod.PaymentTxn(payer_address, sp, app_addr, micro_algo)
@@ -725,8 +706,8 @@ def fund_shipment_oracle_microalgo(shipment_id: str, micro_algo: int) -> Optiona
     if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
         logger.warning("fund_shipment_oracle: missing oracle, APP_ID, or not NaviTrust")
         return None
-    if micro_algo < 500_000:
-        raise ValueError("Minimum funding is 500000 microAlgo")
+    if micro_algo < 100_000:
+        raise ValueError("Minimum funding is 100000 microAlgo (0.1 ALGO)")
     pk = algosdk_mnemonic.to_private_key(ORACLE_MNEMONIC.strip())
     addr = address_from_private_key(pk)
     b64s = build_fund_shipment_txns_b64(addr, shipment_id, micro_algo)
