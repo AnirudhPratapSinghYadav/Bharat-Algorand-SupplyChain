@@ -96,6 +96,53 @@ def _box_seeded(shipment_id: str) -> bool:
     return st not in ("Unregistered", "Unknown")
 
 
+def _maybe_retry_settle_pending(sid: str, spec: dict, summary: dict[str, dict]) -> None:
+    """
+    If a prior run registered + funded + verdict but settle failed (e.g. box-ref bug),
+    retry settle when still In_Transit with escrow. Skips Disputed rows.
+    """
+    if not spec.get("settle"):
+        return
+    status = chain.read_shipment_status(sid)
+    if status in ("Unregistered", "Unknown", "Settled"):
+        return
+    if status == "Disputed":
+        return
+    full = chain.read_shipment_full(sid)
+    funds = int(full.get("funds_microalgo") or 0)
+    if funds < 100_000:
+        return
+    logger.info(
+        "=== Retry settle_shipment %s (status=%s, escrow=%s microAlgo) ===",
+        sid,
+        status,
+        funds,
+    )
+    res = chain.settle_shipment_chain(sid)
+    if not res:
+        logger.warning("settle_shipment retry failed for %s", sid)
+        return
+    summary.setdefault(sid, {})
+    summary[sid]["skipped"] = True
+    summary[sid]["settle_tx"] = res.get("tx_id")
+    summary[sid]["cert_asa"] = res.get("certificate_asa_id")
+    summary[sid]["recovered_settle"] = True
+    _merge_audit(
+        {
+            sid: [
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "sentinel_score": int(spec.get("risk") or 0),
+                    "verdict": "SETTLE",
+                    "reasoning_narrative": "Shipment settled on-chain (retry after prior failure).",
+                    "summary": "Settled",
+                    "tx_id": res.get("tx_id"),
+                }
+            ]
+        }
+    )
+
+
 def _fund_contract_mbr(algorand: AlgorandClient, deployer_addr: str, app_address: str) -> None:
     deployer_bal = float(algorand.account.get_information(deployer_addr).amount.algo)
     app_bal = float(algorand.account.get_information(app_address).amount.algo)
@@ -228,8 +275,9 @@ def main() -> None:
     for spec in DEMO_ROWS:
         sid = spec["id"]
         if _box_seeded(sid):
-            logger.info("%s already seeded on-chain — skipping chain steps", sid)
+            logger.info("%s already seeded on-chain — skipping register/fund/verdict", sid)
             summary[sid] = {"skipped": True}
+            _maybe_retry_settle_pending(sid, spec, summary)
             continue
 
         route = spec["route"]
@@ -327,6 +375,12 @@ def main() -> None:
         print(_line("Register", delhi.get("register_tx")))
         print(_line("Fund", delhi.get("fund_tx")))
         print(_line("Verdict", delhi.get("verdict_tx")))
+        print(_line("Settle", delhi.get("settle_tx")))
+        if cert and int(cert) > 0:
+            print(f"    Cert:   {LORA_ASSET}/{cert}")
+    elif delhi.get("settle_tx"):
+        cert = delhi.get("cert_asa")
+        print("  SHIP_DELHI_003   Settled     (recovered settle from prior failed run)")
         print(_line("Settle", delhi.get("settle_tx")))
         if cert and int(cert) > 0:
             print(f"    Cert:   {LORA_ASSET}/{cert}")
