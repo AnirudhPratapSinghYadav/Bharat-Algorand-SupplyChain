@@ -1,5 +1,8 @@
 from dotenv import load_dotenv
-load_dotenv(override=True)
+
+# Shell-exported vars (e.g. ORACLE_MNEMONIC in the same session) must win over .env
+# placeholders — use default override=False. See .env.example for PowerShell one-liners.
+load_dotenv()
 
 import os
 import json
