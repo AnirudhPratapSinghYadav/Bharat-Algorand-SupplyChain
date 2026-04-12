@@ -1136,6 +1136,13 @@ body:has(.nt-landing) {
   text-shadow: 0 0 40px rgba(0, 212, 255, 0.08);
 }
 
+.nt-cta-lead {
+  margin: -0.5rem 0 1.25rem;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: rgba(226, 232, 240, 0.82);
+}
+
 .nt-cta-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1257,4 +1264,296 @@ body:has(.nt-landing) {
   html:has(.nt-landing) {
     scroll-behavior: smooth;
   }
+}
+
+/* Landing demos (DemoStory) */
+.nt-demo-section-lead {
+  max-width: 42rem;
+  margin-bottom: 1rem;
+  line-height: 1.6;
+}
+
+.nt-demo-section-lead em {
+  font-style: italic;
+  color: #cbd5e1;
+}
+
+.nt-demo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  gap: 1.25rem;
+  align-items: stretch;
+}
+
+.nt-demo-card {
+  padding: 1.35rem 1.4rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-height: 12rem;
+}
+
+.nt-demo-card-title {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.nt-demo-card-desc {
+  margin: 0 0 1rem;
+  font-size: 0.875rem;
+  line-height: 1.55;
+  color: #94a3b8;
+}
+
+.nt-demo-btn {
+  align-self: flex-start;
+  margin-bottom: 0.25rem;
+}
+
+.nt-demo-btn-icon {
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+.nt-demo-btn--ghost {
+  border: 1px solid rgba(254, 202, 202, 0.55);
+  color: #f87171;
+  background: rgba(127, 29, 29, 0.15);
+}
+
+.nt-demo-btn--ghost:hover:not(:disabled) {
+  border-color: #fecaca;
+  background: rgba(127, 29, 29, 0.25);
+}
+
+.nt-demo-error {
+  margin: 0.75rem 0 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: #fca5a5;
+}
+
+.nt-demo-alert {
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  border-radius: 10px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.nt-demo-alert--breach {
+  background: rgba(220, 38, 38, 0.12);
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  color: #fecaca;
+}
+
+.nt-demo-journey-list {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.nt-demo-journey-item {
+  display: grid;
+  grid-template-columns: minmax(5.5rem, auto) 1fr auto;
+  align-items: center;
+  gap: 0.65rem 0.75rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid rgba(51, 65, 85, 0.35);
+  font-size: 0.8125rem;
+  color: #cbd5e1;
+}
+
+.nt-demo-journey-item--breach {
+  border-color: rgba(185, 28, 28, 0.45);
+  background: rgba(127, 29, 29, 0.2);
+  color: #fecaca;
+}
+
+.nt-demo-journey-label {
+  font-weight: 600;
+  color: #94a3b8;
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+}
+
+.nt-demo-journey-item--breach .nt-demo-journey-label {
+  color: #fca5a5;
+}
+
+.nt-demo-journey-temp {
+  font-variant-numeric: tabular-nums;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+.nt-demo-journey-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: auto;
+  padding: 0.2rem 0.45rem;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--nt-accent, #22d3ee);
+  text-decoration: none;
+  border: 1px solid rgba(34, 211, 238, 0.25);
+  white-space: nowrap;
+}
+
+.nt-demo-journey-link:hover {
+  background: rgba(34, 211, 238, 0.1);
+}
+
+.nt-demo-journey-pending {
+  font-size: 0.72rem;
+  color: #64748b;
+  font-style: italic;
+  justify-self: end;
+}
+
+.nt-demo-footnote {
+  margin: 1rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: #64748b;
+}
+
+.nt-demo-placeholder {
+  margin: 1rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: #64748b;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  border: 1px dashed rgba(100, 116, 139, 0.35);
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.nt-demo-ghost-headline {
+  margin: 0.85rem 0 0;
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1.45;
+  color: #fecaca;
+}
+
+.nt-demo-fraud-wrap {
+  margin-top: 0.5rem;
+}
+
+.nt-demo-fraud-wrap > div {
+  margin-bottom: 0;
+}
+
+/* Proof section clarity + spacing */
+.nt-proof-section-lead {
+  max-width: 40rem;
+  line-height: 1.6;
+}
+
+.nt-proof-section-lead code.nt-proof-inline-code {
+  font-size: 0.8em;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: #e2e8f0;
+}
+
+.nt-proof-offline-hint {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: #fcd34d;
+  background: rgba(120, 53, 15, 0.2);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+}
+
+.nt-proof-header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.45rem;
+  margin-bottom: 1.1rem;
+  padding-top: 0.15rem;
+}
+
+.nt-proof-panel {
+  padding-top: 1.45rem;
+}
+
+/* Quick proof — verify without wallet */
+.nt-quick-proof {
+  max-width: var(--nt-max);
+  margin: 0 auto;
+  padding: 0 1.25rem 2rem;
+  text-align: center;
+}
+
+.nt-quick-proof-label {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--nt-muted);
+}
+
+.nt-quick-proof-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-bottom: 0.65rem;
+}
+
+.nt-quick-proof-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.45rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: ui-monospace, monospace;
+  color: var(--nt-accent);
+  border: 1px solid rgba(0, 212, 255, 0.35);
+  background: rgba(0, 212, 255, 0.08);
+  text-decoration: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.nt-quick-proof-pill:hover {
+  background: rgba(0, 212, 255, 0.16);
+  border-color: rgba(0, 212, 255, 0.55);
+}
+
+.nt-quick-proof-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: rgba(168, 184, 204, 0.85);
+}
+
+.nt-footer-sep {
+  margin: 0 0.35rem;
+  opacity: 0.5;
+}
+
+.nt-footer-app {
+  font-size: 0.85rem;
+  color: var(--nt-muted);
+}
+
+.nt-footer-app a {
+  font-weight: 600;
 }

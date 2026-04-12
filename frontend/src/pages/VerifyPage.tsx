@@ -69,7 +69,22 @@ export default function VerifyPage() {
       : '';
   const certId = typeof q.data?.certificate_asa_id === 'number' ? q.data.certificate_asa_id : null;
 
-  const loraTxUrl = loraVerdict || (verdictTxId.length > 20 ? `https://lora.algokit.io/testnet/transaction/${verdictTxId}` : '');
+  const panel = q.data?.ai_verdict_panel as
+    | {
+        risk_score?: number;
+        decision?: string;
+        reasoning?: string;
+        weather_line?: string | null;
+        recorded_at?: string | null;
+        source?: string;
+        lora_verdict_tx_url?: string | null;
+      }
+    | undefined;
+
+  const loraTxUrl =
+    (typeof panel?.lora_verdict_tx_url === 'string' && panel.lora_verdict_tx_url) ||
+    loraVerdict ||
+    (verdictTxId.length > 20 ? `https://lora.algokit.io/testnet/transaction/${verdictTxId}` : '');
 
   return (
     <div className="dashboard-container" style={{ minHeight: '100vh', padding: 24 }}>
@@ -186,7 +201,44 @@ export default function VerifyPage() {
                 <strong>Funds locked:</strong> {(fundsMicro / 1e6).toFixed(2)} ALGO in escrow
               </p>
             )}
-            {verdictText ? (
+            {panel && (panel.reasoning || panel.decision != null || panel.risk_score != null) ? (
+              <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${badge.border}` }}>
+                <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', marginBottom: 8 }}>
+                  AI verdict
+                </div>
+                {panel.risk_score != null ? (
+                  <p style={{ margin: '0 0 6px', fontSize: '0.88rem', color: '#334155' }}>
+                    <strong>Risk score:</strong> {panel.risk_score} / 100
+                  </p>
+                ) : null}
+                {panel.decision ? (
+                  <p style={{ margin: '0 0 6px', fontSize: '0.88rem', color: '#334155' }}>
+                    <strong>Decision:</strong> {panel.decision}
+                  </p>
+                ) : null}
+                {(panel.reasoning || verdictText) ? (
+                  <p style={{ margin: '0 0 8px', fontSize: '0.88rem', color: '#1e293b', lineHeight: 1.55 }}>
+                    <strong>Reasoning:</strong> {panel.reasoning || verdictText}
+                  </p>
+                ) : null}
+                {panel.weather_line ? (
+                  <p style={{ margin: '0 0 8px', fontSize: '0.85rem', color: '#475569' }}>
+                    <strong>Weather:</strong> {panel.weather_line}
+                  </p>
+                ) : null}
+                {panel.recorded_at ? (
+                  <p style={{ margin: '0 0 8px', fontSize: '0.78rem', color: '#64748b' }}>
+                    <strong>Recorded:</strong> {panel.recorded_at}
+                  </p>
+                ) : null}
+                <p style={{ margin: '0 0 8px', fontSize: '0.75rem', color: '#64748b' }}>
+                  Source:{' '}
+                  {panel.source === 'algorand_transaction_note'
+                    ? 'Algorand transaction note (immutable)'
+                    : 'On-chain verdict box + audit trail'}
+                </p>
+              </div>
+            ) : verdictText ? (
               <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${badge.border}` }}>
                 <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', marginBottom: 6 }}>
                   Verdict
@@ -213,7 +265,8 @@ export default function VerifyPage() {
                   textDecoration: 'none',
                 }}
               >
-                View on Lora ↗ <ExternalLink size={16} />
+                {panel?.source === 'algorand_transaction_note' ? 'Read verdict on Lora ↗' : 'View on Lora ↗'}{' '}
+                <ExternalLink size={16} />
               </a>
             ) : (
               <p style={{ margin: '12px 0 0', fontSize: '0.78rem', color: '#94a3b8' }}>
@@ -234,8 +287,8 @@ export default function VerifyPage() {
 
           {st === 'Settled' && certId != null && certId > 0 ? (
             <div style={{ padding: 18, borderRadius: 12, border: '1px solid #bbf7d0', background: '#f0fdf4' }}>
-              <div style={{ fontWeight: 700, marginBottom: 8, color: '#14532d' }}>Settlement certificate</div>
-              <p style={{ margin: 0, fontSize: '0.88rem', color: '#166534' }}>ARC-69 style asset · ASA #{certId}</p>
+              <div style={{ fontWeight: 700, marginBottom: 8, color: '#14532d' }}>ARC-69 Settlement Certificate</div>
+              <p style={{ margin: 0, fontSize: '0.88rem', color: '#166534' }}>ASA #{certId}</p>
               <a
                 href={`https://lora.algokit.io/testnet/asset/${certId}`}
                 target="_blank"

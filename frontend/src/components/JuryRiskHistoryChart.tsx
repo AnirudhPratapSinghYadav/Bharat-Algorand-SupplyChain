@@ -33,7 +33,8 @@ export function JuryRiskHistoryChart() {
             const res = await axios.get<{ points?: RiskPoint[] }>(`${BACKEND_URL}/risk-history`, { timeout: 8000 });
             return res.data;
         },
-        staleTime: 60_000,
+        staleTime: 0,
+        refetchInterval: false,
     });
     const raw = q.data?.points || [];
     if (raw.length < 2) return null;

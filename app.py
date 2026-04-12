@@ -1867,26 +1867,17 @@ def get_shipments():
 
 
 @app.post("/run-jury")
-def run_jury(req: RunJuryRequest):
+async def run_jury(body: RunJuryRequest):
     """
     Four-agent jury: Weather Sentinel → Compliance Auditor → Fraud Detector → Chief Arbiter.
     Live Open-Meteo + real Algorand boxes; Gemini with OpenAI + deterministic fallbacks for JSON.
     """
-    shipment_id = (req.shipment_id or "").strip()
+    shipment_id = body.shipment_id.strip()
+    destination_city = body.destination_city.strip()
     if not shipment_id:
         raise HTTPException(status_code=400, detail="shipment_id required")
-
-    destination_city = (req.destination_city or "").strip()
     if not destination_city:
-        with get_db() as conn:
-            row = conn.execute("SELECT destination FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
-        if row and row["destination"]:
-            destination_city = str(row["destination"]).split(",")[0].strip()
-    if not destination_city:
-        raise HTTPException(
-            status_code=400,
-            detail="destination_city required (or save destination on the shipment row in SQLite).",
-        )
+        raise HTTPException(status_code=400, detail="destination_city required")
 
     with get_db() as conn:
         row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()

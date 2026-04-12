@@ -4,31 +4,24 @@ import { LANDING_IMAGES } from './landingAssets';
 const STEPS = [
   {
     n: '01',
-    title: 'Register shipment',
-    desc: 'Create an on-chain record tied to your lane and parties.',
-    img: LANDING_IMAGES.steps.load,
-    alt: 'Port crane loading shipping containers at a terminal',
+    title: 'Lock escrow',
+    desc: 'Buyer sends ALGO to the smart contract — not to us. Funds stay locked until the rules pass.',
+    img: LANDING_IMAGES.steps.contract,
+    alt: 'Smart contract securing funds',
   },
   {
     n: '02',
-    title: 'Lock funds',
-    desc: 'Escrow secures value until rules encoded in the contract pass.',
-    img: LANDING_IMAGES.steps.contract,
-    alt: 'Server room with network equipment representing smart contract infrastructure',
+    title: 'AI jury decides',
+    desc: 'Agents read weather, telemetry, and on-chain state. The outcome is prepared for the oracle call.',
+    img: LANDING_IMAGES.steps.ai,
+    alt: 'Analytics and AI risk assessment',
   },
   {
     n: '03',
-    title: 'AI evaluates risk',
-    desc: 'Agents assess telemetry and events against your policy.',
-    img: LANDING_IMAGES.steps.ai,
-    alt: 'Analytics dashboard with charts for operational risk monitoring',
-  },
-  {
-    n: '04',
-    title: 'Settlement + certificate',
-    desc: 'Automatic release or hold—with an immutable audit trail.',
+    title: 'Auto settlement',
+    desc: 'Verdict on-chain, escrow released or held, and a unique certificate ASA when you settle.',
     img: LANDING_IMAGES.steps.delivery,
-    alt: 'Freight truck at a logistics facility for final delivery and unloading',
+    alt: 'Delivery and settlement',
   },
 ];
 
@@ -39,7 +32,7 @@ export function StepsSection() {
         How it works
       </h2>
       <p className="nt-section-lead">
-        Four steps from registration to provable outcome.
+        Three steps: escrow, jury, settlement — all verifiable on Algorand.
       </p>
       <div className="scroll-wrapper scroll-wrapper--steps">
         <div className="scroll-wrapper__strip nt-steps-scroll">

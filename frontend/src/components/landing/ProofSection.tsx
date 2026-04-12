@@ -18,7 +18,7 @@ type VerifyPayload = {
   explorer_url?: string;
 };
 
-/** Always-on representative snapshot when API is offline or empty — demo never looks broken. */
+/** Static sample when /verify is unreachable — not live ledger data. */
 const DEMO_SNAPSHOT: VerifyPayload = {
   shipment_id: 'SHIP_001',
   app_id: FALLBACK_APP_ID,
@@ -31,6 +31,8 @@ const DEMO_SNAPSHOT: VerifyPayload = {
 export function ProofSection() {
   const [loading, setLoading] = useState(true);
   const [liveData, setLiveData] = useState<VerifyPayload | null>(null);
+  /** `network` = request failed; `empty` = API ok but no shipment id to verify */
+  const [loadIssue, setLoadIssue] = useState<'network' | 'empty' | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,15 +48,24 @@ export function ProofSection() {
           else if (rows?.length && rows[0]?.shipment_id) shipmentId = rows[0].shipment_id;
         }
         if (!shipmentId) {
-          if (!cancelled) setLiveData(null);
+          if (!cancelled) {
+            setLiveData(null);
+            setLoadIssue('empty');
+          }
           return;
         }
         const res = await axios.get<VerifyPayload>(`${BACKEND_URL}/verify/${encodeURIComponent(shipmentId)}`, {
           timeout: API_TIMEOUT,
         });
-        if (!cancelled) setLiveData(res.data);
+        if (!cancelled) {
+          setLiveData(res.data);
+          setLoadIssue(null);
+        }
       } catch {
-        if (!cancelled) setLiveData(null);
+        if (!cancelled) {
+          setLiveData(null);
+          setLoadIssue('network');
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -74,14 +85,16 @@ export function ProofSection() {
     (oc && typeof oc.status === 'string' ? oc.status : view.on_chain_status) || 'IN_TRANSIT';
   const score = view.latest_verdict?.sentinel_score;
   const verdict = view.latest_verdict?.verdict || '—';
+  const riskDisplay = score != null ? `${score} / 100` : '—';
 
   return (
     <section className="nt-section" id="nt-proof" aria-labelledby="nt-proof-title">
       <h2 id="nt-proof-title" className="nt-section-title">
         See it on-chain
       </h2>
-      <p className="nt-section-lead">
-        Representative verify payload—updates live when your API is reachable.
+      <p className="nt-section-lead nt-proof-section-lead">
+        Same shape as <code className="nt-proof-inline-code">GET /verify/&lt;shipment&gt;</code>. Numbers below are{' '}
+        <strong>live from your API</strong> when the request succeeds; otherwise a fixed sample so the layout never looks empty.
       </p>
       <div className="nt-proof-mock">
         <div className="nt-proof-stage">
@@ -108,7 +121,7 @@ export function ProofSection() {
               </div>
               <div className="nt-proof-hud-item">
                 <span className="nt-proof-hud-label">Risk score</span>
-                <span className="nt-proof-hud-value">{score != null ? `${score} / 100` : '23 / 100'}</span>
+                <span className="nt-proof-hud-value">{riskDisplay}</span>
               </div>
             </div>
 
@@ -118,9 +131,16 @@ export function ProofSection() {
                   Syncing live testnet data…
                 </p>
               )}
+              {!loading && loadIssue && !isLive ? (
+                <p className="nt-proof-offline-hint" role="status">
+                  {loadIssue === 'network'
+                    ? 'Could not reach the API — showing a static sample. Start the backend and refresh.'
+                    : 'No shipment id from /bootstrap — showing a static sample. Seed data or set VITE_LANDING_DEMO_SHIPMENT_ID.'}
+                </p>
+              ) : null}
               <div className="nt-proof-header">
                 <div className={isLive ? 'nt-badge' : 'nt-badge nt-badge--muted'}>
-                  {isLive ? 'Live · testnet' : 'Demo snapshot'}
+                  {isLive ? 'Live · testnet' : 'Sample (offline)'}
                 </div>
                 <div className="nt-proof-console-label">Verification snapshot</div>
               </div>

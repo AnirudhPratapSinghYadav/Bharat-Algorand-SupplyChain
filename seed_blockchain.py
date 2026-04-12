@@ -101,7 +101,8 @@ def _fund_contract_mbr(algorand: AlgorandClient, deployer_addr: str, app_address
     app_bal = float(algorand.account.get_information(app_address).amount.algo)
     logger.info("Deployer balance : %s ALGO", deployer_bal)
     logger.info("Contract balance : %s ALGO", app_bal)
-    mbr_needed = max(0, 0.5 - app_bal)
+    # Extra headroom for box growth + inner ASA mint after escrow payout (settle).
+    mbr_needed = max(0, 1.2 - app_bal)
     fund_amount = min(mbr_needed, deployer_bal - 0.15) if mbr_needed > 0 else 0
     if fund_amount > 0.01:
         logger.info("Funding contract with %.3f ALGO for box MBR...", fund_amount)

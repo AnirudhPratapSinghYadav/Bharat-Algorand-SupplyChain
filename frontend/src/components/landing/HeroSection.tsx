@@ -4,13 +4,12 @@ export function HeroSection() {
   return (
     <section className="nt-hero" aria-labelledby="nt-hero-title">
       <div className="nt-hero-copy">
-        <span className="nt-hero-eyebrow">Algorand · supply chain integrity</span>
+        <span className="nt-hero-eyebrow">Algorand · escrow · immutable verdicts</span>
         <h1 id="nt-hero-title">
-          <span className="nt-hero-highlight">Trust Every Shipment</span>
-          <span className="nt-hero-title-rest">. Prove Every Transaction.</span>
+          <span className="nt-hero-highlight">The AI Court for Supply Chain Disputes</span>
         </h1>
         <p className="nt-hero-sub">
-          AI + blockchain powered supply chain verification on Algorand.
+          Buyer locks ALGO. The AI jury examines the evidence. The verdict is written to Algorand — forever.
         </p>
       </div>
       <div className="nt-hero-visual">

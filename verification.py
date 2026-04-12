@@ -29,10 +29,16 @@ LORA_ASSET = "https://lora.algokit.io/testnet/asset"
 
 # ARC-4 selector (first 4 bytes of SHA-512/256 of UTF-8 method signature) → signature string
 _ARC4_SELECTOR_TO_SIG: Dict[str, str] = {}
+_ARC56_LOADED_MTIME: float = -1.0
 
 
 def _abi_arg_types(method_obj: dict) -> List[str]:
     return [str(a.get("type", "")).lower() for a in (method_obj.get("args") or [])]
+
+
+def _abi_return_type(method_obj: dict) -> str:
+    ret = method_obj.get("returns") or {}
+    return str(ret.get("type", "void"))
 
 
 def _register_arc56_file(path: Path) -> None:
@@ -47,16 +53,25 @@ def _register_arc56_file(path: Path) -> None:
         if not name:
             continue
         types = _abi_arg_types(m)
-        sig = f"{name}({','.join(types)})"
+        rtype = _abi_return_type(m)
+        sig = f"{name}({','.join(types)}){rtype}"
         h = hashlib.new("sha512_256", sig.encode("utf-8")).digest()[:4].hex()
         _ARC4_SELECTOR_TO_SIG[h] = sig
 
 
 def _ensure_arc4_map() -> None:
-    if _ARC4_SELECTOR_TO_SIG:
+    """Reload selectors when artifacts/NaviTrust.arc56.json changes (matches algorand_client hashing)."""
+    global _ARC56_LOADED_MTIME
+    path = chain.arc56_spec_path()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    if mtime == _ARC56_LOADED_MTIME and _ARC4_SELECTOR_TO_SIG:
         return
-    _register_arc56_file(chain.arc56_spec_path())
-    # Runtime NaviTrust calls not always in checked-in ARC56 — common settlement path
+    _ARC4_SELECTOR_TO_SIG.clear()
+    _ARC56_LOADED_MTIME = mtime
+    _register_arc56_file(path)
     for extra in ("report_disaster_delay(string)", "report_disaster_delay(string,string)"):
         h = hashlib.new("sha512_256", extra.encode("utf-8")).digest()[:4].hex()
         _ARC4_SELECTOR_TO_SIG[h] = extra

@@ -696,7 +696,17 @@ def build_fund_shipment_txns_b64(payer_address: str, shipment_id: str, micro_alg
         )
     )
     txn_mod.assign_group_id(built.transactions)
-    return [base64.b64encode(encoding.msgpack_encode(t)).decode("ascii") for t in built.transactions]
+    transactions = built.transactions
+    encoded: list[str] = []
+    for t in transactions:
+        if isinstance(t, bytes):
+            encoded.append(base64.b64encode(t).decode("ascii"))
+        else:
+            packed = encoding.msgpack_encode(t)
+            if isinstance(packed, str):
+                packed = packed.encode("latin-1")
+            encoded.append(base64.b64encode(packed).decode("ascii"))
+    return encoded
 
 
 def fund_shipment_oracle_microalgo(shipment_id: str, micro_algo: int) -> Optional[dict]:
