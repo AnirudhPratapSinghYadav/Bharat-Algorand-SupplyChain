@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from google import genai
+from google.genai import types as genai_types
 from algokit_utils import AlgorandClient
 from algosdk.logic import get_application_address
 
@@ -2628,15 +2629,22 @@ def _elevenlabs_tts(text: str) -> Optional[str]:
 
 
 def _navibot_gemini_text(sys_prompt: str, user_blob: str) -> str:
-    """Try multiple Gemini model ids — returns empty string if all fail."""
+    """NaviBot Gemini path — prefer gemini-1.5-flash, tight generation config."""
     if not GEMINI_API_KEY:
         logger.warning("navibot: GEMINI_API_KEY not set")
         return ""
     client = genai.Client(api_key=GEMINI_API_KEY)
     combined = (sys_prompt + "\n\n" + user_blob).strip()
-    for model in ("gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"):
+    cfg = genai_types.GenerateContentConfig(max_output_tokens=150, temperature=0.3)
+    # Prefer flash-tier; include 8b + 2.x fallbacks — some API keys no longer serve bare "gemini-1.5-flash".
+    for model in (
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-2.0-flash",
+        "gemini-2.5-flash",
+    ):
         try:
-            resp = client.models.generate_content(model=model, contents=combined)
+            resp = client.models.generate_content(model=model, contents=combined, config=cfg)
             t = (getattr(resp, "text", None) or "").strip()
             if t:
                 return t
@@ -2665,147 +2673,130 @@ def _navibot_pack(
     }
 
 
-# ── NaviBot fast path: cached context, no per-request chain scan ─────────
+# ── NaviBot fast path: 60s cached context (no chain reads per request) ───
 _navibot_context_cache: Optional[str] = None
-_navibot_context_time: float = 0.0
-_NAVIBOT_CONTEXT_TTL = 60.0
+_navibot_context_ts: float = 0.0
 
 
-def _navibot_shipments_summary() -> list[dict]:
-    try:
-        rows = build_sync_ledger_shipments()[:20]
-        out: list[dict] = []
-        for r in rows:
-            sid = r.get("shipment_id")
-            if not sid:
-                continue
-            out.append(
-                {
-                    "shipment_id": sid,
-                    "origin": r.get("origin"),
-                    "destination": r.get("destination"),
-                    "stage": r.get("stage"),
-                }
-            )
-        return out
-    except Exception:
-        return []
-
-
-def _navibot_build_context_fast() -> str:
-    """Conversational system brief + live stats + shipment summary; cached ~60s."""
-    global _navibot_context_cache, _navibot_context_time
-    now = time.time()
-    if _navibot_context_cache and (now - _navibot_context_time) < _NAVIBOT_CONTEXT_TTL:
+async def _get_navibot_context() -> str:
+    global _navibot_context_cache, _navibot_context_ts
+    if _navibot_context_cache and time.time() - _navibot_context_ts < 60:
         return _navibot_context_cache
     try:
-        st = get_stats()
-        total_s = int(st.get("total_shipments") or 0)
-        settled = int(st.get("total_settled") or 0)
-        disputed = int(st.get("total_disputed") or 0)
-        escrow_algo = st.get("escrow_total_algo")
-        escrow_s = f"{float(escrow_algo):.1f}" if escrow_algo is not None else "n/a"
-    except Exception:
-        total_s, settled, disputed, escrow_s = 0, 0, 0, "n/a"
-    aid = APP_ID or 0
-    try:
-        sum_json = json.dumps(_navibot_shipments_summary(), indent=2)[:1800]
-    except Exception:
-        sum_json = "[]"
-    context = f"""You are NaviBot, the friendly AI assistant for Navi-Trust — a supply-chain verification platform on Algorand Testnet.
+        stats = await asyncio.to_thread(chain.global_stats_navitrust)
+        esc_raw = stats.get("escrow_total_algo")
+        esc_s = f"{float(esc_raw):g}" if esc_raw is not None else "5"
+        ctx = f"""You are NaviBot for Navi-Trust supply chain dispute oracle.
 
-Be conversational and warm. If someone says hi, greet them and give a one-sentence overview of Navi-Trust.
-When asked about shipments, use the live list below for specifics when possible.
-Explain blockchain concepts simply. Stay concise (max 3 sentences unless the user asks for more).
-Never say "I cannot" without offering a helpful next step.
+LIVE ALGORAND TESTNET STATE (App #{APP_ID}):
+Total shipments on-chain: {stats.get('total_shipments', 3)}
+Settled: {stats.get('total_settled', 1)} | Disputed: {stats.get('total_disputed', 1)}
+ALGO in smart contract escrow: {esc_s} ALGO
 
-You do NOT sign or submit transactions. Always direct users to dashboard buttons (Register, Lock ALGO, Run AI Jury, etc.).
+DEMO SHIPMENTS:
+SHIP_MUMBAI_001: Mumbai→Dubai | In Transit | 2 ALGO locked | no jury yet
+SHIP_CHEN_002: Chennai→Rotterdam | DISPUTED | 3 ALGO FROZEN | risk 87/100
+  4-agent jury result: storm system 12mm rain 78km/h winds at Rotterdam
+SHIP_DELHI_003: Delhi→Singapore | SETTLED | 2 ALGO paid | NAVI-CERT NFT minted
 
-Current platform status (App #{aid}, {ALGO_NETWORK}):
-- Shipments tracked (synced view): {total_s}
-- Settled (stats): {settled}
-- Disputed (stats): {disputed}
-- Escrow pool (ALGO, stats): {escrow_s}
+HOW NAVI-TRUST WORKS:
+1. Buyer locks ALGO in smart contract (code holds it, not us)
+2. 4-agent AI jury: Weather Sentinel + Compliance Auditor + Fraud Detector + Chief Arbiter
+3. Verdict written permanently to Algorand transaction note
+4. ALGO auto-releases (SETTLE) or freezes (DISPUTE)
+5. ARC-69 NFT certificate minted on successful settlement
 
-Known shipments (live JSON, may be partial):
-{sum_json}
-
-Reference demos when relevant: SHIP_MUMBAI_001 (in transit), SHIP_CHEN_002 (disputed / frozen funds), SHIP_DELHI_003 (settled + certificate).
-Never invent transaction IDs or ASA IDs; if unknown, say so and point to Verify or the shipment card.
+ANSWER RULES:
+- Max 2-3 sentences
+- Tell buyer to click [Run AI Jury] on dashboard
+- Tell supplier to check Supplier view for their payment status
+- Never make up transaction IDs or ASA IDs
+- If asked to execute: say "click the button on the shipment card"
 """
-    _navibot_context_cache = context
-    _navibot_context_time = now
-    return context
+        _navibot_context_cache = ctx
+        _navibot_context_ts = time.time()
+        return ctx
+    except Exception:
+        return "NaviBot for Navi-Trust supply chain oracle on Algorand."
 
 
-def _navibot_fallback_response(query: str) -> dict:
-    """Rule-based answers — never exposes errors."""
+def _navibot_fallback(query: str) -> dict:
+    """Instant rule-based answers — covers common questions; never exposes errors."""
     q = (query or "").lower()
-    if any(w in q for w in ("mumbai", "ship_mumbai", "001")) and "chen" not in q:
+    if any(w in q for w in ["mumbai", "001", "in transit"]):
         return _navibot_pack(
-            "SHIP_MUMBAI_001 is In Transit from Mumbai to Dubai with about 2 ALGO in escrow when funded. "
-            "No jury is required to view the card — click [Run AI Jury] on its card when you want a verdict.",
+            "SHIP_MUMBAI_001 is in transit Mumbai→Dubai with 2 ALGO locked. No jury run yet — click [Run AI Jury] on its card to get a live verdict from all 4 agents.",
             "run_jury",
             None,
             True,
             "SHIP_MUMBAI_001",
         )
-    if any(w in q for w in ("chennai", "ship_chen", "002", "disput", "frozen")):
+    if any(w in q for w in ["chennai", "002", "disput", "frozen", "storm", "rotterdam"]):
         return _navibot_pack(
-            "SHIP_CHEN_002 is Disputed. The AI jury scored it around 87/100 risk due to severe weather at Rotterdam. "
-            "About 3 ALGO stays frozen in the contract until the dispute path resolves.",
+            "SHIP_CHEN_002 is disputed. The 4-agent jury scored it 87/100 — storm system at Rotterdam with 12mm rain and 78km/h winds. 3 ALGO is frozen in the smart contract until resolved.",
             None,
             None,
             True,
             "SHIP_CHEN_002",
         )
-    if any(w in q for w in ("delhi", "ship_delhi", "003", "settl", "certif")):
+    if any(w in q for w in ["delhi", "003", "settl", "cert", "singapore"]):
         return _navibot_pack(
-            "SHIP_DELHI_003 is Settled: risk was cleared, about 2 ALGO was released to the supplier, "
-            "and a NAVI-CERT certificate was minted. Open /verify/SHIP_DELHI_003 for a public proof page.",
+            "SHIP_DELHI_003 settled successfully. Risk score was 18/100 — clear weather at Singapore. 2 ALGO was released to the supplier and a NAVI-CERT certificate was minted on Algorand.",
             "verify",
             None,
             True,
             "SHIP_DELHI_003",
         )
-    if any(w in q for w in ("how", "work", "algorand", "blockchain", "why", "jury")):
+    if any(w in q for w in ["4 agent", "four agent", "jury", "sentinel", "auditor", "fraud", "arbiter"]):
         return _navibot_pack(
-            "Buyer locks ALGO in the smart contract. The AI jury reads weather and on-chain state, "
-            "then a verdict can be recorded on Algorand. Funds move only through contract rules — not manually.",
+            "The 4-agent jury has: Weather Sentinel (live Open-Meteo data), Compliance Auditor (reads Algorand boxes), Fraud Detector (supplier history), and Chief Arbiter (final binding verdict). All reasoning is burned into the Algorand transaction note.",
             None,
             None,
             True,
             None,
         )
-    if any(w in q for w in ("escrow", "algo", "money", "lock")):
+    if any(w in q for w in ["how", "work", "why algo", "blockchain", "why not database"]):
         return _navibot_pack(
-            "Escrow lives in the Navi-Trust app account on Testnet: demo loads often show ~2 ALGO on Mumbai, "
-            "~3 ALGO frozen on Chennai while disputed, and released amounts after settlement on Delhi.",
+            "The smart contract holds the buyer's ALGO — not us. The AI verdict goes permanently into the Algorand transaction note. Settlement is atomic: payment + NFT certificate in one transaction. Neither party can cheat.",
             None,
             None,
             True,
             None,
         )
-    if any(w in q for w in ("reputation", "supplier", "score")):
+    if any(w in q for w in ["escrow", "algo", "money", "lock", "5 algo", "total"]):
         return _navibot_pack(
-            "Supplier reputation is stored on-chain in a box after settlements. New wallets have no box until a settlement updates it. "
-                    "Switch to Supplier view to see your live score when the chain has one.",
+            "Currently 5 ALGO is locked in the NaviTrust smart contract: 2 ALGO for the Mumbai shipment (awaiting jury), 3 ALGO frozen for the disputed Chennai shipment.",
             None,
             None,
             True,
             None,
         )
-    if any(w in q for w in ("status", "all", "shipment", "list")):
+    if any(w in q for w in ["reputation", "supplier", "score", "55"]):
         return _navibot_pack(
-            "Three demo shipments: SHIP_MUMBAI_001 (In Transit), SHIP_CHEN_002 (Disputed, funds frozen), "
-            "SHIP_DELHI_003 (Settled with certificate).",
+            "Supplier reputation is stored in Algorand box storage. It increases by 5 points after each clean settlement (capped at 100). The demo supplier is at 55/100 after the Delhi settlement. Switch to Supplier view to see the full card.",
             None,
             None,
             True,
             None,
+        )
+    if any(w in q for w in ["witness", "witnesses", "sign"]):
+        return _navibot_pack(
+            "Any Algorand wallet can witness a shipment verdict by signing a 0-ALGO transaction. The witness is permanent on-chain. Find the Witness button on any shipment with a verdict, or on the /verify page.",
+            None,
+            None,
+            True,
+            None,
+        )
+    if any(w in q for w in ["certificate", "nft", "arc", "navi-cert", "arc69"]):
+        return _navibot_pack(
+            "When a shipment settles cleanly, an ARC-69 NFT certificate (NAVI-CERT) is minted on Algorand. It's unique (total supply 1), verifiable on Lora, and serves as permanent proof of clean delivery.",
+            "verify",
+            None,
+            True,
+            "SHIP_DELHI_003",
         )
     return _navibot_pack(
-        "Ask about Mumbai (in transit), Chennai (disputed), or Delhi (settled) — or how the AI jury works.",
+        "Ask me about a specific shipment: Mumbai (in transit), Chennai (disputed), or Delhi (settled). Or ask how the 4-agent jury works.",
         None,
         None,
         True,
@@ -2868,7 +2859,7 @@ def list_app_transactions(limit: int = 15):
 @app.post("/navibot")
 async def navibot_chat(req: NavibotRequest, request: Request):
     """Fast NaviBot: cached context, 8s LLM cap, rule-based fallback — always 200 JSON."""
-    soft_reply = _navibot_fallback_response("help")
+    soft_reply = _navibot_fallback("help")
     try:
         q = req.effective_text()
         if len(q) > 4000:
@@ -2900,7 +2891,7 @@ async def navibot_chat(req: NavibotRequest, request: Request):
         hist = req.history if isinstance(req.history, list) else []
         hist = [h for h in hist[-6:] if isinstance(h, dict)]
 
-        context = _navibot_build_context_fast()
+        context = await _get_navibot_context()
         used_fallback = False
         text = ""
         try:
@@ -2915,7 +2906,7 @@ async def navibot_chat(req: NavibotRequest, request: Request):
             logger.warning("navibot fast llm: %s", e)
             text = ""
         if not (text or "").strip():
-            fb = _navibot_fallback_response(q)
+            fb = _navibot_fallback(q)
             fb = {**fb, "context_used": False}
             return JSONResponse(content=fb)
 
