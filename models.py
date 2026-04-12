@@ -79,6 +79,15 @@ class SettleBody(BaseModel):
     shipment_id: str
 
 
+class SimulateEventBody(BaseModel):
+    """Supplier / demo: append one logistics signal to offchain_events.json (mirrors ARCHITECTURE §7.3)."""
+
+    shipment_id: str
+    event: str
+    severity: str = "medium"
+    timestamp: Optional[str] = None
+
+
 class FundShipmentBuildBody(BaseModel):
     """Build unsigned pay + fund_shipment group. Prefer buyer_address + amount_algo (ALGO)."""
 

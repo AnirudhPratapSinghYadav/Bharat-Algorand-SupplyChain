@@ -36,6 +36,7 @@ from models import (
     BlockchainState,
     RunJuryRequest,
     SettleBody,
+    SimulateEventBody,
     NavibotRequest,
     FundShipmentBuildBody,
     RegisterShipmentBody,
@@ -132,6 +133,32 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+# Current Generative Language API: prefer 2.x/2.5 flash; bare gemini-1.5-flash often 404s on v1beta.
+GEMINI_FLASH_MODELS: tuple[str, ...] = tuple(
+    m.strip()
+    for m in os.environ.get(
+        "GEMINI_MODEL_CHAIN",
+        "gemini-2.5-flash,gemini-2.0-flash,gemini-1.5-flash-8b,gemini-1.5-flash",
+    ).split(",")
+    if m.strip()
+)
+
+
+def _genai_generate_text_first_ok(contents: str) -> str:
+    """Try GEMINI_FLASH_MODELS in order; return first non-empty text or empty string."""
+    if not GEMINI_API_KEY:
+        return ""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    for model in GEMINI_FLASH_MODELS:
+        try:
+            resp = client.models.generate_content(model=model, contents=contents)
+            t = (getattr(resp, "text", None) or "").strip()
+            if t:
+                return t
+        except Exception as e:
+            logger.warning("gemini model=%s: %s", model, e)
+    return ""
 
 _NAVIBOT_HITS: dict[str, list[float]] = {}
 
@@ -811,11 +838,8 @@ class LogisticsSentryAgent:
         result = None
 
         try:
-            client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else genai.Client()
-            response = client.models.generate_content(
-                model="gemini-1.5-flash", contents=prompt
-            )
-            text = (response.text or "").strip().replace("```json", "").replace("```", "")
+            raw = _genai_generate_text_first_ok(prompt)
+            text = raw.replace("```json", "").replace("```", "").strip()
             result = json.loads(text)
             if result:
                 result["reasoning"] = _sanitize_llm_text(result.get("reasoning", ""))
@@ -966,11 +990,8 @@ class SettlementArbiterAgent:
         result = None
 
         try:
-            client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else genai.Client()
-            response = client.models.generate_content(
-                model="gemini-1.5-flash", contents=prompt
-            )
-            text = (response.text or "").strip().replace("```json", "").replace("```", "")
+            raw = _genai_generate_text_first_ok(prompt)
+            text = raw.replace("```json", "").replace("```", "").strip()
             result = json.loads(text)
             if result:
                 result["judgment"] = _sanitize_llm_text(result.get("judgment", ""))
@@ -1372,14 +1393,7 @@ def _clean_json_response(raw: str) -> dict:
 
 
 def _jury_gemini_generate_text(prompt: str) -> str:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY missing")
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    response = client.models.generate_content(
-        model="gemini-1.5-flash",
-        contents=prompt,
-    )
-    out = (response.text or "").strip()
+    out = _genai_generate_text_first_ok(prompt)
     if not out:
         raise RuntimeError("Gemini returned empty text")
     return out
@@ -1781,9 +1795,8 @@ class MitigationAuditorAgent:
             "If it is vague or empty, return 'REJECTED'. Return only the word."
         )
         try:
-            client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else genai.Client()
-            resp = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
-            return "APPROVED" in resp.text.upper()
+            txt = _genai_generate_text_first_ok(prompt)
+            return bool(txt) and "APPROVED" in txt.upper()
         except Exception as e:
             if _is_gemini_rate_limit(e):
                 logger.warning("Gemini 429 [MitigationAuditor] — using deterministic fallback")
@@ -2394,6 +2407,38 @@ def health():
     }
 
 
+@app.get("/protocol/display-global-state")
+def protocol_display_global_state():
+    """Filtered global state for /protocol page (supply-chain fields only)."""
+    aid = APP_ID if isinstance(APP_ID, int) else int(os.environ.get("APP_ID") or 0)
+    if not aid:
+        return {"app_id": None, "fields": {}}
+    return {"app_id": aid, "fields": chain.get_display_global_state(aid)}
+
+
+@app.post("/simulate-event")
+def simulate_event(body: SimulateEventBody):
+    """Append one logistics event to offchain_events.json (supplier / demo)."""
+    sid = (body.shipment_id or "").strip()
+    ev = (body.event or "").strip()
+    if not sid or not ev:
+        raise HTTPException(status_code=422, detail="shipment_id and event are required")
+    with get_db() as conn:
+        row = conn.execute("SELECT id FROM shipments WHERE id = ?", (sid,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=400, detail="Unknown shipment")
+    sev = (body.severity or "medium").strip().lower()
+    if sev not in ("low", "medium", "high", "critical"):
+        sev = "medium"
+    ts = (body.timestamp or "").strip()
+    if not ts:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entry = {"shipment_id": sid, "event": ev, "severity": sev, "timestamp": ts}
+    LOGISTICS_EVENTS.append(entry)
+    save_logistics_events()
+    return {"ok": True, "stored": entry, "total_events": len(LOGISTICS_EVENTS)}
+
+
 @app.get("/shipment/{shipment_id}")
 def get_shipment_public(shipment_id: str):
     """Always fresh chain + DB merge (not cached)."""
@@ -2630,20 +2675,14 @@ def _elevenlabs_tts(text: str) -> Optional[str]:
 
 
 def _navibot_gemini_text(sys_prompt: str, user_blob: str) -> str:
-    """NaviBot Gemini path — prefer gemini-1.5-flash, tight generation config."""
+    """NaviBot Gemini path — uses GEMINI_FLASH_MODELS + tight generation config."""
     if not GEMINI_API_KEY:
         logger.warning("navibot: GEMINI_API_KEY not set")
         return ""
     client = genai.Client(api_key=GEMINI_API_KEY)
     combined = (sys_prompt + "\n\n" + user_blob).strip()
     cfg = genai_types.GenerateContentConfig(max_output_tokens=150, temperature=0.3)
-    # Prefer flash-tier; include 8b + 2.x fallbacks — some API keys no longer serve bare "gemini-1.5-flash".
-    for model in (
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-8b",
-        "gemini-2.0-flash",
-        "gemini-2.5-flash",
-    ):
+    for model in GEMINI_FLASH_MODELS:
         try:
             resp = client.models.generate_content(model=model, contents=combined, config=cfg)
             t = (getattr(resp, "text", None) or "").strip()
@@ -2855,10 +2894,6 @@ def _navibot_fast_llm(context: str, history: List[dict], query: str) -> str:
         import google.generativeai as ggi
 
         ggi.configure(api_key=GEMINI_API_KEY)
-        gmodel = ggi.GenerativeModel(
-            "gemini-1.5-flash",
-            generation_config={"max_output_tokens": 150, "temperature": 0.3},
-        )
         msgs: List[dict] = []
         for m in history[-6:]:
             if not isinstance(m, dict):
@@ -2871,14 +2906,20 @@ def _navibot_fast_llm(context: str, history: List[dict], query: str) -> str:
                 {"role": "user" if role == "user" else "model", "parts": [text]}
             )
         full = f"{context}\n\nUser: {query}\nAnswer in 1-3 sentences:"
-        if msgs:
-            chat = gmodel.start_chat(history=msgs)
-            resp = chat.send_message(full)
-        else:
-            resp = gmodel.generate_content(full)
-        out = (getattr(resp, "text", None) or "").strip()
-        if out:
-            return out
+        gen_cfg = {"max_output_tokens": 150, "temperature": 0.3}
+        for model_name in GEMINI_FLASH_MODELS:
+            try:
+                gmodel = ggi.GenerativeModel(model_name, generation_config=gen_cfg)
+                if msgs:
+                    chat = gmodel.start_chat(history=msgs)
+                    resp = chat.send_message(full)
+                else:
+                    resp = gmodel.generate_content(full)
+                out = (getattr(resp, "text", None) or "").strip()
+                if out:
+                    return out
+            except Exception as e:
+                logger.warning("navibot legacy model=%s: %s", model_name, e)
     except Exception as e:
         logger.warning("navibot google.generativeai: %s", e)
     hist = _navibot_history_to_prompt(history)
