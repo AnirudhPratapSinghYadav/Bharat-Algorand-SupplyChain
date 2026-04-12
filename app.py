@@ -460,6 +460,7 @@ def get_shipment_from_chain(shipment_id: str) -> dict:
         "verdict_json": vj,
         "on_chain": oc,
         "database": rowd,
+        "certificate_asa": int(cid) if cid else None,
         "certificate_asa_id": cid or None,
         "lora_cert_url": oc.get("lora_cert_url") if isinstance(oc, dict) and oc.get("lora_cert_url") else (
             f"https://lora.algokit.io/testnet/asset/{cid}" if cid else None
@@ -1155,7 +1156,7 @@ async def get_weather_by_city(city: str):
             "description": desc,
             "is_risky": precip > 5 or wind > 50,
             "fetched_at": c.get("time"),
-            "source": "open-meteo.com",
+            "source": "open-meteo.com/live",
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Weather unavailable: {e}") from e
@@ -2674,8 +2675,8 @@ def _navibot_pack(
 
 
 # ── NaviBot fast path: 60s cached context (no chain reads per request) ───
-_navibot_context_cache: Optional[str] = None
-_navibot_context_ts: float = 0.0
+_navibot_context_cache: str | None = None
+_navibot_context_ts: float = 0
 
 
 async def _get_navibot_context() -> str:
@@ -2684,14 +2685,12 @@ async def _get_navibot_context() -> str:
         return _navibot_context_cache
     try:
         stats = await asyncio.to_thread(chain.global_stats_navitrust)
-        esc_raw = stats.get("escrow_total_algo")
-        esc_s = f"{float(esc_raw):g}" if esc_raw is not None else "5"
         ctx = f"""You are NaviBot for Navi-Trust supply chain dispute oracle.
 
 LIVE ALGORAND TESTNET STATE (App #{APP_ID}):
 Total shipments on-chain: {stats.get('total_shipments', 3)}
 Settled: {stats.get('total_settled', 1)} | Disputed: {stats.get('total_disputed', 1)}
-ALGO in smart contract escrow: {esc_s} ALGO
+ALGO in smart contract escrow: {stats.get('escrow_total_algo', 5)} ALGO
 
 DEMO SHIPMENTS:
 SHIP_MUMBAI_001: Mumbai→Dubai | In Transit | 2 ALGO locked | no jury yet
@@ -2720,8 +2719,8 @@ ANSWER RULES:
         return "NaviBot for Navi-Trust supply chain oracle on Algorand."
 
 
-def _navibot_fallback(query: str) -> dict:
-    """Instant rule-based answers — covers common questions; never exposes errors."""
+def _navibot_rule_match(query: str) -> Optional[dict]:
+    """Keyword-only answers (no Gemini). None → caller may run LLM."""
     q = (query or "").lower()
     if any(w in q for w in ["mumbai", "001", "in transit"]):
         return _navibot_pack(
@@ -2795,6 +2794,14 @@ def _navibot_fallback(query: str) -> dict:
             True,
             "SHIP_DELHI_003",
         )
+    return None
+
+
+def _navibot_fallback(query: str) -> dict:
+    """Rule-based answers — never exposes errors; includes generic prompt when no keyword match."""
+    r = _navibot_rule_match(query)
+    if r is not None:
+        return r
     return _navibot_pack(
         "Ask me about a specific shipment: Mumbai (in transit), Chennai (disputed), or Delhi (settled). Or ask how the 4-agent jury works.",
         None,
@@ -2841,13 +2848,45 @@ def _navibot_history_to_prompt(history: List[dict]) -> str:
 
 
 def _navibot_fast_llm(context: str, history: List[dict], query: str) -> str:
+    """Primary: google.generativeai GenerativeModel (Phase 7). Fallback: google-genai client."""
+    if not GEMINI_API_KEY:
+        return ""
+    try:
+        import google.generativeai as ggi
+
+        ggi.configure(api_key=GEMINI_API_KEY)
+        gmodel = ggi.GenerativeModel(
+            "gemini-1.5-flash",
+            generation_config={"max_output_tokens": 150, "temperature": 0.3},
+        )
+        msgs: List[dict] = []
+        for m in history[-6:]:
+            if not isinstance(m, dict):
+                continue
+            role = (m.get("role") or "user").strip()
+            text = (m.get("content") or m.get("text") or "").strip()
+            if not text:
+                continue
+            msgs.append(
+                {"role": "user" if role == "user" else "model", "parts": [text]}
+            )
+        full = f"{context}\n\nUser: {query}\nAnswer in 1-3 sentences:"
+        if msgs:
+            chat = gmodel.start_chat(history=msgs)
+            resp = chat.send_message(full)
+        else:
+            resp = gmodel.generate_content(full)
+        out = (getattr(resp, "text", None) or "").strip()
+        if out:
+            return out
+    except Exception as e:
+        logger.warning("navibot google.generativeai: %s", e)
     hist = _navibot_history_to_prompt(history)
     user_blob = (
         (f"Prior conversation:\n{hist}\n\n" if hist else "")
         + f"User question: {query}\n\nAnswer in 1-3 sentences. Be factual; do not invent tx or ASA ids."
     )
-    sys_prompt = context.strip()
-    return _navibot_gemini_text(sys_prompt, user_blob)
+    return _navibot_gemini_text(context.strip(), user_blob)
 
 
 @app.get("/transactions")
@@ -2868,7 +2907,7 @@ async def navibot_chat(req: NavibotRequest, request: Request):
         if not q:
             return JSONResponse(
                 content=_navibot_pack(
-                    "Ask me about a shipment or say ‘check SHIP_MUMBAI_001’. Use the dashboard to run a jury or settle.",
+                    "Ask me about a shipment or how the jury works.",
                     None,
                     None,
                     True,
@@ -2891,6 +2930,10 @@ async def navibot_chat(req: NavibotRequest, request: Request):
         hist = req.history if isinstance(req.history, list) else []
         hist = [h for h in hist[-6:] if isinstance(h, dict)]
 
+        rm = _navibot_rule_match(q)
+        if rm is not None:
+            return JSONResponse(content={**rm, "context_used": False})
+
         context = await _get_navibot_context()
         used_fallback = False
         text = ""
@@ -2910,12 +2953,24 @@ async def navibot_chat(req: NavibotRequest, request: Request):
             fb = {**fb, "context_used": False}
             return JSONResponse(content=fb)
 
-        action, sid_hint = _navibot_detect_action_and_shipment(q)
-        if action is None:
-            action = _navibot_action_hint(q, None)
-        if action == "view":
+        qlow = q.lower()
+        action: Optional[str] = None
+        shipment_id: Optional[str] = None
+        if any(w in qlow for w in ["run jury", "jury", "analyze"]):
+            action = "run_jury"
+        elif any(w in qlow for w in ["settle", "release", "pay"]):
+            action = "settle"
+        elif any(w in qlow for w in ["verify", "proof", "check"]):
             action = "verify"
-        shipment_id = req.shipment_id or sid_hint
+        for sid, word in [
+            ("SHIP_MUMBAI_001", "mumbai"),
+            ("SHIP_CHEN_002", "chennai"),
+            ("SHIP_DELHI_003", "delhi"),
+        ]:
+            if word in qlow or sid.lower() in qlow:
+                shipment_id = sid
+                break
+        shipment_id = req.shipment_id or shipment_id
         if action == "run_jury" and not shipment_id:
             shipment_id = "SHIP_MUMBAI_001"
         pack = _navibot_pack(text.strip(), action, None, used_fallback, shipment_id)
