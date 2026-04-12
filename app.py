@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 
 import requests
-from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -29,19 +29,15 @@ from algokit_utils import AlgorandClient
 from algosdk.logic import get_application_address
 
 import algorand_client as chain
-import verification as ver
 from models import (
     WeatherData,
     RiskPrediction,
     BlockchainState,
     RunJuryRequest,
-    SubmitMitigationRequest,
     SettleBody,
     NavibotRequest,
     FundShipmentBuildBody,
     RegisterShipmentBody,
-    RegisterShipmentBuildBody,
-    RegisterShipmentConfirmBody,
 )
 
 
@@ -442,10 +438,13 @@ def _append_register_log(entry: dict) -> None:
 
 
 def get_shipment_from_chain(shipment_id: str) -> dict:
+    """Full chain read + SQLite metadata (Phase 3 public /verify + /shipment)."""
     oc = chain.read_shipment_full(shipment_id) if APP_ID else {}
     with get_db() as conn:
         row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
     rowd = dict(row) if row else {}
+    cert = oc.get("certificate_asa") if isinstance(oc, dict) else None
+    cid = int(cert) if cert else 0
     return {
         "shipment_id": shipment_id,
         "origin": rowd.get("origin") or "",
@@ -453,6 +452,10 @@ def get_shipment_from_chain(shipment_id: str) -> dict:
         "status": oc.get("status") if isinstance(oc, dict) else "",
         "risk_score": int(oc.get("risk_score") or 0) if isinstance(oc, dict) else 0,
         "verdict_json": oc.get("verdict") if isinstance(oc, dict) else None,
+        "on_chain": oc,
+        "database": rowd,
+        "certificate_asa_id": cid or None,
+        "lora_cert_url": f"https://lora.algokit.io/testnet/asset/{cid}" if cid else None,
     }
 
 def _generate_reasoning_hash(text: str) -> str:
@@ -466,6 +469,59 @@ JURY_CACHE: dict[str, dict] = {}
 WEATHER_CACHE: dict[str, tuple] = {}
 WEATHER_CACHE_TTL = 300
 VERDICT_HISTORY_PATH = os.path.join(os.path.dirname(__file__) or ".", "audit_trail.json")
+
+# Phase 3: 15s in-memory API cache for /stats and /shipments
+API_CACHE_TTL_SEC = 15.0
+_STATS_CACHE: dict = {"ts": 0.0, "payload": None}
+_SHIPMENTS_CACHE: dict = {"ts": 0.0, "payload": None}
+
+
+def _time_ago_from_round_time(rt: Optional[int]) -> str:
+    if rt is None:
+        return "—"
+    try:
+        delta = int(time.time()) - int(rt)
+        if delta < 60:
+            return f"{delta}s ago"
+        if delta < 3600:
+            return f"{delta // 60}m ago"
+        if delta < 86400:
+            return f"{delta // 3600}h ago"
+        return f"{delta // 86400}d ago"
+    except Exception:
+        return "—"
+
+
+def _transactions_formatted(limit: int = 15) -> list[dict]:
+    raw = chain.indexer_recent_app_txns(max(1, min(limit, 50)))
+    out: list[dict] = []
+    for t in raw:
+        tx_id = t.get("tx_id") or ""
+        sender = str(t.get("sender") or "")
+        short = f"{sender[:6]}…{sender[-4:]}" if len(sender) > 52 else sender
+        amt = int(t.get("amount") or 0)
+        note = str(t.get("note") or "")
+        note_preview = note[:120].replace("\n", " ")
+        note_obj = None
+        try:
+            if note.startswith("{"):
+                note_obj = json.loads(note)
+        except Exception:
+            note_obj = None
+        rt = t.get("round-time")
+        out.append(
+            {
+                "tx_id": tx_id,
+                "action": t.get("action") or t.get("method_name") or t.get("type") or "",
+                "sender_short": short,
+                "amount_algo": round(amt / 1_000_000.0, 6),
+                "time_ago": _time_ago_from_round_time(int(rt) if rt is not None else None),
+                "note_preview": note_preview,
+                "note_json": note_obj,
+                "lora_url": t.get("lora_url") or (f"{LORA_TESTNET_TX}/{tx_id}" if tx_id else ""),
+            }
+        )
+    return out
 
 
 def load_verdict_history():
@@ -1860,10 +1916,28 @@ def build_sync_ledger_shipments() -> List[dict]:
     return rows
 
 
+def _shipment_stage_rank(stage: str) -> int:
+    s = str(stage or "")
+    if s == "Disputed":
+        return 0
+    if s in ("In_Transit", "Not_Registered", "Delayed_Disaster"):
+        return 1
+    if s == "Settled":
+        return 2
+    return 3
+
+
 @app.get("/shipments")
-def get_shipments():
-    """Ledger-first shipment list (boxes + DB), same as /sync-ledger."""
-    return sync_ledger()
+async def get_shipments():
+    """Ledger + DB merged rows; cached 15s; sorted Disputed → In_Transit → Settled."""
+    now = time.time()
+    if _SHIPMENTS_CACHE["payload"] is not None and now - _SHIPMENTS_CACHE["ts"] < API_CACHE_TTL_SEC:
+        return _SHIPMENTS_CACHE["payload"]
+    rows = await asyncio.to_thread(build_sync_ledger_shipments)
+    rows = sorted(rows, key=lambda r: (_shipment_stage_rank(str(r.get("stage") or "")), r.get("shipment_id") or ""))
+    _SHIPMENTS_CACHE["ts"] = now
+    _SHIPMENTS_CACHE["payload"] = rows
+    return rows
 
 
 @app.post("/run-jury")
@@ -2002,188 +2076,50 @@ async def run_jury(body: RunJuryRequest):
         "oracle_stake": None,
         "stake_tx_id": None,
     }
+    _STATS_CACHE["payload"] = None
+    _SHIPMENTS_CACHE["payload"] = None
     JURY_CACHE[shipment_id] = payload
     return payload
 
 
 @app.get("/audit-trail/{shipment_id}")
 async def get_audit_trail(shipment_id: str):
-    """Immutable audit history — verdicts + Indexer tx notes + on-chain box state."""
-    on_chain = "Not found on-chain"
-    try:
-        s = _read_box_status(shipment_id)
-        if s != "Unregistered":
-            on_chain = s
-    except Exception:
-        pass
-
-    indexer_notes = []
-    try:
-        if DEPLOYER_MNEMONIC:
-            from algosdk import mnemonic as mn
-            addr = mn.to_public_key(DEPLOYER_MNEMONIC)
-            r = requests.get(f"{INDEXER_URL}/v2/accounts/{addr}/transactions?limit=30", timeout=3)
-            if r.ok:
-                for tx in r.json().get("transactions", []):
-                    n = tx.get("note")
-                    if not n:
-                        continue
-                    try:
-                        text = base64.b64decode(n).decode("utf-8", errors="replace")
-                        if text.startswith("NAVI|"):
-                            parts = text.split("|", 2)
-                            if parts[1] == shipment_id:
-                                indexer_notes.append({
-                                    "reasoning": parts[2] if len(parts) > 2 else "",
-                                    "tx_id": tx.get("id"),
-                                    "round": tx.get("confirmed-round") or tx.get("confirmed_round"),
-                                })
-                    except Exception:
-                        pass
-        indexer_notes = indexer_notes[:10]
-    except Exception:
-        pass
-
-    return {
-        "shipment_id": shipment_id,
-        "app_id": APP_ID,
-        "network": ALGO_NETWORK,
-        "on_chain_status": on_chain,
-        "verdicts": AUDIT_TRAIL.get(shipment_id, []),
-        "total_scans": len(AUDIT_TRAIL.get(shipment_id, [])),
-        "indexer_notes": indexer_notes,
-    }
-
-
-@app.get("/supplier-trust-score")
-async def get_supplier_trust_score(wallet: str = ""):
-    """Supplier Reliability Index (SRI) — 0–100. Verified via Algorand Box Storage."""
-    score = _get_supplier_trust(wallet) if wallet else 100
-    return {
-        "score": score,
-        "wallet": wallet,
-        "verified_via": "Algorand Box Storage",
-    }
-
-
-@app.post("/submit-mitigation")
-def submit_mitigation(req: SubmitMitigationRequest):
-    """Supplier submits proof of resolution. AI-verified; logged for trust score."""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT id FROM shipments WHERE id = ?", (req.shipment_id,)
-        ).fetchone()
-    # 1. AI Validation
-    is_valid = MitigationAuditorAgent.validate(req.shipment_id, req.resolution_text)
-    if not is_valid:
-        raise HTTPException(status_code=400, detail="AI Rejected Mitigation: Strategy insufficient")
-
-    # 2. Hash and Commit to Algorand
-    res_hash = _generate_reasoning_hash(req.resolution_text)
-    success = _resolve_shipment_on_chain(req.shipment_id, res_hash)
-    
-    if not success:
-        raise HTTPException(status_code=500, detail="On-chain resolution failed")
-
-    # 3. Update DB
-    with get_db() as conn:
-        conn.execute("UPDATE shipments SET status = ? WHERE id = ?", (STATUS_IN_TRANSIT, req.shipment_id))
-        conn.execute(
-            """
-            INSERT INTO supplier_mitigations (wallet, shipment_id, resolution_text, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (req.wallet, req.shipment_id, req.resolution_text[:2000], now),
+    """Entries from audit_trail.json (in-memory AUDIT_TRAIL) for this shipment."""
+    entries = AUDIT_TRAIL.get(shipment_id, [])
+    out = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        out.append(
+            {
+                "verdict": e.get("verdict"),
+                "score": e.get("score") or e.get("sentinel_score"),
+                "reasoning": e.get("reasoning") or e.get("reasoning_narrative"),
+                "tx_id": e.get("tx_id"),
+                "lora_tx_url": e.get("lora_tx_url") or chain.lora_tx_url(e.get("tx_id")),
+                "timestamp": e.get("timestamp"),
+            }
         )
-        conn.commit()
-    new_score = _update_supplier_trust(req.wallet, delta=3)
-    logger.info(f"Mitigation logged: {req.shipment_id} by {req.wallet[:8]}... -> SRI {new_score}")
-    return {
-        "status": "ok",
-        "message": "Mitigation logged on-chain",
-        "shipment_id": req.shipment_id,
-        "trust_score": new_score,
-    }
-
-
-def _risk_history_normalize_verdict(v: dict) -> str:
-    raw = str(v.get("verdict") or "").upper()
-    if raw in ("APPROVED", "DISPUTE"):
-        return "DISPUTE"
-    if raw in ("REJECTED", "SETTLE"):
-        return "SETTLE"
-    if raw == "HOLD":
-        return "HOLD"
-    return raw or "UNKNOWN"
+    return {"shipment_id": shipment_id, "entries": out}
 
 
 @app.get("/risk-history")
 async def get_risk_history():
-    """AI jury / verdict history for dashboard chart (audit trail + on-chain NAVI verdict JSON)."""
-    points: List[dict] = []
-    seen: set[tuple] = set()
+    """Last 10 audit entries across all shipments; [] if fewer than 2 entries total."""
+    flat: list[dict] = []
     for ship_id, verdicts in AUDIT_TRAIL.items():
         for v in verdicts:
-            score = v.get("sentinel_score")
-            if score is None:
+            if not isinstance(v, dict):
                 continue
-            ts = str(v.get("timestamp") or "")
-            verb = _risk_history_normalize_verdict(v)
-            key = (ship_id, int(score), verb, ts)
-            if key in seen:
-                continue
-            seen.add(key)
-            points.append(
-                {
-                    "shipment_id": ship_id,
-                    "score": int(score),
-                    "verdict": verb,
-                    "timestamp": ts,
-                }
-            )
-    if APP_ID and chain.use_navitrust():
-        try:
-            for sid, _st in chain.list_shipment_statuses_from_boxes():
-                full = chain.read_shipment_full(sid)
-                vd = (full.get("verdict") or "").strip()
-                if not vd:
-                    continue
-                try:
-                    j = json.loads(vd)
-                    verb = str(j.get("verdict", "")).upper()
-                    if verb not in ("DISPUTE", "SETTLE", "HOLD"):
-                        continue
-                    sc = int(j.get("score", full.get("risk_score") or 0))
-                    key = (sid, sc, verb, vd[:80])
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    points.append(
-                        {
-                            "shipment_id": sid,
-                            "score": sc,
-                            "verdict": verb,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        }
-                    )
-                except Exception:
-                    continue
-        except Exception as e:
-            logger.debug("risk-history chain merge: %s", e)
-    # Dedupe same shipment + score + verdict (audit + on-chain merge)
-    uniq: dict[tuple, dict] = {}
-    for p in points:
-        k = (p.get("shipment_id"), p.get("score"), p.get("verdict"))
-        uniq[k] = p
-    points = list(uniq.values())
-    points.sort(key=lambda p: p.get("timestamp") or "")
-    return {"points": points[-15:]}
+            flat.append({**v, "shipment_id": ship_id})
+    if len(flat) < 2:
+        return {"points": []}
+    flat.sort(key=lambda x: str(x.get("timestamp") or ""))
+    return {"points": flat[-10:]}
 
 
-@app.get("/stats")
-def get_stats():
-    """Network Intelligence stats for KPI ribbon — ledger-first, then audit trail fallback."""
+def _stats_compute() -> dict:
+    """Uncached stats body for /stats (global state + app account balance)."""
     total_verdicts = sum(len(v) for v in AUDIT_TRAIL.values())
     total_anomalies = total_verdicts  # fallback
     if APP_ID:
@@ -2230,12 +2166,25 @@ def get_stats():
         "contract_algo": round(contract_algo, 2) if contract_algo is not None else None,
         "escrow_total_algo": escrow_total_algo,
         "contract_app_address": contract_app_address,
+        "lora_contract_url": lora_contract_account_url,
         "lora_contract_account_url": lora_contract_account_url,
         "total_shipments": total_shipments_count,
         "active_shipments": active_shipments,
         "total_settled": total_settled_k,
         "total_disputed": total_disputed_k,
     }
+
+
+@app.get("/stats")
+def get_stats():
+    """Global KPIs + contract balance; cached 15s."""
+    now = time.time()
+    if _STATS_CACHE["payload"] is not None and now - _STATS_CACHE["ts"] < API_CACHE_TTL_SEC:
+        return _STATS_CACHE["payload"]
+    body = _stats_compute()
+    _STATS_CACHE["ts"] = now
+    _STATS_CACHE["payload"] = body
+    return body
 
 
 def _register_shipment_core(
@@ -2394,281 +2343,64 @@ def _register_shipment_core(
 
 
 @app.post("/register-shipment")
-def register_shipment(
-    body: Optional[RegisterShipmentBody] = Body(None),
-    shipment_id: Optional[str] = Query(None),
-    origin: Optional[str] = Query(None),
-    destination: Optional[str] = Query(None),
-    supplier: Optional[str] = Query(None),
-    wallet_age_days: int = Query(default=30, ge=0, le=36500),
-    amount_algo: float = Query(default=1.0, ge=0.0, le=1e9),
-    delivery_days: int = Query(default=7, ge=1, le=365),
-    supplier_reputation: int = Query(default=50, ge=0, le=100),
-):
-    """
-    Register a shipment on-chain + SQLite.
-
-    **Preferred:** JSON body `{"shipment_id","origin","destination","supplier_address"}`.
-
-    **Legacy:** query parameters `shipment_id`, `origin`, `destination`, `supplier`.
-    """
-    if body is not None:
-        sid = (body.shipment_id or "").strip()
-        org = (body.origin or "").strip()
-        dst = (body.destination or "").strip()
-        sup = (body.supplier_address or "").strip()
-    elif shipment_id and origin and destination and supplier:
-        sid = shipment_id.strip()
-        org = origin.strip()
-        dst = destination.strip()
-        sup = supplier.strip()
-    else:
-        raise HTTPException(
-            status_code=422,
-            detail="Send JSON: { shipment_id, origin, destination, supplier_address } or pass those four as query parameters.",
-        )
+def register_shipment(body: RegisterShipmentBody):
+    """Register a shipment on-chain + SQLite (oracle-signed). JSON body only."""
+    sid = (body.shipment_id or "").strip()
+    org = (body.origin or "").strip()
+    dst = (body.destination or "").strip()
+    sup = (body.supplier_address or "").strip()
     if not sid or not org or not dst or not sup:
         raise HTTPException(status_code=422, detail="shipment_id, origin, destination, and supplier_address are required.")
-    return _register_shipment_core(sid, org, dst, sup, wallet_age_days, amount_algo, delivery_days, supplier_reputation)
-
-
-@app.post("/register-shipment/build")
-def register_shipment_build(body: RegisterShipmentBuildBody):
-    """
-    Build unsigned register_shipment app call for the user's wallet (Pera).
-    Does not sign server-side — client signs and submits, then calls /register-shipment/confirm.
-    """
-    if not APP_ID:
-        raise HTTPException(
-            status_code=503,
-            detail="APP_ID is not configured. Set APP_ID in .env to your NaviTrust application id.",
-        )
-    if not chain.use_navitrust():
-        raise HTTPException(status_code=400, detail="Wallet registration build requires NaviTrust ARC56 + APP_ID.")
-    sid = body.shipment_id.strip()
-    org = body.origin.strip()
-    dst = body.destination.strip()
-    sup = body.supplier_address.strip()
-    sender = body.resolved_sender()
-    if not sid or not org or not dst or not sup:
-        raise HTTPException(status_code=422, detail="shipment_id, origin, destination, and supplier_address are required.")
-    shipment_data = {
-        "origin": org,
-        "destination": dst,
-        "supplier": sup,
-        "wallet_age_days": 30,
-        "amount_algo": 1.0,
-        "delivery_days": 7,
-        "supplier_reputation": 50,
-    }
-    fraud_report = _fraud_report_stub(shipment_data, _register_history_for_fraud())
-    if fraud_report.get("blocked"):
-        raise HTTPException(status_code=403, detail={"fraud_report": fraud_report, "shipment_id": sid})
-    st = chain.read_shipment_status(sid)
-    if st not in ("Unregistered", "Unknown"):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Shipment '{sid}' is already registered on-chain (status: {st}). "
-                "Use a different shipment_id — IDs are case-sensitive."
-            ),
-        )
-    route = f"{org} → {dst}"
-    try:
-        txns = chain.build_register_shipment_txn_b64(sender, sid, sup, route)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except Exception as e:
-        logger.exception("register-shipment build failed: %s", e)
-        raise HTTPException(status_code=500, detail=f"Could not build transaction: {e!s}") from e
-    return {
-        "txns_b64": txns,
-        "txns": txns,
-        "shipment_id": sid,
-        "route": route,
-        "fraud_report": fraud_report,
-    }
-
-
-@app.post("/register-shipment/confirm")
-def register_shipment_confirm(body: RegisterShipmentConfirmBody):
-    """After the wallet submits register_shipment, sync SQLite and logs (no server signing)."""
-    if not APP_ID:
-        raise HTTPException(status_code=503, detail="APP_ID is not configured.")
-    sid = body.shipment_id.strip()
-    org = body.origin.strip()
-    dst = body.destination.strip()
-    sup = body.supplier_address.strip()
-    tx_id = (body.tx_id or "").strip()
-    if not sid or not org or not dst or not sup or not tx_id:
-        raise HTTPException(status_code=422, detail="shipment_id, origin, destination, supplier_address, and tx_id are required.")
-    st = "Unregistered"
-    for _ in range(14):
-        st = chain.read_shipment_status(sid)
-        if st not in ("Unregistered", "Unknown"):
-            break
-        time.sleep(0.35)
-    if st in ("Unregistered", "Unknown"):
-        raise HTTPException(
-            status_code=400,
-            detail="On-chain registration not visible yet — wait a few seconds and POST confirm again.",
-        )
-    row_existed = False
-    with get_db() as conn:
-        row_existed = conn.execute("SELECT 1 FROM shipments WHERE id = ?", (sid,)).fetchone() is not None
-        if row_existed:
-            conn.execute(
-                "UPDATE shipments SET origin = ?, destination = ?, status = ? WHERE id = ?",
-                (org, dst, STATUS_IN_TRANSIT, sid),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO shipments (id, origin, destination, current_lat, current_lon, status) VALUES (?, ?, ?, ?, ?, ?)",
-                (sid, org, dst, 0.0, 0.0, STATUS_IN_TRANSIT),
-            )
-        conn.commit()
-    _append_register_log(
-        {
-            "shipment_id": sid,
-            "origin": org,
-            "destination": dst,
-            "supplier": sup,
-            "tx_id": tx_id,
-            "wallet_signed": True,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-    )
-    return {
-        "status": "Registered",
-        "tx_id": tx_id,
-        "on_chain_status": st,
-        "app_id": APP_ID,
-        "lora_tx_url": chain.lora_tx_url(tx_id),
-        "lora_url": f"{LORA_TESTNET_APP}/{APP_ID}",
-    }
-
-
-@app.get("/sync-ledger")
-def sync_ledger():
-    """On-chain box enumeration merged with DB + jury cache — no synthetic shipments."""
-    return build_sync_ledger_shipments()
-
-
-@app.get("/live-feed")
-async def live_feed():
-    """Live logistics stream for frontend ticker — data changes each poll. Events rotate every 30s via background task."""
-    return {"events": get_live_feed()}
-
-
-@app.get("/news/live")
-def live_news():
-    """Supply-chain headlines for dashboard marquee (RSS + static fallback)."""
-    items: list[dict] = []
-    try:
-        import feedparser
-
-        feeds = (
-            "https://shippingwatch.com/service/rss",
-            "https://www.joc.com/rss.xml",
-        )
-        for feed_url in feeds:
-            try:
-                feed = feedparser.parse(feed_url)
-                title_feed = getattr(feed.feed, "title", "") or ""
-                for entry in (feed.entries or [])[:4]:
-                    t = (getattr(entry, "title", "") or "")[:120]
-                    link = getattr(entry, "link", "") or ""
-                    if t:
-                        items.append({"title": t, "link": link, "source": title_feed or feed_url})
-            except Exception:
-                continue
-    except Exception as e:
-        logger.debug("news/live feedparser: %s", e)
-    if not items:
-        items = [
-            {"title": "Red Sea shipping disruptions causing multi-week delays", "link": "", "source": "demo"},
-            {"title": "Mumbai port congestion eases after operational adjustments", "link": "", "source": "demo"},
-            {"title": "Rotterdam hub customs piloting new inspection workflows", "link": "", "source": "demo"},
-            {"title": "Singapore transshipment volumes steady into Q1", "link": "", "source": "demo"},
-            {"title": "Algorand testnet oracles anchor supply-chain attestations", "link": "", "source": "demo"},
-        ]
-    return {"items": items}
-
-
-@app.get("/generate-event")
-async def generate_event():
-    """Explicitly trigger one random logistics event (for testing/demo)."""
-    ev = generate_random_logistics_event()
-    return {"event": ev, "feed_length": len(LIVE_FEED)}
-
-
-@app.get("/bootstrap")
-async def bootstrap():
-    """Wallet dashboard bootstrap: same shipment list as /sync-ledger; stats from chain where possible."""
-    shipments = build_sync_ledger_shipments()
-    ids = [s["shipment_id"] for s in shipments]
-    config = {
-        "app_id": APP_ID,
-        "network": ALGO_NETWORK,
-        "shipments": ids,
-        "lora_application_url": f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else "",
-        "oracle_address": chain.oracle_address_string(),
-    }
-    stats = get_stats()
-    risk_pts = []
-    for sid, vs in AUDIT_TRAIL.items():
-        for v in vs:
-            if v.get("sentinel_score") is not None:
-                risk_pts.append({"time": v.get("timestamp", ""), "score": v["sentinel_score"], "shipment": sid})
-    risk_pts.sort(key=lambda x: x["time"])
-    return {
-        "config": config,
-        "stats": stats,
-        "shipments": shipments,
-        "risk_history": {"points": risk_pts[-60:]},
-    }
+    return _register_shipment_core(sid, org, dst, sup, 30, 1.0, 7, 50)
 
 
 @app.get("/health")
 def health():
     algod_ok = False
+    last_round = 0
     try:
         st = chain.algorand.client.algod.status()
         algod_ok = isinstance(st, dict) and st.get("last-round") is not None
+        if algod_ok:
+            last_round = int(st.get("last-round") or 0)
     except Exception:
         algod_ok = False
+    indexer_ok = False
+    try:
+        ih = chain.algorand.client.indexer.health()
+        indexer_ok = isinstance(ih, dict) and (ih.get("message") is not None or ih.get("round") is not None)
+    except Exception:
+        indexer_ok = False
     aid = APP_ID if isinstance(APP_ID, int) else int(os.environ.get("APP_ID") or 0)
     return {
-        "status": "ok" if algod_ok else "degraded",
-        "algod_ok": algod_ok,
+        "status": "ok",
         "app_id": aid,
         "network": ALGO_NETWORK,
-        "navitrust": chain.use_navitrust(),
+        "algod_ok": algod_ok,
+        "indexer_ok": indexer_ok,
+        "last_round": last_round,
     }
 
 
 @app.get("/shipment/{shipment_id}")
 def get_shipment_public(shipment_id: str):
-    oc = chain.read_shipment_full(shipment_id) if APP_ID else {}
-    cert = oc.get("certificate_asa") if isinstance(oc, dict) else None
-    with get_db() as conn:
-        row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
-    out = {
-        "shipment_id": shipment_id,
-        "on_chain": oc,
-        "database": dict(row) if row else None,
-        "verdicts": AUDIT_TRAIL.get(shipment_id, []),
-    }
-    if cert:
-        cid = int(cert)
-        out["certificate_asa"] = cid
-        out["lora_cert_url"] = f"https://lora.algokit.io/testnet/asset/{cid}"
-    return out
+    """Always fresh chain + DB merge (not cached)."""
+    return get_shipment_from_chain(shipment_id)
 
 
 @app.get("/supplier/{address}/reputation")
 def get_supplier_reputation(address: str):
-    return chain.read_supplier_reputation_on_chain(address)
+    addr = address.strip()
+    r = chain.read_supplier_reputation_on_chain(addr)
+    sc = r.get("score")
+    if sc is None:
+        sc = 50
+    return {
+        "address": addr,
+        "score": int(sc),
+        "source": r.get("source") or "algorand_box_storage",
+        "lora_url": f"https://lora.algokit.io/testnet/account/{addr}",
+    }
 
 
 @app.post("/settle")
@@ -3117,122 +2849,10 @@ def _navibot_fast_llm(context: str, history: List[dict], query: str) -> str:
     return _navibot_gemini_text(sys_prompt, user_blob)
 
 
-@app.get("/verification/health")
-def verification_health():
-    """Algod + indexer reachability (honest stale / retry UI)."""
-    return ver.chain_health()
-
-
-@app.get("/verification/on-chain-state")
-def verification_on_chain_state(wallet: str = ""):
-    """Ledger-sourced global/local summary: NaviTrust."""
-    return ver.read_on_chain_state(wallet.strip())
-
-
-@app.get("/verification/tx/{tx_id}")
-def verification_transaction_detail(tx_id: str):
-    """Single tx + atomic group members + Lora URLs (indexer)."""
-    return ver.indexer_transaction_detail(tx_id.strip())
-
-
-@app.get("/verification/wallet-proofs")
-def verification_wallet_proofs(wallet: str, limit: int = 25):
-    w = (wallet or "").strip()
-    if len(w) < 52:
-        raise HTTPException(status_code=400, detail="Valid Algorand wallet address required")
-    lim = max(5, min(limit, 60))
-    return ver.wallet_proofs(w, lim)
-
-
-@app.get("/verification/audit-trail")
-def verification_audit_trail(wallet: str, limit: int = 40):
-    w = (wallet or "").strip()
-    if len(w) < 52:
-        raise HTTPException(status_code=400, detail="Valid Algorand wallet address required")
-    lim = max(5, min(limit, 80))
-    return ver.audit_trail_methods(w, lim)
-
-
-@app.get("/verification/asa/{asset_id}")
-def verification_asa(asset_id: int):
-    return ver.asa_proof(asset_id)
-
-
-@app.get("/verification/export/wallet-proofs.json")
-def verification_export_wallet_json(wallet: str):
-    w = (wallet or "").strip()
-    if len(w) < 52:
-        raise HTTPException(status_code=400, detail="Valid Algorand wallet address required")
-    body = ver.export_wallet_proofs_json(w)
-    safe = "".join(c if c.isalnum() else "_" for c in w[:12])
-    return Response(
-        content=body,
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="navitrust_wallet_proofs_{safe}.json"'},
-    )
-
-
-@app.get("/verification/export/wallet-proofs.csv")
-def verification_export_wallet_csv(wallet: str):
-    w = (wallet or "").strip()
-    if len(w) < 52:
-        raise HTTPException(status_code=400, detail="Valid Algorand wallet address required")
-    body = ver.export_wallet_proofs_csv(w)
-    safe = "".join(c if c.isalnum() else "_" for c in w[:12])
-    return Response(
-        content=body,
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="navitrust_wallet_proofs_{safe}.csv"'},
-    )
-
-
-@app.get("/verification/arc4-dictionary")
-def verification_arc4_dictionary():
-    """Public ARC-4 selector → method signature map (from ARC56 + runtime hints)."""
-    return ver.arc4_dictionary()
-
-
-@app.get("/verification/shipment-box")
-def verification_shipment_box(shipment_id: str):
-    """NaviTrust box storage snapshot for a shipment id (algod)."""
-    return ver.shipment_ledger_snapshot(shipment_id.strip())
-
-
-@app.get("/verification/bundle")
-def verification_bundle_get(wallet: str = "", tx_id: str = ""):
-    """Combined proof object (JSON) for auditors — same domain apps only."""
-    w = (wallet or "").strip()
-    if len(w) < 52:
-        raise HTTPException(status_code=400, detail="Valid Algorand wallet address required")
-    return ver.proof_bundle(w, (tx_id or "").strip() or None)
-
-
-@app.get("/verification/export/bundle.json")
-def verification_export_bundle_json(wallet: str, tx_id: str = ""):
-    w = (wallet or "").strip()
-    if len(w) < 52:
-        raise HTTPException(status_code=400, detail="Valid Algorand wallet address required")
-    body = ver.export_proof_bundle_json(w, tx_id or "")
-    safe = "".join(c if c.isalnum() else "_" for c in w[:12])
-    return Response(
-        content=body,
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="navitrust_proof_bundle_{safe}.json"'},
-    )
-
-
 @app.get("/transactions")
-def list_app_transactions(limit: int = 20):
-    lim = max(1, min(limit, 50))
-    return {"transactions": chain.indexer_recent_app_txns(lim), "app_id": APP_ID}
-
-
-@app.get("/protocol/display-global-state")
-def protocol_display_global_state():
-    """Filtered global state for /protocol (supply-chain fields only)."""
-    if not APP_ID:
-        return {"fields": {}, "app_id": 0}
-    return {"fields": chain.get_display_global_state(APP_ID), "app_id": APP_ID}
+def list_app_transactions(limit: int = 15):
+    """Recent app transactions with decoded notes and human-readable actions."""
+    return _transactions_formatted(max(1, min(limit, 50)))
 
 
 @app.post("/navibot")
@@ -3305,190 +2925,92 @@ async def navibot_chat(req: NavibotRequest, request: Request):
         return JSONResponse(content=soft_reply)
 
 
-@app.get("/navibot/voice-summary/{shipment_id}")
-async def navibot_voice_summary(shipment_id: str):
-    ship = get_shipment_from_chain(shipment_id)
-    verdict = None
-    vraw = ship.get("verdict_json")
-    if vraw:
-        try:
-            verdict = json.loads(vraw) if isinstance(vraw, str) else vraw
-        except Exception:
-            verdict = {"verdict": "Unknown"}
-    prompt = (
-        "You are NaviBot, the AI witness for Navi-Trust.\n"
-        "Speak as if testifying in a trade court. Professional. Clear.\n"
-        "Maximum 3 sentences. Start with \"I, NaviBot...\"\n\n"
-        f"Shipment: {shipment_id}\n"
-        f"Route: {ship.get('origin')} to {ship.get('destination')}\n"
-        f"Status: {ship.get('status')}\n"
-        f"Risk Score: {ship.get('risk_score', 'unknown')}\n"
-        f"Verdict: {(verdict or {}).get('verdict', 'No verdict yet')}\n"
-        f"Reasoning: {(verdict or {}).get('reasoning', (verdict or {}).get('narrative', 'Pending assessment'))}\n\n"
-        "Speak the verdict clearly. Reference the blockchain proof."
-    )
-    testimony = await asyncio.to_thread(_navibot_gemini_text, prompt, "")
-    if not testimony.strip():
-        testimony = (
-            f"I, NaviBot, testify regarding shipment {shipment_id} from {ship.get('origin')} to {ship.get('destination')}. "
-            f"On-chain status is {ship.get('status')}. Risk score recorded: {ship.get('risk_score', 'unknown')}. "
-            "Full cryptographic proof is available on Algorand via Lora."
-        )
-    testimony_hash = hashlib.sha256(testimony.encode()).hexdigest()
-    note = json.dumps(
-        {
-            "type": "NAVI_TESTIMONY",
-            "shipment_id": shipment_id,
-            "testimony_hash": testimony_hash,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-    )
-    tx = chain.send_oracle_zero_note(note)
-    return {
-        "text": testimony,
-        "testimony_hash": testimony_hash,
-        "shipment_id": shipment_id,
-        "message": "Testimony hash recorded on Algorand",
-        "testimony_chain": tx,
-        "lora_url": (tx or {}).get("lora_url"),
+@app.post("/witness-shipment/build")
+def witness_shipment_build(payload: dict = Body(...)):
+    """Unsigned 0-ALGO self-payment with NAVI_WITNESS JSON note (witness signs + submits)."""
+    from urllib.parse import quote
+
+    from algosdk import encoding as sdk_encoding
+    from algosdk import transaction as txn_mod
+
+    shipment_id = str(payload.get("shipment_id") or "").strip()
+    witness_address = str(payload.get("witness_address") or "").strip()
+    if not shipment_id or not witness_address:
+        raise HTTPException(status_code=422, detail="shipment_id and witness_address required")
+    st = chain.read_shipment_status(shipment_id)
+    note_obj = {
+        "type": "NAVI_WITNESS",
+        "app": APP_ID,
+        "sid": shipment_id,
+        "status": st,
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    note_b = json.dumps(note_obj, separators=(",", ":")).encode("utf-8")[:1000]
+    sp = chain.algorand.client.algod.suggested_params()
+    pay = txn_mod.PaymentTxn(witness_address, sp, witness_address, 0, note=note_b)
+    packed = sdk_encoding.msgpack_encode(pay)
+    if isinstance(packed, str):
+        packed = packed.encode("latin-1")
+    txn_b64 = base64.b64encode(packed).decode("ascii")
+    return {
+        "txn_b64": txn_b64,
+        "message": "Sign with the witness wallet and submit to TestNet",
+        "note_preview": note_obj,
+    }
+
+
+@app.get("/witnesses/{shipment_id}")
+def list_witness_notes(shipment_id: str):
+    """Indexer search for payment txs whose note JSON references NAVI_WITNESS + shipment id."""
+    from urllib.parse import quote
+
+    prefix = base64.b64encode(b'{"type":"NAVI_WITNESS"').decode("ascii")
+    url = f"{INDEXER_URL.rstrip('/')}/v2/transactions?note-prefix={quote(prefix, safe='')}&tx-type=pay&limit=50"
+    try:
+        r = requests.get(url, timeout=12)
+        r.raise_for_status()
+        txs = r.json().get("transactions") or []
+    except Exception as e:
+        logger.warning("witness indexer search: %s", e)
+        txs = []
+    witnesses: list[dict] = []
+    for tx in txs:
+        n = tx.get("note")
+        if not n:
+            continue
+        try:
+            raw = base64.b64decode(n)
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        if "NAVI_WITNESS" not in text or shipment_id not in text:
+            continue
+        witnesses.append(
+            {
+                "address": tx.get("sender"),
+                "tx_id": tx.get("id"),
+                "round": tx.get("confirmed-round") or tx.get("confirmed_round"),
+                "lora_url": f"{LORA_TESTNET_TX}/{tx.get('id')}" if tx.get("id") else "",
+            }
+        )
+    return {"shipment_id": shipment_id, "witness_count": len(witnesses), "witnesses": witnesses}
 
 
 @app.get("/config")
 async def get_config():
-    """Backend config for frontend bootstrap. Lora: use /application/{id} only (no /boxes)."""
+    aid = APP_ID if isinstance(APP_ID, int) else int(os.environ.get("APP_ID") or 0)
+    app_addr = get_application_address(aid) if aid else ""
     with get_db() as conn:
         ids = [r["id"] for r in conn.execute("SELECT id FROM shipments").fetchall()]
     return {
-        "app_id": APP_ID,
+        "app_id": aid,
+        "app_address": app_addr,
         "network": ALGO_NETWORK,
+        "lora_app_url": f"{LORA_TESTNET_APP}/{aid}" if aid else LORA_TESTNET_APP,
         "shipments": ids,
-        "lora_application_url": f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else LORA_TESTNET_APP,
+        "lora_application_url": f"{LORA_TESTNET_APP}/{aid}" if aid else LORA_TESTNET_APP,
         "oracle_address": chain.oracle_address_string(),
     }
-
-
-# ═══════════════════════════════════════════════════════════════════
-#   R E A L - T I M E   B O X   S T A T U S  (Algorand Indexer poll)
-# ═══════════════════════════════════════════════════════════════════
-
-
-@app.get("/box-status")
-def get_box_status():
-    """Read live Algorand Box Storage status for all registered shipments. JSON dict of shipment_id -> status."""
-    with get_db() as conn:
-        rows = conn.execute("SELECT id FROM shipments").fetchall()
-
-    statuses: dict[str, str] = {}
-    for row in rows:
-        ship_id = row["id"]
-        try:
-            s = _read_box_status(ship_id)
-            statuses[ship_id] = s if s != "Unregistered" else "Unknown"
-        except Exception:
-            statuses[ship_id] = "Unknown"
-
-    return {"app_id": APP_ID, "statuses": statuses}
-
-
-# ═══════════════════════════════════════════════════════════════════
-#   P U B L I C   V E R I F I C A T I O N  (no auth required)
-# ═══════════════════════════════════════════════════════════════════
-
-
-@app.get("/indexer-audit")
-def get_indexer_audit(shipment_id: str = ""):
-    """Verifiable tx notes from Algorand Indexer — tamper-proof audit trail."""
-    try:
-        if not DEPLOYER_MNEMONIC:
-            return {"notes": [], "error": "no_deployer"}
-        from algosdk import mnemonic as mn
-        deployer_addr = mn.to_public_key(DEPLOYER_MNEMONIC)
-        url = f"{INDEXER_URL}/v2/accounts/{deployer_addr}/transactions?limit=50"
-        resp = requests.get(url, timeout=3)
-        resp.raise_for_status()
-        data = resp.json()
-        notes = []
-        for tx in data.get("transactions", []):
-            n = tx.get("note")
-            if not n:
-                continue
-            try:
-                raw = base64.b64decode(n)
-                text = raw.decode("utf-8", errors="replace")
-                if text.startswith("NAVI|"):
-                    parts = text.split("|", 2)
-                    sid = parts[1] if len(parts) > 1 else ""
-                    msg = parts[2] if len(parts) > 2 else ""
-                    if shipment_id and sid != shipment_id:
-                        continue
-                    notes.append({
-                        "shipment_id": sid,
-                        "reasoning": msg,
-                        "tx_id": tx.get("id"),
-                        "round": tx.get("confirmed-round") or tx.get("confirmed_round"),
-                    })
-            except Exception:
-                continue
-        return {"notes": notes[:20]}
-    except Exception as e:
-        logger.warning(f"Indexer audit failed: {e}")
-        return {"notes": []}
-
-
-@app.get("/global-kpis")
-def get_global_kpis():
-    """Ledger stats: NaviTrust box enumeration or global state / audit fallback."""
-    if chain.use_navitrust() and APP_ID:
-        g = chain.global_stats_navitrust()
-        g["total_settlements"] = g.get("total_settled", 0)
-        return g
-    try:
-        app_info = algorand.client.algod.application_info(APP_ID)
-        gs = app_info.get("params", {}).get("global-state", [])
-        total = 0
-        for kv in gs:
-            k = base64.b64decode(kv.get("key", "")).decode("utf-8", errors="ignore")
-            if "Total_Settlements" in k or "total_settlements" in k.lower():
-                total = int(kv.get("value", {}).get("uint", 0))
-                break
-        if total == 0:
-            total = sum(1 for vs in AUDIT_TRAIL.values() for v in vs if v.get("tx_id"))
-        return {"total_settlements": total, "app_id": APP_ID}
-    except Exception as e:
-        logger.warning("Global KPIs failed: %s", e)
-        return {"total_settlements": sum(1 for vs in AUDIT_TRAIL.values() for v in vs if v.get("tx_id")), "app_id": APP_ID}
-
-
-@app.get("/verify-tx/{tx_id}")
-def verify_transaction(tx_id: str):
-    """
-    Verify an Algorand transaction — returns confirmation status and Lora Explorer link.
-    Uses indexer to check if TX is in a block; clickable proof for public auditability.
-    """
-    try:
-        url = f"{INDEXER_URL}/v2/transactions/{tx_id}"
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        tx = data.get("transaction", {})
-        conf = tx.get("confirmed-round") or tx.get("confirmed_round")
-        if conf is not None:
-            return {
-                "verified": True,
-                "tx_id": tx_id,
-                "confirmed_round": conf,
-                "explorer_url": f"{LORA_TESTNET_TX}/{tx_id}",
-                "hash": tx.get("id"),
-                "message": "Transaction confirmed on Algorand. Click explorer_url for public verification.",
-            }
-        return {"verified": False, "tx_id": tx_id, "message": "Transaction not yet confirmed."}
-    except requests.exceptions.HTTPError as e:
-        if e.response is not None and e.response.status_code == 404:
-            return {"verified": False, "tx_id": tx_id, "message": "Transaction not found (not yet in a block or invalid)."}
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/verify/{shipment_id}")
@@ -3590,6 +3112,12 @@ def verify_shipment(shipment_id: str):
             else None
         ),
         "ai_verdict_panel": ai_verdict_panel,
+        "audit_trail_links": [
+            {"tx_id": v.get("tx_id"), "lora_tx_url": chain.lora_tx_url(v.get("tx_id"))}
+            for v in verdicts
+            if isinstance(v, dict) and v.get("tx_id")
+        ],
+        "verified_on": "Algorand Testnet",
     }
 
 

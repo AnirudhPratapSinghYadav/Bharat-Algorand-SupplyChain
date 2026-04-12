@@ -287,15 +287,19 @@ export default function VerifyPage() {
 
           {st === 'Settled' && certId != null && certId > 0 ? (
             <div style={{ padding: 18, borderRadius: 12, border: '1px solid #bbf7d0', background: '#f0fdf4' }}>
-              <div style={{ fontWeight: 700, marginBottom: 8, color: '#14532d' }}>ARC-69 Settlement Certificate</div>
-              <p style={{ margin: 0, fontSize: '0.88rem', color: '#166534' }}>ASA #{certId}</p>
+              <div style={{ fontWeight: 700, marginBottom: 6, color: '#14532d' }}>Digital goods content certificate</div>
+              <div style={{ fontSize: '0.72rem', color: '#166534', marginBottom: 10, lineHeight: 1.45 }}>
+                NAVI-CERT (NCERT) on Algorand TestNet — a pure NFT ASA whose metadata URL resolves to this verify flow, so the
+                on-chain asset and the shipment proof stay linked.
+              </div>
+              <p style={{ margin: 0, fontSize: '0.88rem', color: '#166534' }}>Asset ID #{certId}</p>
               <a
                 href={`https://lora.algokit.io/testnet/asset/${certId}`}
                 target="_blank"
                 rel="noreferrer"
                 style={{ display: 'inline-flex', marginTop: 10, fontSize: '0.85rem', fontWeight: 600, color: '#15803d', gap: 6 }}
               >
-                View certificate on Lora ↗ <ExternalLink size={16} />
+                Open NAVI-CERT on Lora ↗ <ExternalLink size={16} />
               </a>
             </div>
           ) : null}

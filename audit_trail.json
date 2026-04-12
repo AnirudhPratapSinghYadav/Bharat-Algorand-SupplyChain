@@ -90,5 +90,15 @@
       "tx_id": null,
       "confirmed_round": null
     }
+  ],
+  "SHIP_DELHI_003": [
+    {
+      "timestamp": "2026-04-12T18:31:24.955489+00:00",
+      "sentinel_score": 18,
+      "verdict": "SETTLE",
+      "reasoning_narrative": "Shipment settled on-chain (retry after prior failure).",
+      "summary": "Settled",
+      "tx_id": "AMU5MV3VOS3QPU4ASUQX74VKL6HURMPNVTHMV4NZEBPFSB47MNMA"
+    }
   ]
 }

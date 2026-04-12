@@ -41,11 +41,14 @@ export function ProofSection() {
       try {
         let shipmentId = LANDING_DEMO_SHIPMENT_ID;
         if (!shipmentId) {
-          const boot = await axios.get(`${BACKEND_URL}/bootstrap`, { timeout: API_TIMEOUT });
-          const ids = boot.data?.config?.shipments as string[] | undefined;
-          const rows = boot.data?.shipments as { shipment_id?: string }[] | undefined;
+          const cfg = await axios.get(`${BACKEND_URL}/config`, { timeout: API_TIMEOUT });
+          const ids = cfg.data?.shipments as string[] | undefined;
           if (ids?.length) shipmentId = ids[0];
-          else if (rows?.length && rows[0]?.shipment_id) shipmentId = rows[0].shipment_id;
+          if (!shipmentId) {
+            const rowsRes = await axios.get(`${BACKEND_URL}/shipments`, { timeout: API_TIMEOUT });
+            const rows = rowsRes.data as { shipment_id?: string }[] | undefined;
+            if (rows?.length && rows[0]?.shipment_id) shipmentId = rows[0].shipment_id;
+          }
         }
         if (!shipmentId) {
           if (!cancelled) {
@@ -135,7 +138,7 @@ export function ProofSection() {
                 <p className="nt-proof-offline-hint" role="status">
                   {loadIssue === 'network'
                     ? 'Could not reach the API — showing a static sample. Start the backend and refresh.'
-                    : 'No shipment id from /bootstrap — showing a static sample. Seed data or set VITE_LANDING_DEMO_SHIPMENT_ID.'}
+                    : 'No shipment id from /config or /shipments — set VITE_LANDING_DEMO_SHIPMENT_ID or seed the ledger.'}
                 </p>
               ) : null}
               <div className="nt-proof-header">

@@ -392,51 +392,28 @@ function MainApp() {
         const bootstrap = async () => {
             const opts = { timeout: API_TIMEOUT };
             try {
-                // Fast path: single /bootstrap call (DB-only, ~1s) for presentation
-                const bootRes = await axios.get(`${BACKEND_URL}/bootstrap`, opts).catch(() => null);
-                if (bootRes?.data) {
-                    const d = bootRes.data;
-                    if (d.config) {
-                        setAppId(d.config.app_id);
-                        setOracleAddress(d.config.oracle_address ?? null);
-                    }
-                    if (d.stats) setStats(d.stats);
-                    if (Array.isArray(d.shipments) && d.shipments.length > 0) {
-                        setShipments(sortShipmentsStable(d.shipments));
-                        const st: Record<string, string> = {};
-                        d.shipments.forEach((s: any) => { st[s.shipment_id] = s.stage || ''; });
-                        setBoxStatuses(st);
-                    } else {
-                        const res = await axios.get(`${BACKEND_URL}/shipments`, opts).catch(() => null);
-                        const data = res?.data && Array.isArray(res.data) ? res.data : [];
-                        setShipments(sortShipmentsStable(data));
-                        const st: Record<string, string> = {};
-                        data.forEach((s: any) => { st[s.shipment_id] = s.stage || ''; });
-                        setBoxStatuses(st);
-                    }
+                const [configRes, statsRes, shipmentsRes] = await Promise.allSettled([
+                    axios.get(`${BACKEND_URL}/config`, opts),
+                    axios.get(`${BACKEND_URL}/stats`, opts),
+                    axios.get(`${BACKEND_URL}/shipments`, opts),
+                ]);
+                if (configRes.status === 'fulfilled') {
+                    setAppId(configRes.value.data.app_id);
+                    setOracleAddress(configRes.value.data.oracle_address ?? null);
+                }
+                if (statsRes.status === 'fulfilled') setStats(statsRes.value.data);
+                if (shipmentsRes.status === 'fulfilled') {
+                    const raw = shipmentsRes.value.data;
+                    const data = Array.isArray(raw) ? raw : [];
+                    setShipments(sortShipmentsStable(data));
+                    const st: Record<string, string> = {};
+                    data.forEach((s: any) => {
+                        st[s.shipment_id] = s.stage || '';
+                    });
+                    setBoxStatuses(st);
                 } else {
-                    // Fallback: parallel fetch
-                    const [configRes, statsRes, shipmentsRes] = await Promise.allSettled([
-                        axios.get(`${BACKEND_URL}/config`, opts),
-                        axios.get(`${BACKEND_URL}/stats`, opts),
-                        axios.get(`${BACKEND_URL}/shipments`, opts),
-                    ]);
-                    if (configRes.status === 'fulfilled') {
-                        setAppId(configRes.value.data.app_id);
-                        setOracleAddress(configRes.value.data.oracle_address ?? null);
-                    }
-                    if (statsRes.status === 'fulfilled') setStats(statsRes.value.data);
-                    if (shipmentsRes.status === 'fulfilled') {
-                        const raw = shipmentsRes.value.data;
-                        const data = Array.isArray(raw) ? raw : [];
-                        setShipments(sortShipmentsStable(data));
-                        const st: Record<string, string> = {};
-                        data.forEach((s: any) => { st[s.shipment_id] = s.stage || ''; });
-                        setBoxStatuses(st);
-                    } else {
-                        setShipments([]);
-                        setBoxStatuses({});
-                    }
+                    setShipments([]);
+                    setBoxStatuses({});
                 }
             } catch {
                 setShipments([]);
@@ -451,7 +428,7 @@ function MainApp() {
         return () => clearTimeout(safety);
     }, [accountAddress]);
 
-    /* ── Ledger sync (5s) provides box status via /sync-ledger — single source of truth ── */
+    /* ── Ledger sync (5s) via GET /shipments — single source of truth ── */
 
     useEffect(() => {
         if (!accountAddress) return;
@@ -484,7 +461,7 @@ function MainApp() {
     };
 
     const refreshAfterJury = useCallback(async () => {
-        const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
+        const fresh = await axios.get(`${BACKEND_URL}/shipments`);
         setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
         axios.get(`${BACKEND_URL}/stats`).then((r) => setStats(r.data)).catch(() => {});
         refreshRecentTxns();
@@ -506,7 +483,7 @@ function MainApp() {
             setMitigateText('');
             setMitigateModal(null);
             setToast('Mitigation Logged On-Chain');
-            const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
+            const fresh = await axios.get(`${BACKEND_URL}/shipments`);
             setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
         } catch {
             setToast('Failed to submit mitigation');
@@ -563,7 +540,7 @@ function MainApp() {
             }
             setRegisterModal(false);
             setRegForm((f) => ({ ...f, shipment_id: '' }));
-            const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
+            const fresh = await axios.get(`${BACKEND_URL}/shipments`);
             setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
             axios.get(`${BACKEND_URL}/stats`).then((r) => setStats(r.data)).catch(() => {});
             refreshRecentTxns();
@@ -603,7 +580,7 @@ function MainApp() {
                 supplier_paid_algo: typeof data?.supplier_paid_algo === 'number' ? data.supplier_paid_algo : undefined,
             });
             setToast('Settlement submitted.');
-            const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => axios.get(`${BACKEND_URL}/shipments`));
+            const fresh = await axios.get(`${BACKEND_URL}/shipments`);
             setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
             axios.get(`${BACKEND_URL}/stats`).then((x) => setStats(x.data)).catch(() => {});
             refreshRecentTxns();
@@ -763,7 +740,7 @@ function MainApp() {
                     micro_algo: res.data.micro_algo,
                     tx_id: ctx.txId,
                 });
-                const fresh = await axios.get(`${BACKEND_URL}/sync-ledger`).catch(() => ({ data: [] }));
+                const fresh = await axios.get(`${BACKEND_URL}/shipments`).catch(() => ({ data: [] }));
                 setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
                 refreshRecentTxns();
             });
@@ -1762,7 +1739,11 @@ function MainApp() {
                                         </div>
                                         <div style={{ borderTop: '1px solid rgba(22,101,52,0.2)', paddingTop: 12 }}>
                                             <div style={{ fontSize: '0.84rem', color: '#166534', fontWeight: 700, marginBottom: 8 }}>
-                                                ✓ Certificate minted: NAVI-CERT <strong>#{certAsa}</strong>
+                                                ✓ Digital goods certificate (NFT): NAVI-CERT <strong>#{certAsa}</strong>
+                                            </div>
+                                            <div style={{ fontSize: '0.72rem', color: '#166534', marginBottom: 10, lineHeight: 1.45 }}>
+                                                Pure non-fungible ASA on Algorand TestNet — unit <code>NCERT</code>, decimals 0. Metadata URL points to the public{' '}
+                                                <code>/verify</code> flow so anyone can trace settlement back to this shipment.
                                             </div>
                                             <a
                                                 href={`https://lora.algokit.io/testnet/asset/${certAsa}`}

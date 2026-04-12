@@ -11,7 +11,7 @@ export const API_TIMEOUT = 5000;
 
 export const FALLBACK_APP_ID = Number(import.meta.env.VITE_APP_ID) || 758734899;
 
-/** Optional: pin landing “live proof” card to this shipment; otherwise first ID from /bootstrap is used. */
+/** Optional: pin landing “live proof” card to this shipment; otherwise first ID from /config or /shipments is used. */
 export const LANDING_DEMO_SHIPMENT_ID = String(import.meta.env.VITE_LANDING_DEMO_SHIPMENT_ID || '').trim();
 
 export const EXPLORER_URL = 'https://testnet.explorer.perawallet.app/tx/';
