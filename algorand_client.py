@@ -281,9 +281,10 @@ def verify_oracle_setup() -> Optional[str]:
         info = algorand.client.algod.account_info(addr)
         amt = int(info.get("amount", 0))
         balance = amt / 1_000_000.0
-        print(f"✅ Oracle: {addr[:12]}... | {balance:.2f} ALGO")
+        # Keep console output ASCII-only for Windows cp1252 terminals.
+        print(f"[OK] Oracle: {addr[:12]}... | {balance:.2f} ALGO")
         if balance < 2:
-            print("⚠️ WARNING: Oracle balance low. Fund at bank.testnet.algorand.network")
+            print("[WARN] Oracle balance low. Fund at bank.testnet.algorand.network")
         return addr
     except RuntimeError:
         raise
