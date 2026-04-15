@@ -81,6 +81,7 @@ if _CORS_EXTRA:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    _maybe_seed_demo_shipments()
     try:
         chain.verify_oracle_setup()
     except RuntimeError as e:
@@ -281,7 +282,14 @@ def init_db():
                 pass
         conn.commit()
 
-    # Demo seed rows — align with seed_blockchain.py (Navi-Trust judge demo)
+
+def _maybe_seed_demo_shipments() -> None:
+    """
+    Optional demo-only seed. Production must not rely on hardcoded rows.
+    Use `python seed_blockchain.py` for canonical end-to-end seed instead.
+    """
+    if os.environ.get("DEMO_SEED_ON_START", "").strip().lower() not in ("1", "true", "yes"):
+        return
     with get_db() as conn:
         for sid, orig, dest, lat, lon, dlat, dlon in [
             ("SHIP_MUMBAI_001", "Mumbai", "Dubai", 19.07, 72.87, 25.276, 55.296),
@@ -297,7 +305,7 @@ def init_db():
                 (dlat, dlon, sid),
             )
         conn.commit()
-        logger.info("DB seed verified (SHIP_MUMBAI_001, SHIP_CHEN_002, SHIP_DELHI_003)")
+    logger.warning("DEMO_SEED_ON_START enabled — inserted demo shipments into SQLite")
 
 # ─── Off-chain Logistics Events ───────────────────────────────────
 LOGISTICS_EVENTS: List[dict] = []
@@ -3107,6 +3115,12 @@ async def get_config():
     app_addr = get_application_address(aid) if aid else ""
     with get_db() as conn:
         ids = [r["id"] for r in conn.execute("SELECT id FROM shipments").fetchall()]
+    # If the DB is empty (fresh deploy), fall back to real on-chain enumeration.
+    if not ids:
+        try:
+            ids = [sid for sid, _ in _list_ledger_shipments()]
+        except Exception:
+            ids = []
     return {
         "app_id": aid,
         "app_address": app_addr,
