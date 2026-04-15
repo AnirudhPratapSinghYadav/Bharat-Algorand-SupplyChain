@@ -70,6 +70,8 @@ class NaviTrust(ARC4Contract):
         """Register a new shipment. Oracle only."""
         assert Txn.sender == self.oracle_address.value, "Oracle only"
         sid = shipment_id.native.bytes
+        # Prevent overwriting an existing shipment's boxes.
+        assert sid not in self.shipment_status, "Shipment already registered"
         self.shipment_status[sid] = String("In_Transit")
         self.shipment_supplier[sid] = supplier
         self.shipment_funds[sid] = UInt64(0)
@@ -87,6 +89,8 @@ class NaviTrust(ARC4Contract):
         assert payment.receiver == Global.current_application_address
         assert payment.amount >= UInt64(100_000), "Minimum 0.1 ALGO"
         sid = shipment_id.native.bytes
+        assert sid in self.shipment_status, "Shipment not registered"
+        assert self.shipment_status[sid] != String("Settled"), "Shipment already settled"
         self.shipment_buyer[sid] = payment.sender
         has_funds, current = self.shipment_funds.maybe(sid)
         self.shipment_funds[sid] = (
@@ -103,16 +107,26 @@ class NaviTrust(ARC4Contract):
         """Oracle writes 4-agent jury verdict on-chain. Immutable."""
         assert Txn.sender == self.oracle_address.value, "Oracle only"
         sid = shipment_id.native.bytes
+        assert sid in self.shipment_status, "Shipment not registered"
+        assert self.shipment_status[sid] != String("Settled"), "Shipment already settled"
         rs = risk_score.native
         old_r = UInt64(0)
         if sid in self.shipment_risk:
             old_r = self.shipment_risk[sid]
+        old_status = self.shipment_status[sid]
         self.shipment_verdict[sid] = verdict_json.native.bytes
         self.shipment_risk[sid] = rs
         if rs > UInt64(65):
             self.shipment_status[sid] = String("Disputed")
-            if old_r <= UInt64(65):
+            if old_r <= UInt64(65) and old_status != String("Disputed"):
                 self.total_disputed.value = self.total_disputed.value + UInt64(1)
+        else:
+            # A clean verdict returns the shipment to In_Transit unless it is already settled.
+            if old_status == String("Disputed"):
+                # If we previously counted it as disputed, decrement when clearing.
+                if self.total_disputed.value > UInt64(0):
+                    self.total_disputed.value = self.total_disputed.value - UInt64(1)
+            self.shipment_status[sid] = String("In_Transit")
 
     @arc4.abimethod
     def settle_shipment(self, shipment_id: arc4.String) -> arc4_UInt64:
@@ -125,6 +139,12 @@ class NaviTrust(ARC4Contract):
         """
         assert Txn.sender == self.oracle_address.value, "Oracle only"
         sid = shipment_id.native.bytes
+        assert sid in self.shipment_status, "Shipment not registered"
+        assert self.shipment_status[sid] != String("Settled"), "Shipment already settled"
+        assert self.shipment_status[sid] != String("Disputed"), "Cannot settle a disputed shipment"
+        # Prevent double-mint via ce_ box if it already exists.
+        if sid in self.shipment_cert:
+            assert self.shipment_cert[sid] == UInt64(0), "Certificate already minted"
 
         funds_u = self.shipment_funds[sid]
         assert funds_u > UInt64(0), "No funds to settle"
