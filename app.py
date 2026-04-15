@@ -84,8 +84,16 @@ async def lifespan(app: FastAPI):
     try:
         chain.verify_oracle_setup()
     except RuntimeError as e:
-        logger.error("%s", e)
-        raise
+        # In hosted/serverless environments we may intentionally run read-only
+        # endpoints without an oracle mnemonic configured.
+        # Set SKIP_ORACLE_VERIFY=1 (preferred) or rely on Vercel env detection.
+        if os.environ.get("SKIP_ORACLE_VERIFY", "").strip().lower() in ("1", "true", "yes") or os.environ.get(
+            "VERCEL", ""
+        ).strip():
+            logger.warning("Oracle verify skipped at startup: %s", e)
+        else:
+            logger.error("%s", e)
+            raise
     load_logistics_events()
     load_verdict_history()
     for _ in range(6):

@@ -268,6 +268,10 @@ def verify_oracle_setup() -> Optional[str]:
     if os.environ.get("SKIP_ORACLE_VERIFY", "").strip().lower() in ("1", "true", "yes"):
         logger.warning("SKIP_ORACLE_VERIFY is set — skipping oracle startup check (not for production)")
         return None
+    # Serverless deployments often run read-only without oracle secrets configured.
+    if os.environ.get("VERCEL", "").strip():
+        logger.warning("VERCEL detected — skipping oracle startup check (read-only mode)")
+        return None
 
     mnemonic_str = (os.environ.get("ORACLE_MNEMONIC") or os.environ.get("DEPLOYER_MNEMONIC") or "").strip()
     if not mnemonic_str or len(mnemonic_str.split()) != 25:
