@@ -1,12 +1,14 @@
+from __future__ import annotations
+
+import os, time
+
 from dotenv import load_dotenv
 
 # Shell-exported vars (e.g. ORACLE_MNEMONIC in the same session) must win over .env
 # placeholders — use default override=False. See .env.example for PowerShell one-liners.
 load_dotenv()
 
-import os
 import json
-import time
 import base64
 import random
 import re
@@ -16,7 +18,7 @@ import asyncio
 from contextlib import asynccontextmanager, contextmanager
 import hashlib
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Iterable, List, Optional
 
 import requests
 from fastapi import Body, FastAPI, HTTPException, Request
@@ -41,6 +43,97 @@ from models import (
     FundShipmentBuildBody,
     RegisterShipmentBody,
 )
+
+# ── Dynamic Gemini discovery + fallback (Phase 0) ────────────────────────────
+_GEMINI_MODELS_CACHE: dict = {"ts": 0.0, "models": []}
+
+
+def _discover_gemini_models(client: genai.Client) -> list[str]:
+    now = time.time()
+    if _GEMINI_MODELS_CACHE["models"] and now - _GEMINI_MODELS_CACHE["ts"] < 600:
+        return list(_GEMINI_MODELS_CACHE["models"])
+    models: list[str] = []
+    try:
+        for m in client.models.list():
+            name = getattr(m, "name", "") or ""
+            if "gemini" not in name:
+                continue
+            methods = getattr(m, "supported_generation_methods", None) or []
+            if methods and "generateContent" not in methods:
+                continue
+            models.append(name.replace("models/", ""))
+    except Exception:
+        pass
+    out = list(dict.fromkeys(models))
+    _GEMINI_MODELS_CACHE["ts"] = now
+    _GEMINI_MODELS_CACHE["models"] = out
+    return out
+
+
+def _rank_models(models: Iterable[str], purpose: str) -> list[str]:
+    p = (purpose or "default").lower().strip()
+    mlist = list(models)
+
+    def score(mid: str) -> tuple[int, int]:
+        s = mid.lower()
+        if p == "jury":
+            if "pro" in s:
+                return (0, 0)
+            if "thinking" in s:
+                return (0, 1)
+            if "flash" in s:
+                return (1, 0)
+            return (2, 0)
+        if p == "navibot":
+            if "flash" in s:
+                return (0, 0)
+            if "lite" in s:
+                return (0, 1)
+            if "pro" in s:
+                return (1, 0)
+            return (2, 0)
+        if "flash" in s:
+            return (0, 0)
+        if "pro" in s:
+            return (1, 0)
+        return (2, 0)
+
+    return sorted(mlist, key=score)
+
+
+def get_gemini_model_chain(purpose: str = "default") -> tuple[list[str], genai_types.GenerateContentConfig]:
+    env_chain = (os.environ.get("GEMINI_MODEL_CHAIN") or "").strip()
+    if env_chain:
+        chain = [x.strip() for x in env_chain.split(",") if x.strip()]
+    else:
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY") or "")
+        discovered = _discover_gemini_models(client)
+        chain = _rank_models(discovered, purpose)
+        if not chain:
+            chain = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-8b"]
+    cfgs = {
+        "jury": genai_types.GenerateContentConfig(max_output_tokens=400, temperature=0.2),
+        "navibot": genai_types.GenerateContentConfig(max_output_tokens=150, temperature=0.3),
+        "default": genai_types.GenerateContentConfig(max_output_tokens=300, temperature=0.3),
+    }
+    return chain, cfgs.get(purpose, cfgs["default"])
+
+
+def gemini_generate(purpose: str, prompt: str) -> str:
+    key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not key:
+        return ""
+    client = genai.Client(api_key=key)
+    chain, cfg = get_gemini_model_chain(purpose)
+    for mid in chain:
+        try:
+            resp = client.models.generate_content(model=mid, contents=prompt, config=cfg)
+            t = (getattr(resp, "text", None) or "").strip()
+            if t:
+                return t
+        except Exception:
+            continue
+    return ""
 
 
 def _load_json(path: str, default):
@@ -142,32 +235,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-
-# Current Generative Language API: prefer 2.x/2.5 flash; bare gemini-1.5-flash often 404s on v1beta.
-GEMINI_FLASH_MODELS: tuple[str, ...] = tuple(
-    m.strip()
-    for m in os.environ.get(
-        "GEMINI_MODEL_CHAIN",
-        "gemini-2.5-flash,gemini-2.0-flash,gemini-1.5-flash-8b,gemini-1.5-flash",
-    ).split(",")
-    if m.strip()
-)
-
-
-def _genai_generate_text_first_ok(contents: str) -> str:
-    """Try GEMINI_FLASH_MODELS in order; return first non-empty text or empty string."""
-    if not GEMINI_API_KEY:
-        return ""
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    for model in GEMINI_FLASH_MODELS:
-        try:
-            resp = client.models.generate_content(model=model, contents=contents)
-            t = (getattr(resp, "text", None) or "").strip()
-            if t:
-                return t
-        except Exception as e:
-            logger.warning("gemini model=%s: %s", model, e)
-    return ""
 
 _NAVIBOT_HITS: dict[str, list[float]] = {}
 
@@ -290,11 +357,13 @@ def _maybe_seed_demo_shipments() -> None:
     """
     if os.environ.get("DEMO_SEED_ON_START", "").strip().lower() not in ("1", "true", "yes"):
         return
+    # Demo-only: generate stable-ish IDs per startup (no hardcoded SHIP_* assumptions in runtime).
+    seed = int(time.time())
     with get_db() as conn:
         for sid, orig, dest, lat, lon, dlat, dlon in [
-            ("SHIP_MUMBAI_001", "Mumbai", "Dubai", 19.07, 72.87, 25.276, 55.296),
-            ("SHIP_CHEN_002", "Chennai", "Rotterdam", 13.08, 80.27, 51.924, 4.477),
-            ("SHIP_DELHI_003", "Delhi", "Singapore", 28.61, 77.21, 1.352, 103.819),
+            (f"DEMO_SHIP_{seed}_A", "Mumbai", "Dubai", 19.07, 72.87, 25.276, 55.296),
+            (f"DEMO_SHIP_{seed}_B", "Chennai", "Rotterdam", 13.08, 80.27, 51.924, 4.477),
+            (f"DEMO_SHIP_{seed}_C", "Delhi", "Singapore", 28.61, 77.21, 1.352, 103.819),
         ]:
             conn.execute(
                 "INSERT OR IGNORE INTO shipments (id, origin, destination, current_lat, current_lon, status) VALUES (?, ?, ?, ?, ?, ?)",
@@ -314,12 +383,24 @@ LOGISTICS_EVENTS: List[dict] = []
 def load_logistics_events():
     global LOGISTICS_EVENTS
     try:
-        with open("offchain_events.json", "r") as f:
-            LOGISTICS_EVENTS = json.load(f)
-        logger.info(f"Loaded {len(LOGISTICS_EVENTS)} off-chain logistics events")
+        with open("offchain_events.json", "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+            if not raw:
+                LOGISTICS_EVENTS = []
+                logger.warning("offchain_events.json empty — starting with []")
+            else:
+                LOGISTICS_EVENTS = json.loads(raw)
+                if not isinstance(LOGISTICS_EVENTS, list):
+                    LOGISTICS_EVENTS = []
+                    logger.warning("offchain_events.json not a list — coerced to []")
+                else:
+                    logger.info("Loaded %s off-chain logistics events", len(LOGISTICS_EVENTS))
     except FileNotFoundError:
         LOGISTICS_EVENTS = []
         logger.warning("offchain_events.json not found — starting empty")
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        LOGISTICS_EVENTS = []
+        logger.warning("offchain_events.json unreadable (%s) — starting empty", e)
 
 
 def save_logistics_events():
@@ -494,6 +575,12 @@ def get_shipment_from_chain(shipment_id: str) -> dict:
     vj = oc.get("verdict_json") if isinstance(oc, dict) else None
     if vj is None and isinstance(oc, dict):
         vj = oc.get("verdict")
+    micro = int(oc.get("funds_microalgo") or 0) if isinstance(oc, dict) else 0
+    try:
+        px = get_algo_usd_price()
+        fu, fi = _escrow_fiat_from_micro(micro, px)
+    except Exception:
+        fu, fi = None, None
     return {
         "shipment_id": shipment_id,
         "origin": rowd.get("origin") or oc.get("origin") if isinstance(oc, dict) else "",
@@ -501,6 +588,8 @@ def get_shipment_from_chain(shipment_id: str) -> dict:
         "status": oc.get("status") if isinstance(oc, dict) else "",
         "risk_score": int(oc.get("risk_score") or 0) if isinstance(oc, dict) else 0,
         "verdict_json": vj,
+        "funds_usd": fu,
+        "funds_inr": fi,
         "on_chain": oc,
         "database": rowd,
         "certificate_asa": int(cid) if cid else None,
@@ -515,6 +604,48 @@ def _generate_reasoning_hash(text: str) -> str:
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
+def compute_jury_hash(
+    *,
+    shipment_id: str,
+    chain_state: dict,
+    weather: dict,
+    sentinel: dict,
+    auditor: dict,
+    fraud_detector: dict,
+    arbiter: dict,
+) -> str:
+    """
+    Phase 2: Deterministic SHA-256 of canonical jury inputs + outputs.
+    Avoids timestamps and freeform text where possible to keep hash stable.
+    """
+    canonical = {
+        "shipment_id": (shipment_id or "").strip(),
+        "chain": {
+            "status": str(chain_state.get("status") or ""),
+            "funds_microalgo": int(chain_state.get("funds_microalgo") or 0),
+            "supplier_address": str(chain_state.get("supplier_address") or ""),
+            "risk_on_chain": int(chain_state.get("risk_on_chain") or 0),
+            "route": str(chain_state.get("route") or ""),
+        },
+        "weather": {
+            "city": str(weather.get("city") or ""),
+            "precipitation_mm": _safe_float(weather.get("precipitation_mm")),
+            "wind_kmh": _safe_float(weather.get("wind_kmh")),
+            "description": str(weather.get("description") or ""),
+            "weather_code": int(weather.get("weather_code") or 0),
+        },
+        "agents": {
+            "sentinel_risk_score": int(sentinel.get("risk_score") or 0),
+            "auditor_risk_score": int(auditor.get("risk_score") or 0),
+            "fraud_risk_score": int(fraud_detector.get("fraud_risk_score") or 0),
+            "arbiter_final_risk_score": int(arbiter.get("final_risk_score") or 0),
+            "arbiter_verdict": str(arbiter.get("verdict") or ""),
+        },
+    }
+    raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 # ─── Runtime Stores ────────────────────────────────────────────────
 AUDIT_TRAIL: dict[str, list] = {}
 JURY_CACHE: dict[str, dict] = {}
@@ -526,6 +657,89 @@ VERDICT_HISTORY_PATH = os.path.join(os.path.dirname(__file__) or ".", "audit_tra
 API_CACHE_TTL_SEC = 15.0
 _STATS_CACHE: dict = {"ts": 0.0, "payload": None}
 _SHIPMENTS_CACHE: dict = {"ts": 0.0, "payload": None}
+
+# Phase 1: CoinGecko ALGO/USD (60s TTL)
+_ALGO_PRICE_CACHE: dict = {"ts": 0.0, "payload": None}
+_ALGO_PRICE_TTL_SEC = 60.0
+COINGECKO_SIMPLE_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
+
+
+def _safe_float(v) -> Optional[float]:
+    """Best-effort float conversion; returns None for NaN/inf/bad values."""
+    try:
+        f = float(v)
+        if f != f:  # NaN
+            return None
+        if f in (float("inf"), float("-inf")):
+            return None
+        return f
+    except Exception:
+        return None
+
+
+def get_algo_usd_price() -> dict:
+    """
+    Live ALGO spot vs USD/INR from CoinGecko simple price API; cached 60s.
+    Returns algo_usd, algo_inr, usd_24h_change (may be None if fetch fails).
+    """
+    now = time.time()
+    prev = _ALGO_PRICE_CACHE.get("payload")
+    if isinstance(prev, dict) and now - float(_ALGO_PRICE_CACHE.get("ts") or 0) < _ALGO_PRICE_TTL_SEC:
+        return {**prev, "cached": True}
+
+    try:
+        r = requests.get(
+            COINGECKO_SIMPLE_PRICE_URL,
+            headers={"User-Agent": "Navi-Trust/2.0 (price-oracle)"},
+            params={
+                "ids": "algorand",
+                "vs_currencies": "usd,inr",
+                "include_24hr_change": "true",
+            },
+            timeout=12,
+        )
+        r.raise_for_status()
+        body = r.json()
+        row = body.get("algorand") if isinstance(body, dict) else None
+        if not isinstance(row, dict):
+            row = {}
+        out = {
+            "algo_usd": _safe_float(row.get("usd")),
+            "algo_inr": _safe_float(row.get("inr")),
+            "usd_24h_change": _safe_float(row.get("usd_24h_change")),
+            "source": "coingecko",
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _ALGO_PRICE_CACHE["ts"] = now
+        _ALGO_PRICE_CACHE["payload"] = out
+        return {**out, "cached": False}
+    except Exception as e:
+        logger.warning("get_algo_usd_price: %s", e)
+        if isinstance(prev, dict):
+            return {**prev, "cached": True, "stale": True, "error": str(e)}
+        return {
+            "algo_usd": None,
+            "algo_inr": None,
+            "usd_24h_change": None,
+            "source": "none",
+            "cached_at": None,
+            "cached": False,
+            "error": str(e),
+        }
+
+
+def _escrow_fiat_from_micro(micro: int, price: dict) -> tuple[Optional[float], Optional[float]]:
+    """Convert micro-ALGO escrow to USD/INR using CoinGecko spot fields on `price`."""
+    try:
+        micro_i = int(micro)
+    except (TypeError, ValueError):
+        micro_i = 0
+    algo_amt = micro_i / 1_000_000.0
+    u = _safe_float(price.get("algo_usd"))
+    i = _safe_float(price.get("algo_inr"))
+    funds_usd = round(algo_amt * u, 4) if u is not None else None
+    funds_inr = round(algo_amt * i, 2) if i is not None else None
+    return funds_usd, funds_inr
 
 
 def _time_ago_from_round_time(rt: Optional[int]) -> str:
@@ -854,7 +1068,7 @@ class LogisticsSentryAgent:
         result = None
 
         try:
-            raw = _genai_generate_text_first_ok(prompt)
+            raw = gemini_generate("default", prompt)
             text = raw.replace("```json", "").replace("```", "").strip()
             result = json.loads(text)
             if result:
@@ -1006,7 +1220,7 @@ class SettlementArbiterAgent:
         result = None
 
         try:
-            raw = _genai_generate_text_first_ok(prompt)
+            raw = gemini_generate("jury", prompt)
             text = raw.replace("```json", "").replace("```", "").strip()
             result = json.loads(text)
             if result:
@@ -1409,7 +1623,7 @@ def _clean_json_response(raw: str) -> dict:
 
 
 def _jury_gemini_generate_text(prompt: str) -> str:
-    out = _genai_generate_text_first_ok(prompt)
+    out = gemini_generate("jury", prompt)
     if not out:
         raise RuntimeError("Gemini returned empty text")
     return out
@@ -1811,7 +2025,7 @@ class MitigationAuditorAgent:
             "If it is vague or empty, return 'REJECTED'. Return only the word."
         )
         try:
-            txt = _genai_generate_text_first_ok(prompt)
+            txt = gemini_generate("default", prompt)
             return bool(txt) and "APPROVED" in txt.upper()
         except Exception as e:
             if _is_gemini_rate_limit(e):
@@ -1852,7 +2066,7 @@ def _db_cell(row, key: str, default=None):
     return default if v is None else v
 
 
-def _shipment_row_for_ui(sid: str, chain_status: str, db_row) -> dict:
+def _shipment_row_for_ui(sid: str, chain_status: str, db_row, price: Optional[dict] = None) -> dict:
     """Single dashboard row: on-chain boxes + DB coordinates + real off-chain events + jury cache."""
     full: dict = {}
     if APP_ID and chain.use_navitrust():
@@ -1907,6 +2121,11 @@ def _shipment_row_for_ui(sid: str, chain_status: str, db_row) -> dict:
     if chain_status in ("Unknown", "Unregistered"):
         stage = "Not_Registered"
     funds_micro = int(full.get("funds_microalgo") or 0)
+    try:
+        _px = price if isinstance(price, dict) else get_algo_usd_price()
+        funds_usd, funds_inr = _escrow_fiat_from_micro(funds_micro, _px)
+    except Exception:
+        funds_usd, funds_inr = None, None
     dest_lat = float(dest_lat_v) if dest_lat_v is not None else None
     dest_lon = float(dest_lon_v) if dest_lon_v is not None else None
     sup_addr = _read_supplier_address(sid)
@@ -1926,6 +2145,8 @@ def _shipment_row_for_ui(sid: str, chain_status: str, db_row) -> dict:
         "dest_lon": dest_lon,
         "stage": stage,
         "funds_locked_microalgo": funds_micro,
+        "funds_usd": funds_usd,
+        "funds_inr": funds_inr,
         "weather": {"temperature": 0.0, "precipitation": 0.0, "weather_code": 0},
         "logistics_events": ev_out,
         "last_jury": lj,
@@ -1941,16 +2162,21 @@ def _shipment_row_for_ui(sid: str, chain_status: str, db_row) -> dict:
 def build_sync_ledger_shipments() -> List[dict]:
     """Enumerate on-chain shipments via boxes, merge DB metadata; append DB-only rows as Not_Registered."""
     ledger_pairs = _list_ledger_shipments()
+    px = None
+    try:
+        px = get_algo_usd_price()
+    except Exception:
+        px = None
     with get_db() as conn:
         db_rows = {r["id"]: r for r in conn.execute("SELECT * FROM shipments").fetchall()}
     seen = {sid for sid, _ in ledger_pairs}
-    rows = [_shipment_row_for_ui(sid, st, db_rows.get(sid)) for sid, st in ledger_pairs]
+    rows = [_shipment_row_for_ui(sid, st, db_rows.get(sid), px) for sid, st in ledger_pairs]
     for sid, db_row in db_rows.items():
         if sid in seen:
             continue
         st = chain.read_shipment_status(sid)
         if st in ("Unregistered", "Unknown"):
-            rows.append(_shipment_row_for_ui(sid, "Not_Registered", db_row))
+            rows.append(_shipment_row_for_ui(sid, "Not_Registered", db_row, px))
     return rows
 
 
@@ -2013,6 +2239,41 @@ async def run_jury(body: RunJuryRequest):
     auditor = jury_result["auditor"]
     fraud = jury_result["fraud_detector"]
 
+    funds_micro_jury = 0
+    chain_state_for_hash: dict = {}
+    try:
+        _full_pre = chain.read_shipment_full(shipment_id) if APP_ID else {}
+        funds_micro_jury = int(_full_pre.get("funds_microalgo") or 0)
+        chain_state_for_hash = {
+            "status": _full_pre.get("status") or "",
+            "funds_microalgo": funds_micro_jury,
+            "supplier_address": _read_supplier_address(shipment_id) or "",
+            "risk_on_chain": int(_full_pre.get("risk_score") or 0),
+            "route": _full_pre.get("route") or "",
+        }
+    except Exception:
+        funds_micro_jury = 0
+        chain_state_for_hash = {}
+    try:
+        _px_j = get_algo_usd_price()
+        escrow_usd_note, escrow_inr_note = _escrow_fiat_from_micro(funds_micro_jury, _px_j)
+    except Exception:
+        escrow_usd_note, escrow_inr_note = None, None
+
+    jury_hash = ""
+    try:
+        jury_hash = compute_jury_hash(
+            shipment_id=shipment_id,
+            chain_state=chain_state_for_hash,
+            weather=weather if isinstance(weather, dict) else {},
+            sentinel=sentinel if isinstance(sentinel, dict) else {},
+            auditor=auditor if isinstance(auditor, dict) else {},
+            fraud_detector=fraud if isinstance(fraud, dict) else {},
+            arbiter=arbiter if isinstance(arbiter, dict) else {},
+        )
+    except Exception:
+        jury_hash = ""
+
     verdict_note = {
         "type": "NAVI_VERDICT",
         "v": "3",
@@ -2035,6 +2296,12 @@ async def run_jury(body: RunJuryRequest):
         },
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if escrow_usd_note is not None:
+        verdict_note["escrow_usd"] = round(float(escrow_usd_note), 2)
+    if escrow_inr_note is not None:
+        verdict_note["escrow_inr"] = round(float(escrow_inr_note), 2)
+    if jury_hash:
+        verdict_note["jury_hash"] = jury_hash
     note_bytes = json.dumps(verdict_note, separators=(",", ":")).encode("utf-8")
     if len(note_bytes) > 1000:
         verdict_note["reason"] = (arbiter["reasoning"] or "")[:80]
@@ -2074,10 +2341,20 @@ async def run_jury(body: RunJuryRequest):
         "auditor_score": auditor["risk_score"],
         "fraud_score": fraud["fraud_risk_score"],
         "weather": weather,
+        "jury_hash": jury_hash or None,
         "tx_id": tx_id,
         "lora_tx_url": f"{LORA_TESTNET_TX}/{tx_id}",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    jury_hash_tx = None
+    if jury_hash:
+        try:
+            jury_hash_tx = chain.store_jury_hash_box(shipment_id, jury_hash)
+        except Exception:
+            jury_hash_tx = None
+    if isinstance(jury_hash_tx, dict) and jury_hash_tx.get("tx_id"):
+        audit_entry["jury_hash_tx_id"] = str(jury_hash_tx.get("tx_id"))
+        audit_entry["jury_hash_lora_tx_url"] = jury_hash_tx.get("lora_url") or chain.lora_tx_url(jury_hash_tx.get("tx_id"))
     AUDIT_TRAIL.setdefault(shipment_id, []).append(audit_entry)
     try:
         save_verdict_history()
@@ -2423,6 +2700,162 @@ def health():
     }
 
 
+@app.get("/price")
+def price_oracle():
+    """ALGO/USD spot + 24h change (CoinGecko); 60s server cache."""
+    try:
+        return get_algo_usd_price()
+    except Exception as e:
+        logger.warning("/price: %s", e)
+        return {
+            "algo_usd": None,
+            "algo_inr": None,
+            "usd_24h_change": None,
+            "source": "none",
+            "error": str(e),
+        }
+
+
+@app.get("/escrow-usd/{shipment_id}")
+def escrow_usd_for_shipment(shipment_id: str):
+    """Escrow balance for a shipment with USD/INR (derived from live ALGO price)."""
+    sid = (shipment_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=422, detail="shipment_id required")
+    try:
+        full = chain.read_shipment_full(sid) if APP_ID else {}
+        micro = int(full.get("funds_microalgo") or 0)
+        px = get_algo_usd_price()
+        fu, fi = _escrow_fiat_from_micro(micro, px)
+        return {
+            "shipment_id": sid,
+            "funds_microalgo": micro,
+            "funds_algo": round(micro / 1_000_000.0, 6),
+            "funds_usd": fu,
+            "funds_inr": fi,
+            "algo_usd": px.get("algo_usd"),
+            "algo_inr": px.get("algo_inr"),
+            "usd_24h_change": px.get("usd_24h_change"),
+            "price_cached": px.get("cached", False),
+            "price_source": px.get("source"),
+        }
+    except Exception as e:
+        logger.warning("/escrow-usd: %s", e)
+        return {
+            "shipment_id": sid,
+            "funds_microalgo": None,
+            "funds_algo": None,
+            "funds_usd": None,
+            "funds_inr": None,
+            "error": str(e),
+        }
+
+
+@app.get("/dispute-feed")
+def dispute_feed():
+    """
+    Phase 3: public RSS-style feed of active on-chain disputes and recorded jury verdicts.
+    Each item includes ALGO + USD (CoinGecko) and Lora explorer links where applicable.
+    """
+    aid = APP_ID if isinstance(APP_ID, int) else int(os.environ.get("APP_ID") or 0)
+    generated = datetime.now(timezone.utc).isoformat()
+    try:
+        px = get_algo_usd_price()
+        lora_app = f"{LORA_TESTNET_APP}/{aid}" if aid else LORA_TESTNET_APP
+        lora_contract = None
+        try:
+            if aid:
+                gs = chain.global_stats_navitrust()
+                lora_contract = gs.get("lora_contract_url") or gs.get("lora_contract_account_url")
+        except Exception:
+            lora_contract = None
+
+        jury_items: list[dict] = []
+        try:
+            for sid, entries in (AUDIT_TRAIL or {}).items():
+                if not isinstance(entries, list):
+                    continue
+                for e in entries:
+                    if not isinstance(e, dict):
+                        continue
+                    micro = 0
+                    try:
+                        if aid:
+                            full = chain.read_shipment_full(str(sid))
+                            micro = int(full.get("funds_microalgo") or 0)
+                    except Exception:
+                        micro = 0
+                    fu, fi = _escrow_fiat_from_micro(micro, px)
+                    txid = str(e.get("tx_id") or "").strip()
+                    jury_items.append(
+                        {
+                            "kind": "JURY_VERDICT",
+                            "shipment_id": str(sid),
+                            "verdict": e.get("verdict"),
+                            "score": e.get("score"),
+                            "ts": e.get("timestamp") or "",
+                            "funds_algo": round(micro / 1_000_000.0, 6),
+                            "funds_usd": fu,
+                            "funds_inr": fi,
+                            "algo_spot_usd": px.get("algo_usd"),
+                            "lora_verdict_tx_url": (e.get("lora_tx_url") or (f"{LORA_TESTNET_TX}/{txid}" if txid else "")).strip()
+                            or None,
+                            "lora_app_url": lora_app,
+                            "lora_contract_url": lora_contract,
+                        }
+                    )
+        except Exception as e:
+            logger.warning("dispute-feed jury slice: %s", e)
+
+        jury_items.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
+
+        active_items: list[dict] = []
+        try:
+            pairs: list[tuple[str, str]] = []
+            if aid:
+                pairs = chain.list_shipment_statuses_from_boxes()
+            seen: set[str] = set()
+            for sid, st in pairs:
+                if st != chain.STATUS_DISPUTED:
+                    continue
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                micro = 0
+                try:
+                    full = chain.read_shipment_full(sid) if aid else {}
+                    micro = int(full.get("funds_microalgo") or 0)
+                except Exception:
+                    micro = 0
+                fu, fi = _escrow_fiat_from_micro(micro, px)
+                active_items.append(
+                    {
+                        "kind": "ACTIVE_DISPUTE",
+                        "shipment_id": sid,
+                        "on_chain_status": st,
+                        "ts": generated,
+                        "funds_algo": round(micro / 1_000_000.0, 6),
+                        "funds_usd": fu,
+                        "funds_inr": fi,
+                        "algo_spot_usd": px.get("algo_usd"),
+                        "lora_app_url": lora_app,
+                        "lora_contract_url": lora_contract,
+                    }
+                )
+        except Exception as e:
+            logger.warning("dispute-feed active slice: %s", e)
+
+        return {
+            "app_id": aid or None,
+            "generated_at": generated,
+            "items": jury_items + active_items,
+            "counts": {"jury_verdict": len(jury_items), "active_dispute": len(active_items)},
+        }
+    except Exception as e:
+        logger.warning("dispute-feed: %s", e)
+        return {"app_id": aid or None, "generated_at": generated, "items": [], "error": str(e)}
+
+
 @app.get("/protocol/display-global-state")
 def protocol_display_global_state():
     """Filtered global state for /protocol page (supply-chain fields only)."""
@@ -2439,10 +2872,6 @@ def simulate_event(body: SimulateEventBody):
     ev = (body.event or "").strip()
     if not sid or not ev:
         raise HTTPException(status_code=422, detail="shipment_id and event are required")
-    with get_db() as conn:
-        row = conn.execute("SELECT id FROM shipments WHERE id = ?", (sid,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=400, detail="Unknown shipment")
     sev = (body.severity or "medium").strip().lower()
     if sev not in ("low", "medium", "high", "critical"):
         sev = "medium"
@@ -2643,11 +3072,11 @@ def _navibot_risk_fallback_text(facts: dict) -> str:
     sid = facts.get("shipment_id") or "This shipment"
     st = facts.get("on_chain_status") or "unknown"
     parts = [f"{sid} on-chain status: {st}."]
-    if sid == "SHIP_CHEN_002" or (st == "Disputed" and "CHEN" in str(sid).upper()):
+    if st == "Disputed":
         parts.append(
-            "This demo shipment is disputed on-chain: the AI jury recorded elevated weather risk (87/100) "
-            "and `record_verdict` locked the escrow — the verdict JSON is in the contract box and the "
-            "structured summary is in the transaction note on Lora."
+            "This shipment is disputed on-chain: the AI jury recorded elevated risk and `record_verdict` "
+            "froze the escrow per smart-contract rules. The verdict summary is in the Algorand transaction note (Lora) "
+            "and the full verdict payload is stored in box storage."
         )
     evs = facts.get("logistics_events") or []
     if evs:
@@ -2691,22 +3120,9 @@ def _elevenlabs_tts(text: str) -> Optional[str]:
 
 
 def _navibot_gemini_text(sys_prompt: str, user_blob: str) -> str:
-    """NaviBot Gemini path — uses GEMINI_FLASH_MODELS + tight generation config."""
-    if not GEMINI_API_KEY:
-        logger.warning("navibot: GEMINI_API_KEY not set")
-        return ""
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    """NaviBot Gemini path — dynamic model discovery + fallbacks."""
     combined = (sys_prompt + "\n\n" + user_blob).strip()
-    cfg = genai_types.GenerateContentConfig(max_output_tokens=150, temperature=0.3)
-    for model in GEMINI_FLASH_MODELS:
-        try:
-            resp = client.models.generate_content(model=model, contents=combined, config=cfg)
-            t = (getattr(resp, "text", None) or "").strip()
-            if t:
-                return t
-        except Exception as e:
-            logger.warning("navibot gemini model=%s: %s", model, e)
-    return ""
+    return gemini_generate("navibot", combined)
 
 
 def _navibot_pack(
@@ -2743,29 +3159,21 @@ async def _get_navibot_context() -> str:
         ctx = f"""You are NaviBot for Navi-Trust supply chain dispute oracle.
 
 LIVE ALGORAND TESTNET STATE (App #{APP_ID}):
-Total shipments on-chain: {stats.get('total_shipments', 3)}
-Settled: {stats.get('total_settled', 1)} | Disputed: {stats.get('total_disputed', 1)}
-ALGO in smart contract escrow: {stats.get('escrow_total_algo', 5)} ALGO
-
-DEMO SHIPMENTS:
-SHIP_MUMBAI_001: Mumbai→Dubai | In Transit | 2 ALGO locked | no jury yet
-SHIP_CHEN_002: Chennai→Rotterdam | DISPUTED | 3 ALGO FROZEN | risk 87/100
-  4-agent jury result: storm system 12mm rain 78km/h winds at Rotterdam
-SHIP_DELHI_003: Delhi→Singapore | SETTLED | 2 ALGO paid | NAVI-CERT NFT minted
+Total shipments on-chain: {int(stats.get('total_shipments') or 0)}
+Settled: {int(stats.get('total_settled') or 0)} | Disputed: {int(stats.get('total_disputed') or 0)}
+ALGO in smart contract escrow: {stats.get('escrow_total_algo', 'unknown')} ALGO
 
 HOW NAVI-TRUST WORKS:
 1. Buyer locks ALGO in smart contract (code holds it, not us)
 2. 4-agent AI jury: Weather Sentinel + Compliance Auditor + Fraud Detector + Chief Arbiter
 3. Verdict written permanently to Algorand transaction note
 4. ALGO auto-releases (SETTLE) or freezes (DISPUTE)
-5. ARC-69 NFT certificate minted on successful settlement
 
 ANSWER RULES:
 - Max 2-3 sentences
-- Tell buyer to click [Run AI Jury] on dashboard
-- Tell supplier to check Supplier view for their payment status
-- Never make up transaction IDs or ASA IDs
+- If asked about a shipment, ask for the shipment_id (e.g. SHIP_...) or tell them to open the shipment card / verify page
 - If asked to execute: say "click the button on the shipment card"
+- Never make up transaction IDs or ASA IDs
 """
         _navibot_context_cache = ctx
         _navibot_context_ts = time.time()
@@ -2777,30 +3185,6 @@ ANSWER RULES:
 def _navibot_rule_match(query: str) -> Optional[dict]:
     """Keyword-only answers (no Gemini). None → caller may run LLM."""
     q = (query or "").lower()
-    if any(w in q for w in ["mumbai", "001", "in transit"]):
-        return _navibot_pack(
-            "SHIP_MUMBAI_001 is in transit Mumbai→Dubai with 2 ALGO locked. No jury run yet — click [Run AI Jury] on its card to get a live verdict from all 4 agents.",
-            "run_jury",
-            None,
-            True,
-            "SHIP_MUMBAI_001",
-        )
-    if any(w in q for w in ["chennai", "002", "disput", "frozen", "storm", "rotterdam"]):
-        return _navibot_pack(
-            "SHIP_CHEN_002 is disputed. The 4-agent jury scored it 87/100 — storm system at Rotterdam with 12mm rain and 78km/h winds. 3 ALGO is frozen in the smart contract until resolved.",
-            None,
-            None,
-            True,
-            "SHIP_CHEN_002",
-        )
-    if any(w in q for w in ["delhi", "003", "settl", "cert", "singapore"]):
-        return _navibot_pack(
-            "SHIP_DELHI_003 settled successfully. Risk score was 18/100 — clear weather at Singapore. 2 ALGO was released to the supplier and a NAVI-CERT certificate was minted on Algorand.",
-            "verify",
-            None,
-            True,
-            "SHIP_DELHI_003",
-        )
     if any(w in q for w in ["4 agent", "four agent", "jury", "sentinel", "auditor", "fraud", "arbiter"]):
         return _navibot_pack(
             "The 4-agent jury has: Weather Sentinel (live Open-Meteo data), Compliance Auditor (reads Algorand boxes), Fraud Detector (supplier history), and Chief Arbiter (final binding verdict). All reasoning is burned into the Algorand transaction note.",
@@ -2819,15 +3203,15 @@ def _navibot_rule_match(query: str) -> Optional[dict]:
         )
     if any(w in q for w in ["escrow", "algo", "money", "lock", "5 algo", "total"]):
         return _navibot_pack(
-            "Currently 5 ALGO is locked in the NaviTrust smart contract: 2 ALGO for the Mumbai shipment (awaiting jury), 3 ALGO frozen for the disputed Chennai shipment.",
+            "Escrow ALGO is held by the smart contract account (not by us). Open the dashboard stats to see the current escrow total, or enter a shipment_id to see its exact locked funds.",
             None,
             None,
             True,
             None,
         )
-    if any(w in q for w in ["reputation", "supplier", "score", "55"]):
+    if any(w in q for w in ["reputation", "supplier", "score"]):
         return _navibot_pack(
-            "Supplier reputation is stored in Algorand box storage. It increases by 5 points after each clean settlement (capped at 100). The demo supplier is at 55/100 after the Delhi settlement. Switch to Supplier view to see the full card.",
+            "Supplier reputation is stored in Algorand box storage and updates when shipments settle. Open Supplier view for the latest score, or provide a supplier wallet address to look it up.",
             None,
             None,
             True,
@@ -2843,11 +3227,11 @@ def _navibot_rule_match(query: str) -> Optional[dict]:
         )
     if any(w in q for w in ["certificate", "nft", "arc", "navi-cert", "arc69"]):
         return _navibot_pack(
-            "When a shipment settles cleanly, an ARC-69 NFT certificate (NAVI-CERT) is minted on Algorand. It's unique (total supply 1), verifiable on Lora, and serves as permanent proof of clean delivery.",
+            "When a shipment settles cleanly, a certificate asset may be minted on Algorand. Use the /verify page for a shipment to see any certificate id and explorer link (never rely on off-chain claims).",
             "verify",
             None,
             True,
-            "SHIP_DELHI_003",
+            None,
         )
     return None
 
@@ -2858,7 +3242,7 @@ def _navibot_fallback(query: str) -> dict:
     if r is not None:
         return r
     return _navibot_pack(
-        "Ask me about a specific shipment: Mumbai (in transit), Chennai (disputed), or Delhi (settled). Or ask how the 4-agent jury works.",
+        "Ask me about a specific shipment_id (e.g. SHIP_ABC123), or ask how the 4-agent jury works.",
         None,
         None,
         True,
@@ -2876,16 +3260,9 @@ def _navibot_detect_action_and_shipment(query: str) -> tuple[Optional[str], Opti
     elif any(w in ql for w in ("verify", "proof", "check", "lora")):
         action = "verify"
     shipment_id: Optional[str] = None
-    if "ship_mumbai" in ql or ("mumbai" in ql and "chen" not in ql):
-        shipment_id = "SHIP_MUMBAI_001"
-    elif "ship_chen" in ql or "chennai" in ql or "002" in ql:
-        shipment_id = "SHIP_CHEN_002"
-    elif "ship_delhi" in ql or "delhi" in ql or "003" in ql:
-        shipment_id = "SHIP_DELHI_003"
-    else:
-        m = re.search(r"\b(SHIP_[A-Za-z0-9_-]+)\b", query or "")
-        if m:
-            shipment_id = m.group(1)
+    m = re.search(r"\b(SHIP_[A-Za-z0-9_-]+)\b", query or "")
+    if m:
+        shipment_id = m.group(1)
     return action, shipment_id
 
 
@@ -2903,41 +3280,7 @@ def _navibot_history_to_prompt(history: List[dict]) -> str:
 
 
 def _navibot_fast_llm(context: str, history: List[dict], query: str) -> str:
-    """Primary: google.generativeai GenerativeModel (Phase 7). Fallback: google-genai client."""
-    if not GEMINI_API_KEY:
-        return ""
-    try:
-        import google.generativeai as ggi
-
-        ggi.configure(api_key=GEMINI_API_KEY)
-        msgs: List[dict] = []
-        for m in history[-6:]:
-            if not isinstance(m, dict):
-                continue
-            role = (m.get("role") or "user").strip()
-            text = (m.get("content") or m.get("text") or "").strip()
-            if not text:
-                continue
-            msgs.append(
-                {"role": "user" if role == "user" else "model", "parts": [text]}
-            )
-        full = f"{context}\n\nUser: {query}\nAnswer in 1-3 sentences:"
-        gen_cfg = {"max_output_tokens": 150, "temperature": 0.3}
-        for model_name in GEMINI_FLASH_MODELS:
-            try:
-                gmodel = ggi.GenerativeModel(model_name, generation_config=gen_cfg)
-                if msgs:
-                    chat = gmodel.start_chat(history=msgs)
-                    resp = chat.send_message(full)
-                else:
-                    resp = gmodel.generate_content(full)
-                out = (getattr(resp, "text", None) or "").strip()
-                if out:
-                    return out
-            except Exception as e:
-                logger.warning("navibot legacy model=%s: %s", model_name, e)
-    except Exception as e:
-        logger.warning("navibot google.generativeai: %s", e)
+    """NaviBot LLM: dynamic discovery chain via google-genai only (fast + robust)."""
     hist = _navibot_history_to_prompt(history)
     user_blob = (
         (f"Prior conversation:\n{hist}\n\n" if hist else "")
@@ -3019,17 +3362,10 @@ async def navibot_chat(req: NavibotRequest, request: Request):
             action = "settle"
         elif any(w in qlow for w in ["verify", "proof", "check"]):
             action = "verify"
-        for sid, word in [
-            ("SHIP_MUMBAI_001", "mumbai"),
-            ("SHIP_CHEN_002", "chennai"),
-            ("SHIP_DELHI_003", "delhi"),
-        ]:
-            if word in qlow or sid.lower() in qlow:
-                shipment_id = sid
-                break
+        m = re.search(r"\b(SHIP_[A-Za-z0-9_-]+)\b", q)
+        if m:
+            shipment_id = m.group(1)
         shipment_id = req.shipment_id or shipment_id
-        if action == "run_jury" and not shipment_id:
-            shipment_id = "SHIP_MUMBAI_001"
         pack = _navibot_pack(text.strip(), action, None, used_fallback, shipment_id)
         pack["context_used"] = True
         return JSONResponse(content=pack)
@@ -3155,6 +3491,11 @@ def verify_shipment(shipment_id: str):
     latest = verdicts[-1] if verdicts else None
     verdict_tx = (latest or {}).get("tx_id")
     funds_micro = int(full.get("funds_microalgo") or 0) if isinstance(full, dict) else 0
+    try:
+        _px_v = get_algo_usd_price()
+        vf_usd, vf_inr = _escrow_fiat_from_micro(funds_micro, _px_v)
+    except Exception:
+        vf_usd, vf_inr = None, None
     cert_id = full.get("certificate_asa") if isinstance(full, dict) else None
     on_chain_risk = int(full.get("risk_score") or 0) if isinstance(full, dict) else 0
     chain_verdict_text = ""
@@ -3218,6 +3559,8 @@ def verify_shipment(shipment_id: str):
         "total_scans": len(verdicts),
         "latest_verdict": latest,
         "funds_locked_microalgo": funds_micro,
+        "funds_usd": vf_usd,
+        "funds_inr": vf_inr,
         "certificate_asa_id": cert_id,
         "on_chain_risk_score": on_chain_risk,
         "chain_verdict_reasoning": chain_verdict_text,
@@ -3238,6 +3581,70 @@ def verify_shipment(shipment_id: str):
         ],
         "verified_on": "Algorand Testnet",
     }
+
+
+@app.post("/verify-hash")
+def verify_hash(payload: dict = Body(...)):
+    """
+    Phase 2: recompute jury hash from stored canonical inputs and compare with on-chain hash witness.
+    Returns a soft JSON response (never 500 for missing data).
+    """
+    sid = str((payload or {}).get("shipment_id") or "").strip()
+    if not sid:
+        raise HTTPException(status_code=422, detail="shipment_id required")
+    try:
+        entries = AUDIT_TRAIL.get(sid) or []
+        latest = entries[-1] if entries and isinstance(entries[-1], dict) else {}
+        if not isinstance(latest, dict):
+            latest = {}
+
+        # Recompute from stored audit fields (canonical subset)
+        stored_weather = latest.get("weather") if isinstance(latest.get("weather"), dict) else {}
+        chain_state = {}
+        try:
+            cs = _chain_snapshot_for_jury(sid)
+            chain_state = cs if isinstance(cs, dict) else {}
+        except Exception:
+            chain_state = {}
+        computed = compute_jury_hash(
+            shipment_id=sid,
+            chain_state=chain_state,
+            weather=stored_weather,
+            sentinel={"risk_score": latest.get("sentinel_score")},
+            auditor={"risk_score": latest.get("auditor_score")},
+            fraud_detector={"fraud_risk_score": latest.get("fraud_score")},
+            arbiter={"final_risk_score": latest.get("score"), "verdict": latest.get("verdict")},
+        )
+
+        on_chain_hash = ""
+        src = "none"
+        tx_id = str(latest.get("jury_hash_tx_id") or "").strip()
+        if tx_id:
+            note = chain.fetch_transaction_note_json(tx_id)
+            if isinstance(note, dict) and note.get("type") == "NAVI_JURY_HASH":
+                on_chain_hash = str(note.get("hash") or "").strip().lower()
+                src = "jury_hash_note_tx"
+        if not on_chain_hash:
+            verdict_tx = str(latest.get("tx_id") or "").strip()
+            if verdict_tx:
+                note = chain.fetch_transaction_note_json(verdict_tx)
+                if isinstance(note, dict) and note.get("type") == "NAVI_VERDICT":
+                    on_chain_hash = str(note.get("jury_hash") or "").strip().lower()
+                    src = "verdict_note_tx"
+
+        return {
+            "shipment_id": sid,
+            "computed_hash": computed,
+            "on_chain_hash": on_chain_hash or None,
+            "match": bool(on_chain_hash) and computed == on_chain_hash,
+            "source": src,
+            "jury_hash_tx_id": tx_id or None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("verify-hash: %s", e)
+        return {"shipment_id": sid, "computed_hash": None, "on_chain_hash": None, "match": False, "error": str(e)}
 
 
 if __name__ == "__main__":
