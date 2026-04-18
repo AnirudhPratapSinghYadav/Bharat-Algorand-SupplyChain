@@ -488,49 +488,25 @@ function MainApp() {
             setToast('Shipment ID and supplier address are required.');
             return;
         }
-        if (!accountAddress) {
-            setToast('Connect Pera Wallet first — registration is signed in your wallet.');
-            return;
-        }
         setRegisterBusy(true);
         try {
-            setToast('Building transaction… Approve in Pera when prompted.');
-            const buildRes = await axios.post(
-                `${BACKEND_URL}/register-shipment/build`,
+            setToast('Registering on-chain (oracle signs on the server)…');
+            await axios.post(
+                `${BACKEND_URL}/register-shipment`,
                 {
                     shipment_id: regForm.shipment_id.trim(),
                     origin: regForm.origin,
                     destination: regForm.destination,
                     supplier_address: regForm.supplier.trim(),
-                    sender_address: accountAddress,
                 },
                 {
                     headers: { 'Content-Type': 'application/json' },
                     timeout: 120_000,
                 },
             );
-            const txnsB64: string[] = buildRes.data?.txns_b64 ?? buildRes.data?.txns ?? [];
-            let confirmedTxId: string | null = null;
-            const ok = await signSendConfirmB64Group(txnsB64, { label: 'Register shipment' }, async (ctx) => {
-                confirmedTxId = ctx.txId;
-                await axios.post(
-                    `${BACKEND_URL}/register-shipment/confirm`,
-                    {
-                        shipment_id: regForm.shipment_id.trim(),
-                        origin: regForm.origin,
-                        destination: regForm.destination,
-                        supplier_address: regForm.supplier.trim(),
-                        tx_id: ctx.txId,
-                    },
-                    { headers: { 'Content-Type': 'application/json' }, timeout: 60_000 },
-                );
-            });
-            if (!ok || !confirmedTxId) {
-                setRegisterBusy(false);
-                return;
-            }
             setRegisterModal(false);
             setRegForm((f) => ({ ...f, shipment_id: '' }));
+            setToast('Shipment registered on Algorand.');
             const fresh = await axios.get(`${BACKEND_URL}/shipments`);
             setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
             axios.get(`${BACKEND_URL}/stats`).then((r) => setStats(r.data)).catch(() => {});
@@ -2413,6 +2389,10 @@ function MainApp() {
                                 <X size={18} color="#9ca3af" />
                             </button>
                         </div>
+                        <p style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: 12, lineHeight: 1.45 }}>
+                            The smart contract only accepts <strong>register_shipment</strong> from the oracle account. This form calls your backend; the server signs with{' '}
+                            <code style={{ fontSize: '0.72rem' }}>ORACLE_MNEMONIC</code>. Use a <strong>new</strong> ID (e.g. SHIP_TEST_001) — demo IDs may already exist.
+                        </p>
                         <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: 4 }}>Shipment ID</label>
                         <input
                             value={regForm.shipment_id}
@@ -2452,7 +2432,7 @@ function MainApp() {
                                 Cancel
                             </button>
                             <button type="button" className="primary-btn" disabled={registerBusy} onClick={() => void handleRegisterShipment()}>
-                                {registerBusy ? 'Open Pera…' : 'Register in Pera'}
+                                {registerBusy ? 'Registering…' : 'Register on-chain'}
                             </button>
                         </div>
                     </div>
