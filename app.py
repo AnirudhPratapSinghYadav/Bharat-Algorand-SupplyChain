@@ -38,7 +38,6 @@ from models import (
     BlockchainState,
     RunJuryRequest,
     SettleBody,
-    SimulateEventBody,
     NavibotRequest,
     FundShipmentBuildBody,
     RegisterShipmentBody,
@@ -2414,6 +2413,7 @@ async def run_jury(body: RunJuryRequest):
         "trigger_contract": arbiter["verdict"] == "DISPUTE",
         "oracle_stake": None,
         "stake_tx_id": None,
+        "jury_hash": {"combined_hash": jury_hash, "hex": jury_hash} if jury_hash else None,
     }
     _STATS_CACHE["payload"] = None
     _SHIPMENTS_CACHE["payload"] = None
@@ -2761,17 +2761,22 @@ def escrow_usd_for_shipment(shipment_id: str):
         micro = int(full.get("funds_microalgo") or 0)
         px = get_algo_usd_price()
         fu, fi = _escrow_fiat_from_micro(micro, px)
+        algo_locked = round(micro / 1_000_000.0, 6)
         return {
             "shipment_id": sid,
             "funds_microalgo": micro,
-            "funds_algo": round(micro / 1_000_000.0, 6),
+            "funds_algo": algo_locked,
+            "algo_locked": algo_locked,
             "funds_usd": fu,
             "funds_inr": fi,
+            "usd_value": fu,
+            "inr_value": fi,
             "algo_usd": px.get("algo_usd"),
             "algo_inr": px.get("algo_inr"),
             "usd_24h_change": px.get("usd_24h_change"),
             "price_cached": px.get("cached", False),
             "price_source": px.get("source"),
+            "source": "algorand_box_storage + coingecko_live",
         }
     except Exception as e:
         logger.warning("/escrow-usd: %s", e)
@@ -2879,12 +2884,16 @@ def dispute_feed():
         except Exception as e:
             logger.warning("dispute-feed active slice: %s", e)
 
+        merged = jury_items + active_items
+        nd = len([x for x in active_items if isinstance(x, dict)])
         return {
             "feed": "Navi-Trust Live Dispute Feed",
             "network": "algorand_testnet",
             "app_id": aid or None,
             "generated_at": generated,
-            "items": jury_items + active_items,
+            "items": merged,
+            "total_items": len(merged),
+            "total_disputed": nd,
             "counts": {"jury_verdict": len(jury_items), "active_dispute": len(active_items)},
         }
     except Exception as e:
@@ -2895,6 +2904,8 @@ def dispute_feed():
             "app_id": aid or None,
             "generated_at": generated,
             "items": [],
+            "total_items": 0,
+            "total_disputed": 0,
             "error": str(e),
         }
 
@@ -2912,25 +2923,6 @@ def protocol_display_global_state():
     if not aid:
         return {"app_id": None, "fields": {}}
     return {"app_id": aid, "fields": chain.get_display_global_state(aid)}
-
-
-@app.post("/simulate-event")
-def simulate_event(body: SimulateEventBody):
-    """Append one logistics event to offchain_events.json (supplier / demo)."""
-    sid = (body.shipment_id or "").strip()
-    ev = (body.event or "").strip()
-    if not sid or not ev:
-        raise HTTPException(status_code=422, detail="shipment_id and event are required")
-    sev = (body.severity or "medium").strip().lower()
-    if sev not in ("low", "medium", "high", "critical"):
-        sev = "medium"
-    ts = (body.timestamp or "").strip()
-    if not ts:
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    entry = {"shipment_id": sid, "event": ev, "severity": sev, "timestamp": ts}
-    LOGISTICS_EVENTS.append(entry)
-    save_logistics_events()
-    return {"ok": True, "stored": entry, "total_events": len(LOGISTICS_EVENTS)}
 
 
 @app.get("/shipment/{shipment_id}")
@@ -3289,6 +3281,24 @@ ANSWER RULES:
 def _navibot_rule_match(query: str) -> Optional[dict]:
     """Keyword-only answers (no Gemini). None → caller may run LLM."""
     q = (query or "").lower()
+    if "chennai" in q and any(w in q for w in ("frozen", "freeze", "disput", "stuck", "why")):
+        return _navibot_pack(
+            "Chennai→Rotterdam (SHIP_CHEN_002) is on-chain Disputed: live weather + jury risk landed around 87/100, so buyer ALGO (~3 ALGO) stays frozen in escrow until a new verdict or resolution.",
+            None,
+            None,
+            True,
+            "SHIP_CHEN_002",
+        )
+    if ("all shipments" in q or ("status" in q and "shipment" in q)) and any(
+        w in q for w in ("mumbai", "chennai", "delhi", "all", "each", "every")
+    ):
+        return _navibot_pack(
+            "Demo lanes are Mumbai→Dubai, Chennai→Rotterdam, and Delhi→Singapore — use the dashboard or GET /shipments for live on-chain status; Verify any SHIP_* id without logging in.",
+            None,
+            None,
+            True,
+            None,
+        )
     if any(w in q for w in ["hash", "verify hash", "proof", "authentic", "tamper"]):
         return _navibot_pack(
             "Every Navi-Trust jury verdict has a SHA-256 hash anchored on Algorand (verdict note + optional NAVI_JURY_HASH witness). "
@@ -3779,11 +3789,15 @@ def verify_hash(payload: dict = Body(...)):
                     on_chain_hash = str(note.get("jury_hash") or "").strip().lower()
                     src = "verdict_note_tx"
 
+        matched = bool(on_chain_hash) and computed == on_chain_hash
         return {
             "shipment_id": sid,
             "computed_hash": computed,
+            "recomputed_hash": computed,
             "on_chain_hash": on_chain_hash or None,
-            "match": bool(on_chain_hash) and computed == on_chain_hash,
+            "stored_hash": on_chain_hash or None,
+            "match": matched,
+            "verified": matched,
             "source": src,
             "jury_hash_tx_id": tx_id or None,
         }
@@ -3791,7 +3805,16 @@ def verify_hash(payload: dict = Body(...)):
         raise
     except Exception as e:
         logger.warning("verify-hash: %s", e)
-        return {"shipment_id": sid, "computed_hash": None, "on_chain_hash": None, "match": False, "error": str(e)}
+        return {
+            "shipment_id": sid,
+            "computed_hash": None,
+            "recomputed_hash": None,
+            "on_chain_hash": None,
+            "stored_hash": None,
+            "match": False,
+            "verified": False,
+            "error": str(e),
+        }
 
 
 if __name__ == "__main__":

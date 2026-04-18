@@ -13,26 +13,19 @@ def test_protocol_display_global_state_shape():
         assert isinstance(body["fields"], dict)
 
 
-def test_simulate_event_unknown_shipment():
+def test_audit_trail_route_exists():
     with TestClient(app) as client:
-        r = client.post(
-            "/simulate-event",
-            json={"shipment_id": "SHIP_DOES_NOT_EXIST_999", "event": "test"},
-        )
-        assert r.status_code == 400
-
-
-def test_simulate_event_ok():
-    with TestClient(app) as client:
-        r = client.post(
-            "/simulate-event",
-            json={
-                "shipment_id": "SHIP_MUMBAI_001",
-                "event": "GPS calibration drift (demo)",
-                "severity": "medium",
-            },
-        )
+        r = client.get("/audit-trail/SHIP_PROTOCOL_TEST_001")
         assert r.status_code == 200
         j = r.json()
-        assert j.get("ok") is True
-        assert j.get("stored", {}).get("shipment_id") == "SHIP_MUMBAI_001"
+        assert j.get("shipment_id") == "SHIP_PROTOCOL_TEST_001"
+        assert "entries" in j
+
+
+def test_dispute_feed_has_network():
+    with TestClient(app) as client:
+        r = client.get("/dispute-feed")
+        assert r.status_code == 200
+        j = r.json()
+        assert j.get("network") == "algorand_testnet"
+        assert "total_items" in j

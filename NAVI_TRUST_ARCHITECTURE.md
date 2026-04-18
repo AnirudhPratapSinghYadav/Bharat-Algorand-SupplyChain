@@ -24,7 +24,7 @@ For historical context, `ARCHITECTURE.md` retains an older **Agri-Jury** write-u
 | 4-agent jury | `POST /run-jury` — Sentinel → Auditor → Fraud → Arbiter; verdict on-chain |
 | NaviBot | `POST /navibot` — 60s cached context, 8s LLM cap, rule-first answers |
 | Protocol proof | `GET /protocol/display-global-state` — filtered globals (`NAVITRUST_DISPLAY_KEYS`) |
-| Supplier events | `POST /simulate-event` — appends to `offchain_events.json` |
+| Logistics context | In-memory + `offchain_events.json` (loaded at startup; no fake injection endpoint in production API) |
 | Verify | `GET /verify/{shipment_id}` — public status + certificate links |
 | Witness | `POST /witness-shipment/build`, `GET /witnesses/{shipment_id}` |
 
@@ -37,7 +37,7 @@ For historical context, `ARCHITECTURE.md` retains an older **Agri-Jury** write-u
 | File | Role |
 |------|------|
 | `shipments.db` | SQLite — demo rows aligned with `seed_blockchain.py` |
-| `offchain_events.json` | Logistics events (`POST /simulate-event` + startup load) |
+| `offchain_events.json` | Logistics events (optional file; loaded at startup) |
 | `audit_trail.json` | Jury / verdict history for dashboard |
 | `LORA_PROOF.md` | Human-readable Lora links — regenerate with `python tools/refresh_lora_proof.py` or `python seed_blockchain.py` |
 
