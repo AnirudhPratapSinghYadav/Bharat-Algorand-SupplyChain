@@ -39,6 +39,14 @@ ALGO_NETWORK = os.environ.get("ALGO_NETWORK", "testnet")
 ORACLE_MNEMONIC = os.environ.get("ORACLE_MNEMONIC") or os.environ.get("DEPLOYER_MNEMONIC")
 DEPLOYER_MNEMONIC = ORACLE_MNEMONIC
 
+
+def _sync_env_globals() -> None:
+    """Re-read APP_ID / oracle mnemonic after load_dotenv() (import order safe for seed_blockchain, etc.)."""
+    global APP_ID, ORACLE_MNEMONIC, DEPLOYER_MNEMONIC
+    APP_ID = int(os.environ.get("APP_ID", 0) or os.environ.get("VITE_APP_ID", 0))
+    ORACLE_MNEMONIC = os.environ.get("ORACLE_MNEMONIC") or os.environ.get("DEPLOYER_MNEMONIC")
+    DEPLOYER_MNEMONIC = ORACLE_MNEMONIC
+
 ALGOD_URL = os.environ.get("ALGOD_ADDRESS", "https://testnet-api.algonode.cloud")
 INDEXER_URL = os.environ.get(
     "VITE_INDEXER_URL",
@@ -253,6 +261,7 @@ def _load_spec_text() -> str:
 
 
 def _oracle_account():
+    _sync_env_globals()
     if not ORACLE_MNEMONIC:
         raise ValueError("ORACLE_MNEMONIC or DEPLOYER_MNEMONIC not set")
     return algorand.account.from_mnemonic(mnemonic=ORACLE_MNEMONIC)
@@ -478,6 +487,7 @@ def store_jury_hash_box(shipment_id: str, jury_hash_hex: str) -> Optional[dict]:
 
 
 def get_app_client():
+    _sync_env_globals()
     if not APP_ID:
         raise ValueError("APP_ID not set")
     deployer = _oracle_account()
@@ -717,6 +727,7 @@ def record_verdict_chain(
     Submit record_verdict via Algokit AppClient (not raw AtomicTransactionComposer).
     Truncates verdict JSON to 4000 chars (ARC4 string budget; contract stores bytes).
     """
+    _sync_env_globals()
     if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
         return None
     try:
@@ -770,6 +781,7 @@ def settle_shipment_chain(shipment_id: str) -> Optional[dict]:
     Submit settle_shipment via Algokit; certificate ASA ID from result.abi_return
     (Algokit equivalent of ATC abi_results[0].return_value).
     """
+    _sync_env_globals()
     if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
         return None
     try:
@@ -806,6 +818,7 @@ def settle_shipment_chain(shipment_id: str) -> Optional[dict]:
 
 def call_pause_oracle(pause: bool) -> dict:
     """Call pause_oracle or unpause_oracle (oracle-signed)."""
+    _sync_env_globals()
     if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
         raise ValueError("Missing oracle, APP_ID, or not NaviTrust")
     deployer = _oracle_account()
@@ -852,6 +865,7 @@ def ensure_navitrust_app_mbr(min_balance_algo: float = 2.5) -> None:
     Top up the app account for box storage. register_shipment creates several boxes;
     a low app balance often surfaces as err opcode / assert in TEAL (not a clear MBR message).
     """
+    _sync_env_globals()
     if not APP_ID or not ORACLE_MNEMONIC or not use_navitrust():
         return
     try:
@@ -887,6 +901,7 @@ def ensure_navitrust_app_mbr(min_balance_algo: float = 2.5) -> None:
 
 
 def register_navitrust(shipment_id: str, supplier: str, route: str) -> dict:
+    _sync_env_globals()
     if not ORACLE_MNEMONIC or not APP_ID:
         raise ValueError("Missing oracle or APP_ID")
     st = read_shipment_status(shipment_id)
@@ -1007,6 +1022,7 @@ def fund_shipment_oracle_microalgo(shipment_id: str, micro_algo: int) -> Optiona
     """
     Oracle signs and submits pay + fund_shipment atomic group (demo seed / ops).
     """
+    _sync_env_globals()
     if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
         logger.warning("fund_shipment_oracle: missing oracle, APP_ID, or not NaviTrust")
         return None

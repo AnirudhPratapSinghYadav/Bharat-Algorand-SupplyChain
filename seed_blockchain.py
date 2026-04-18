@@ -21,15 +21,16 @@ from algokit_utils import AlgorandClient, AlgoAmount, PaymentParams
 from algosdk.logic import get_application_address
 from dotenv import load_dotenv
 
+# Repo root — must be set before load_dotenv / import chain (cwd may not be the repo).
+ROOT = os.path.dirname(os.path.abspath(__file__)) or "."
+
 # Load .env before algorand_client — that module reads ORACLE_MNEMONIC / APP_ID at import time.
-load_dotenv()
+load_dotenv(os.path.join(ROOT, ".env"))
 
 import algorand_client as chain
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-ROOT = os.path.dirname(os.path.abspath(__file__)) or "."
 DB_PATH = os.path.join(ROOT, "shipments.db")
 AUDIT_PATH = os.path.join(ROOT, "audit_trail.json")
 
@@ -389,7 +390,7 @@ curl -s http://127.0.0.1:8000/stats
 
 
 def main() -> None:
-    load_dotenv()
+    load_dotenv(os.path.join(ROOT, ".env"))
     mnemonic = os.getenv("ORACLE_MNEMONIC") or os.getenv("DEPLOYER_MNEMONIC")
     app_id = int(os.getenv("APP_ID", "0") or os.getenv("VITE_APP_ID", "0"))
 
@@ -411,11 +412,15 @@ def main() -> None:
     logger.info("Lora app: %s/%s", LORA_APP, app_id)
 
     oracle_micro = int(algorand.client.algod.account_info(oracle_addr).get("amount", 0))
-    if oracle_micro < 8_000_000:
+    # ~7 ALGO covers MBR top-up + fees for the 3-lane demo after prior attempts (override via SEED_MIN_ORACLE_MICRO).
+    min_oracle_micro = int(os.getenv("SEED_MIN_ORACLE_MICRO", "7000000"))
+    if oracle_micro < min_oracle_micro:
         logger.error(
-            "Oracle balance is %s microAlgo — need at least 8 ALGO (8_000_000 microAlgo) before seeding. "
-            "Fund the oracle on testnet and retry.",
+            "Oracle balance is %s microAlgo — need at least %s microAlgo (~%.1f ALGO) before seeding. "
+            "Fund the oracle on testnet or set SEED_MIN_ORACLE_MICRO lower for dev only.",
             oracle_micro,
+            min_oracle_micro,
+            min_oracle_micro / 1_000_000.0,
         )
         sys.exit(1)
 
