@@ -21,6 +21,9 @@ from algokit_utils import AlgorandClient, AlgoAmount, PaymentParams
 from algosdk.logic import get_application_address
 from dotenv import load_dotenv
 
+# Load .env before algorand_client — that module reads ORACLE_MNEMONIC / APP_ID at import time.
+load_dotenv()
+
 import algorand_client as chain
 
 logging.basicConfig(level=logging.INFO)
