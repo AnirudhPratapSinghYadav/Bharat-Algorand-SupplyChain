@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: navi-trust-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1
+    envVars:
+      - key: SKIP_ORACLE_VERIFY
+        value: "0"
+      - key: APP_ID
+        value: "758734899"
+      - key: ALGO_NETWORK
+        value: testnet

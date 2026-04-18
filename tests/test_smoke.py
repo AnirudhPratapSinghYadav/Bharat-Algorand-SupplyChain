@@ -30,6 +30,7 @@ def test_smoke_stats():
         body = r.json()
         assert "total_shipments" in body
         assert "escrow_total_algo" in body
+        assert body.get("source") in ("algorand_global_state", "box_count_fallback", "mixed")
 
 
 def test_smoke_verify():
@@ -86,3 +87,11 @@ def test_smoke_dispute_feed():
         body = r.json()
         assert "items" in body
         assert isinstance(body["items"], list)
+        assert body.get("network") == "algorand_testnet"
+
+
+def test_smoke_dispute_feed_json_alias():
+    with TestClient(app) as client:
+        r = client.get("/dispute-feed.json")
+        assert r.status_code == 200
+        assert r.json().get("network") == "algorand_testnet"

@@ -32,16 +32,16 @@ function readWallet(): string | undefined {
 }
 
 const GREETING_STAKEHOLDER =
-  'You have 5 ALGO locked across 2 shipments. SHIP_CHEN_002 is disputed — 3 ALGO frozen. Run AI jury on SHIP_MUMBAI_001 to get a live verdict.';
+  'Connect your wallet to see live escrow. Ask how the 4-agent jury works, open Verify for any shipment_id, or use the dashboard cards to run AI Jury.';
 
 const GREETING_SUPPLIER =
-  'Your on-chain reputation is 55/100. SHIP_DELHI_003 settled — 2 ALGO received. SHIP_CHEN_002 payment is frozen at 3 ALGO.';
+  'Track payments and on-chain reputation from your shipments. Ask about hashes, USD pricing, the dispute feed, or a Supplier Passport NFT.';
 
 const QUICK_PILLS = [
   'Why is Chennai frozen?',
   'How does the 4-agent jury work?',
-  'Check Delhi certificate',
-  'What is the risk score?',
+  'What is a jury hash?',
+  'How much ALGO is at stake?',
 ];
 
 export function NaviBotPanel({

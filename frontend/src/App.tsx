@@ -22,6 +22,7 @@ import { JuryRiskHistoryChart } from './components/JuryRiskHistoryChart';
 import { LiveVerdictTerminal } from './components/LiveVerdictTerminal';
 import { WitnessButton } from './components/WitnessButton';
 import { NewsTicker } from './components/NewsTicker';
+import { PriceTicker } from './components/PriceTicker';
 import { ShipmentReportActions } from './components/ShipmentReport';
 import { peraWallet } from './wallet/pera';
 
@@ -80,6 +81,13 @@ function sortShipmentsStable<T extends { shipment_id: string; stage?: string }>(
 }
 const EXPLORER_URL = "https://testnet.explorer.perawallet.app/tx/";
 
+function escrowUsdText(ship: { funds_usd?: number | null }): string | null {
+    if (typeof ship.funds_usd === 'number' && Number.isFinite(ship.funds_usd)) {
+        return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(ship.funds_usd);
+    }
+    return null;
+}
+
 interface Shipment {
     shipment_id: string;
     origin: string;
@@ -94,6 +102,9 @@ interface Shipment {
     last_jury: any;
     supplier_address?: string | null;
     funds_locked_microalgo?: number;
+    /** CoinGecko-derived escrow value (backend Phase 1) */
+    funds_usd?: number | null;
+    funds_inr?: number | null;
     supplier_reputation_score?: number | null;
     supplier_reputation_source?: string | null;
     on_chain?: {
@@ -188,6 +199,8 @@ function MainApp() {
     } | null>(null);
     const [supplierRepLoading, setSupplierRepLoading] = useState(false);
     const [supplierRep, setSupplierRep] = useState<{ score: number | null; source?: string } | null>(null);
+    const [passportAsa, setPassportAsa] = useState<string | null>(null);
+    const [passportMinting, setPassportMinting] = useState(false);
 
     const refreshRecentTxns = useCallback(() => {
         axios
@@ -240,6 +253,19 @@ function MainApp() {
             .catch(() => setSupplierRep({ score: null, source: 'request_failed' }))
             .finally(() => setSupplierRepLoading(false));
     }, [role, accountAddress]);
+
+    useEffect(() => {
+        if (!accountAddress) {
+            setPassportAsa(null);
+            return;
+        }
+        try {
+            const v = sessionStorage.getItem(`navi_passport_asa_${accountAddress}`);
+            setPassportAsa(v && /^\d+$/.test(v.trim()) ? v.trim() : null);
+        } catch {
+            setPassportAsa(null);
+        }
+    }, [accountAddress]);
 
     useEffect(() => {
         try {
@@ -882,6 +908,7 @@ function MainApp() {
                 </div>
             ) : null}
             <NewsTicker />
+            <PriceTicker />
 
             <div className={role === 'stakeholder' ? 'role-banner-stakeholder' : 'role-banner-supplier'}>
                 {role === 'stakeholder' ? 'Buyer view — protecting your escrow' : 'Supplier view — tracking your payments'}
@@ -973,6 +1000,89 @@ function MainApp() {
                         Completed deliveries: <strong style={{ color: '#e2e8f0' }}>{supplierIdentityCounts.settled}</strong>
                         {' · '}
                         Disputes: <strong style={{ color: '#fecaca' }}>{supplierIdentityCounts.disputed}</strong>
+                    </div>
+                    <div
+                        style={{
+                            marginTop: 16,
+                            borderTop: '1px solid rgba(148,163,184,0.2)',
+                            paddingTop: 14,
+                        }}
+                    >
+                        <div
+                            style={{
+                                fontSize: '0.65rem',
+                                fontWeight: 800,
+                                letterSpacing: '0.1em',
+                                color: '#38bdf8',
+                                marginBottom: 8,
+                            }}
+                        >
+                            SUPPLIER PASSPORT
+                        </div>
+                        {passportAsa ? (
+                            <div>
+                                <p style={{ fontSize: '0.82rem', color: '#e2e8f0', margin: '0 0 8px', lineHeight: 1.45 }}>
+                                    NAVI-PASS · ASA <strong style={{ fontFamily: 'ui-monospace, monospace' }}>{passportAsa}</strong>
+                                </p>
+                                <a
+                                    href={`https://lora.algokit.io/testnet/asset/${passportAsa}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    style={{ color: 'var(--accent)', fontWeight: 600, fontSize: '0.82rem' }}
+                                >
+                                    View passport on Lora ↗
+                                </a>
+                                <p style={{ fontSize: '0.72rem', color: '#64748b', margin: '8px 0 0', lineHeight: 1.45 }}>
+                                    This ASA encodes your verified on-chain reputation metadata. Any buyer can verify it on an Algorand explorer.
+                                </p>
+                            </div>
+                        ) : (
+                            <div>
+                                <p style={{ fontSize: '0.75rem', color: '#94a3b8', margin: '0 0 10px', lineHeight: 1.45 }}>
+                                    Mint an oracle-signed Supplier Passport NFT (ARC-69 metadata). You may need to opt in to the ASA in Pera to receive the transfer.
+                                </p>
+                                <button
+                                    type="button"
+                                    className="primary-btn"
+                                    disabled={passportMinting}
+                                    onClick={async () => {
+                                        if (!accountAddress) return;
+                                        setPassportMinting(true);
+                                        try {
+                                            const r = await axios.post<{ passport_asa_id?: number | null; message?: string }>(
+                                                `${BACKEND_URL}/mint-supplier-passport`,
+                                                { supplier_address: accountAddress },
+                                                { timeout: 45_000 },
+                                            );
+                                            const id = r.data?.passport_asa_id;
+                                            if (id != null && id > 0) {
+                                                const s = String(id);
+                                                try {
+                                                    sessionStorage.setItem(`navi_passport_asa_${accountAddress}`, s);
+                                                } catch {
+                                                    /* ignore */
+                                                }
+                                                setPassportAsa(s);
+                                                setToast(r.data?.message || 'Supplier Passport minted.');
+                                            } else {
+                                                setToast(r.data?.message || 'Mint submitted — check API logs if ASA id missing.');
+                                            }
+                                        } catch (err: unknown) {
+                                            const detail = axios.isAxiosError(err) ? err.response?.data : undefined;
+                                            const msg =
+                                                typeof detail === 'object' && detail !== null && 'detail' in detail
+                                                    ? String((detail as { detail?: unknown }).detail)
+                                                    : 'Mint failed (API needs ORACLE_MNEMONIC and gas on TestNet).';
+                                            setToast(msg);
+                                        } finally {
+                                            setPassportMinting(false);
+                                        }
+                                    }}
+                                >
+                                    {passportMinting ? 'Minting…' : 'Mint Supplier Passport'}
+                                </button>
+                            </div>
+                        )}
                     </div>
                 </section>
             ) : null}
@@ -1333,6 +1443,11 @@ function MainApp() {
                                 {((focusVaultShip.funds_locked_microalgo ?? 0) / 1e6).toFixed(4)}{' '}
                                 <span style={{ fontSize: '0.85rem', fontWeight: 500, color: '#94a3b8' }}>ALGO</span>
                             </div>
+                            {escrowUsdText(focusVaultShip) ? (
+                                <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#6ee7b7', marginTop: 4 }}>
+                                    Escrow ≈ {escrowUsdText(focusVaultShip)}
+                                </div>
+                            ) : null}
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                                 {vaultMilestones.map((m) => (
                                     <span
@@ -1463,6 +1578,7 @@ function MainApp() {
                                     destinationCity={ship.destination || '—'}
                                     originCity={ship.origin || ''}
                                     fundsLockedMicroalgo={fundsMicro}
+                                    fundsUsd={ship.funds_usd}
                                     appId={appId}
                                     onComplete={(_jr, _raw) => {
                                         void refreshAfterJury();
@@ -1526,7 +1642,12 @@ function MainApp() {
                                         {role === 'supplier' ? '⚠ PAYMENT FROZEN' : '⚠ ESCROW FROZEN'}
                                     </div>
                                     <div style={{ fontSize: '0.8rem', color: '#e2e8f0', lineHeight: 1.55, marginBottom: 6 }}>
-                                        <span style={{ fontWeight: 800, color: '#F59E0B' }}>{(fundsMicro / 1e6).toFixed(4)} ALGO</span>{' '}
+                                        <span style={{ fontWeight: 800, color: '#F59E0B' }}>{(fundsMicro / 1e6).toFixed(4)} ALGO</span>
+                                        {escrowUsdText(ship) ? (
+                                            <span style={{ fontWeight: 800, color: '#86efac', marginLeft: 8 }}>
+                                                (~{escrowUsdText(ship)})
+                                            </span>
+                                        ) : null}{' '}
                                         locked · Cannot be released until the dispute is resolved by the oracle.
                                     </div>
                                     {risk != null ? (
@@ -1558,6 +1679,14 @@ function MainApp() {
                                     >
                                         View proof ↗
                                     </Link>
+                                    <div style={{ marginTop: 6 }}>
+                                        <Link
+                                            to={`/verify/${encodeURIComponent(ship.shipment_id)}`}
+                                            style={{ display: 'inline-block', fontWeight: 700, fontSize: '0.76rem', color: '#86efac' }}
+                                        >
+                                            Verify jury hash ↗
+                                        </Link>
+                                    </div>
                                 </div>
                             ) : null}
 
@@ -1623,7 +1752,16 @@ function MainApp() {
                                             <div style={{ fontSize: '0.8rem', color: '#334155', marginBottom: 6 }}>
                                                 Buyer locked:{' '}
                                                 <strong style={{ color: '#059669' }}>
-                                                    {fundsMicro > 0 ? `${(fundsMicro / 1e6).toFixed(4)} ALGO ✓` : 'No escrow yet — buyer must fund'}
+                                                    {fundsMicro > 0 ? (
+                                                        <>
+                                                            {(fundsMicro / 1e6).toFixed(4)} ALGO ✓
+                                                            {escrowUsdText(ship) ? (
+                                                                <span style={{ color: '#059669', marginLeft: 6 }}>({escrowUsdText(ship)})</span>
+                                                            ) : null}
+                                                        </>
+                                                    ) : (
+                                                        'No escrow yet — buyer must fund'
+                                                    )}
                                                 </strong>
                                             </div>
                                             <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: 10 }}>
@@ -1773,6 +1911,9 @@ function MainApp() {
                                 <div style={{ marginBottom: 10, fontSize: '0.8rem', color: '#64748b' }}>
                                     Funds locked:{' '}
                                     <span style={{ fontWeight: 600, color: '#0f172a' }}>{(fundsMicro / 1e6).toFixed(2)} ALGO</span>
+                                    {escrowUsdText(ship) ? (
+                                        <span style={{ fontWeight: 600, color: '#059669', marginLeft: 8 }}>{escrowUsdText(ship)}</span>
+                                    ) : null}
                                 </div>
                             )}
 
@@ -1867,6 +2008,9 @@ function MainApp() {
                                         {fundsMicro > 0 ? (
                                             <span style={{ display: 'block', marginTop: 4, color: '#64748b' }}>
                                                 Funds locked: {(fundsMicro / 1e6).toFixed(2)} ALGO
+                                                {escrowUsdText(ship) ? (
+                                                    <span style={{ color: '#059669', marginLeft: 6 }}>· {escrowUsdText(ship)}</span>
+                                                ) : null}
                                             </span>
                                         ) : null}
                                     </div>
@@ -1894,6 +2038,21 @@ function MainApp() {
                                             }}
                                         >
                                             View proof ↗
+                                        </Link>
+                                    ) : null}
+                                    {jury.on_chain_tx_id ? (
+                                        <Link
+                                            to={`/verify/${encodeURIComponent(ship.shipment_id)}`}
+                                            style={{
+                                                display: 'inline-block',
+                                                marginLeft: 12,
+                                                fontSize: '0.78rem',
+                                                fontWeight: 700,
+                                                color: '#16a34a',
+                                                textDecoration: 'none',
+                                            }}
+                                        >
+                                            Verify jury hash ↗
                                         </Link>
                                     ) : null}
                                 </div>

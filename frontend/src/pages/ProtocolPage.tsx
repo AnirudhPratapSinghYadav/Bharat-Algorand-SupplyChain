@@ -2,8 +2,9 @@ import { useCallback, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
-import { Download, ExternalLink, Shield } from 'lucide-react';
+import { ClipboardCopy, Download, ExternalLink, Shield } from 'lucide-react';
 import { BACKEND_URL, FALLBACK_APP_ID } from '../constants/api';
+import { DisputeFeed } from '../components/DisputeFeed';
 
 export default function ProtocolPage() {
   const [exporting, setExporting] = useState(false);
@@ -72,6 +73,12 @@ export default function ProtocolPage() {
   const appId = cfgQ.data?.app_id ?? healthQ.data?.app_id ?? FALLBACK_APP_ID;
   const oracle = cfgQ.data?.oracle_address ?? '—';
 
+  const copyUrl = useCallback((path: string) => {
+    const base = BACKEND_URL.replace(/\/$/, '');
+    const u = `${base}${path.startsWith('/') ? path : `/${path}`}`;
+    void navigator.clipboard.writeText(u).catch(() => {});
+  }, []);
+
   const exportProof = useCallback(async () => {
     setExporting(true);
     try {
@@ -114,6 +121,62 @@ export default function ProtocolPage() {
         <Shield size={28} color="var(--accent)" /> Protocol
       </h1>
       <p style={{ color: 'var(--muted)', marginBottom: 28 }}>Technical view — contract, global state, recent transactions.</p>
+
+      <section style={{ marginBottom: 28 }} className="card">
+        <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)', marginBottom: 12 }}>
+          Public API — embed in your platform
+        </h2>
+        <p style={{ fontSize: '0.82rem', color: 'var(--muted)', marginBottom: 14, lineHeight: 1.55 }}>
+          Read-only endpoints need no API key. Insurers and trade-finance tools can poll these URLs directly.
+        </p>
+        <div style={{ display: 'grid', gap: 12 }}>
+          {[
+            { path: '/verify/SHIP_EXAMPLE', method: 'GET' as const, label: 'GET /verify/{shipment_id}', desc: 'Public shipment verification + hash hints' },
+            { path: '/dispute-feed', method: 'GET' as const, label: 'GET /dispute-feed', desc: 'Live dispute + jury feed (JSON)' },
+            { path: '/verify-hash', method: 'POST' as const, label: 'POST /verify-hash', desc: 'Verify jury hash against on-chain witness (JSON body)' },
+            {
+              path: `/supplier/${oracle !== '—' ? oracle : 'WALLET'}/reputation`,
+              method: 'GET' as const,
+              label: 'GET /supplier/{addr}/reputation',
+              desc: 'On-chain supplier reputation',
+            },
+          ].map((row) => (
+            <div
+              key={row.label}
+              style={{
+                padding: '12px 14px',
+                borderRadius: 10,
+                border: '1px solid var(--border)',
+                background: 'rgba(15,23,42,0.35)',
+                fontSize: '0.82rem',
+              }}
+            >
+              <div style={{ fontWeight: 700, color: '#e2e8f0', marginBottom: 4 }}>{row.label}</div>
+              <div style={{ color: 'var(--muted)', marginBottom: 10 }}>{row.desc}</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                <button
+                  type="button"
+                  className="primary-btn"
+                  style={{ fontSize: '0.75rem', padding: '6px 12px' }}
+                  onClick={() => copyUrl(row.path.split('?')[0])}
+                >
+                  <ClipboardCopy size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+                  Copy URL
+                </button>
+                {row.method === 'GET' ? (
+                  <a href={`${BACKEND_URL.replace(/\/$/, '')}${row.path}`} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                    Try it ↗
+                  </a>
+                ) : (
+                  <a href={`${BACKEND_URL.replace(/\/$/, '')}/docs`} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                    Open API docs ↗
+                  </a>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
 
       <section style={{ marginBottom: 28 }} className="card">
         <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)', marginBottom: 12 }}>1. Contract info</h2>
@@ -168,7 +231,15 @@ export default function ProtocolPage() {
       </section>
 
       <section style={{ marginBottom: 28 }} className="card">
-        <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)', marginBottom: 12 }}>3. Recent transactions</h2>
+        <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)', marginBottom: 12 }}>3. Live dispute feed</h2>
+        <p style={{ fontSize: '0.82rem', color: 'var(--muted)', marginBottom: 14 }}>
+          Public infrastructure feed — jury verdicts (from audit trail) and shipments currently in <strong>Disputed</strong> on-chain, with escrow in ALGO/USD and Lora links.
+        </p>
+        <DisputeFeed />
+      </section>
+
+      <section style={{ marginBottom: 28 }} className="card">
+        <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)', marginBottom: 12 }}>4. Recent transactions</h2>
         <div style={{ overflowX: 'auto' }}>
           {txns.isLoading ? (
             <p style={{ color: 'var(--muted)' }}>Loading…</p>
@@ -212,7 +283,7 @@ export default function ProtocolPage() {
       </section>
 
       <section style={{ marginBottom: 40 }} className="card">
-        <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)', marginBottom: 12 }}>4. Export</h2>
+        <h2 style={{ fontSize: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)', marginBottom: 12 }}>5. Export</h2>
         <button
           type="button"
           className="primary-btn"

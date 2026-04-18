@@ -166,6 +166,8 @@ _CORS_ORIGINS = [
     "http://localhost:4173",
     "http://127.0.0.1:4173",
     "https://navitrustapp.vercel.app",
+    "https://navi-trust.vercel.app",
+    "https://navi-trust-api.onrender.com",
 ]
 if _CORS_EXTRA:
     _CORS_ORIGINS.extend(o.strip() for o in _CORS_EXTRA.split(",") if o.strip())
@@ -204,7 +206,18 @@ async def lifespan(app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Navi-Trust Oracle API", lifespan=lifespan)
+app = FastAPI(
+    title="Navi-Trust Oracle API",
+    lifespan=lifespan,
+    description="""
+Navi-Trust: Supply Chain Dispute Oracle API (Algorand Testnet).
+
+**Live Dispute Feed**: `GET /dispute-feed` — active disputes + recent jury verdicts  
+**Public Verification**: `GET /verify/{shipment_id}` — verify any shipment  
+**Jury Hashes**: `POST /verify-hash` — verify AI verdict authenticity  
+**Price Oracle**: `GET /price` — live ALGO/USD (CoinGecko)  
+""",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -587,6 +600,7 @@ def get_shipment_from_chain(shipment_id: str) -> dict:
         "destination": rowd.get("destination") or (oc.get("destination") if isinstance(oc, dict) else ""),
         "status": oc.get("status") if isinstance(oc, dict) else "",
         "risk_score": int(oc.get("risk_score") or 0) if isinstance(oc, dict) else 0,
+        "funds_algo": round(micro / 1_000_000.0, 6),
         "verdict_json": vj,
         "funds_usd": fu,
         "funds_inr": fi,
@@ -688,14 +702,19 @@ def get_algo_usd_price() -> dict:
         return {**prev, "cached": True}
 
     try:
+        cg_key = (os.environ.get("COINGECKO_API_KEY") or "").strip()
+        params = {
+            "ids": "algorand",
+            "vs_currencies": "usd,inr",
+            "include_24hr_change": "true",
+        }
+        hdrs: dict = {"User-Agent": "Navi-Trust/2.0 (price-oracle)", "Accept": "application/json"}
+        if cg_key:
+            hdrs["x-cg-demo-api-key"] = cg_key
         r = requests.get(
             COINGECKO_SIMPLE_PRICE_URL,
-            headers={"User-Agent": "Navi-Trust/2.0 (price-oracle)"},
-            params={
-                "ids": "algorand",
-                "vs_currencies": "usd,inr",
-                "include_24hr_change": "true",
-            },
+            headers=hdrs,
+            params=params,
             timeout=12,
         )
         r.raise_for_status()
@@ -703,11 +722,14 @@ def get_algo_usd_price() -> dict:
         row = body.get("algorand") if isinstance(body, dict) else None
         if not isinstance(row, dict):
             row = {}
+        chg = _safe_float(row.get("usd_24h_change"))
         out = {
             "algo_usd": _safe_float(row.get("usd")),
             "algo_inr": _safe_float(row.get("inr")),
-            "usd_24h_change": _safe_float(row.get("usd_24h_change")),
-            "source": "coingecko",
+            "usd_24h_change": chg,
+            "change_24h_pct": round(chg, 2) if chg is not None else None,
+            "source": "coingecko.com/live",
+            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "cached_at": datetime.now(timezone.utc).isoformat(),
         }
         _ALGO_PRICE_CACHE["ts"] = now
@@ -718,10 +740,12 @@ def get_algo_usd_price() -> dict:
         if isinstance(prev, dict):
             return {**prev, "cached": True, "stale": True, "error": str(e)}
         return {
-            "algo_usd": None,
-            "algo_inr": None,
-            "usd_24h_change": None,
-            "source": "none",
+            "algo_usd": 0.18,
+            "algo_inr": 15.2,
+            "usd_24h_change": 0.0,
+            "change_24h_pct": 0.0,
+            "source": "fallback",
+            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "cached_at": None,
             "cached": False,
             "error": str(e),
@@ -2478,6 +2502,15 @@ def _stats_compute() -> dict:
             logger.warning(f"Could not fetch contract balance: {e}")
 
     escrow_total_algo = round(contract_algo, 4) if contract_algo is not None else None
+    stats_source = "mixed"
+    if APP_ID and chain.use_navitrust():
+        stats_source = "algorand_global_state"
+    elif APP_ID and total_shipments_count == 0:
+        try:
+            if _list_ledger_shipments():
+                stats_source = "box_count_fallback"
+        except Exception:
+            pass
     return {
         "total_scans": total_verdicts,
         "verified_anomalies": total_anomalies,
@@ -2490,6 +2523,7 @@ def _stats_compute() -> dict:
         "active_shipments": active_shipments,
         "total_settled": total_settled_k,
         "total_disputed": total_disputed_k,
+        "source": stats_source,
     }
 
 
@@ -2846,6 +2880,8 @@ def dispute_feed():
             logger.warning("dispute-feed active slice: %s", e)
 
         return {
+            "feed": "Navi-Trust Live Dispute Feed",
+            "network": "algorand_testnet",
             "app_id": aid or None,
             "generated_at": generated,
             "items": jury_items + active_items,
@@ -2853,7 +2889,20 @@ def dispute_feed():
         }
     except Exception as e:
         logger.warning("dispute-feed: %s", e)
-        return {"app_id": aid or None, "generated_at": generated, "items": [], "error": str(e)}
+        return {
+            "feed": "Navi-Trust Live Dispute Feed",
+            "network": "algorand_testnet",
+            "app_id": aid or None,
+            "generated_at": generated,
+            "items": [],
+            "error": str(e),
+        }
+
+
+@app.get("/dispute-feed.json")
+def dispute_feed_json():
+    """Alias for /dispute-feed (embed / external tools)."""
+    return dispute_feed()
 
 
 @app.get("/protocol/display-global-state")
@@ -2902,6 +2951,61 @@ def get_supplier_reputation(address: str):
         "score": int(sc),
         "source": r.get("source") or "algorand_box_storage",
         "lora_url": f"https://lora.algokit.io/testnet/account/{addr}",
+        "passport_asa_id": None,
+    }
+
+
+def _audit_settle_dispute_counts() -> tuple[int, int]:
+    settled = 0
+    disputed = 0
+    for entries in (AUDIT_TRAIL or {}).values():
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            v = str(e.get("verdict") or "").upper()
+            if v == "SETTLE":
+                settled += 1
+            elif v == "DISPUTE":
+                disputed += 1
+    return settled, disputed
+
+
+@app.post("/mint-supplier-passport")
+def mint_supplier_passport(body: dict = Body(...)):
+    """Mint ARC-69-style Supplier Passport ASA (oracle-signed)."""
+    supplier_address = str((body or {}).get("supplier_address") or "").strip()
+    if not supplier_address:
+        raise HTTPException(status_code=400, detail="supplier_address required")
+    rep = get_supplier_reputation_score(supplier_address)
+    score = int(rep.get("score") or 50)
+    settled, disputed = _audit_settle_dispute_counts()
+    try:
+        result = chain.mint_supplier_passport_asa(
+            supplier_address=supplier_address,
+            reputation_score=score,
+            settled_count=settled,
+            disputed_count=disputed,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.warning("mint_supplier_passport: %s", e)
+        raise HTTPException(status_code=503, detail=f"Mint failed: {e!s}") from e
+    aid = result.get("asa_id")
+    return {
+        "supplier_address": supplier_address,
+        "passport_asa_id": aid,
+        "reputation_score": score,
+        "mint_tx_id": result.get("mint_tx_id"),
+        "transfer_tx_id": result.get("transfer_tx_id"),
+        "transfer_pending": result.get("transfer_pending"),
+        "transfer_note": result.get("transfer_note"),
+        "lora_url": f"https://lora.algokit.io/testnet/asset/{aid}" if aid else None,
+        "lora_mint_url": result.get("lora_mint_url"),
+        "message": "Supplier passport minted. Verifiable on any Algorand explorer.",
+        "source": "algorand_testnet",
     }
 
 
@@ -3185,6 +3289,47 @@ ANSWER RULES:
 def _navibot_rule_match(query: str) -> Optional[dict]:
     """Keyword-only answers (no Gemini). None → caller may run LLM."""
     q = (query or "").lower()
+    if any(w in q for w in ["hash", "verify hash", "proof", "authentic", "tamper"]):
+        return _navibot_pack(
+            "Every Navi-Trust jury verdict has a SHA-256 hash anchored on Algorand (verdict note + optional NAVI_JURY_HASH witness). "
+            "You can reproduce the hash from the canonical inputs via POST /verify-hash or use the Verify page.",
+            "verify",
+            None,
+            True,
+            None,
+        )
+    if any(w in q for w in ["price", "usd", "dollar", "rupee", "inr", "coingecko"]):
+        try:
+            px = get_algo_usd_price()
+            usd = px.get("algo_usd")
+            src = px.get("source") or "price feed"
+            spot = f"Live spot: about ${usd} USD/ALGO ({src})." if usd is not None else "Open /price for the live ALGO/USD spot."
+        except Exception:
+            spot = "Open GET /price for live ALGO/USD from CoinGecko."
+        return _navibot_pack(
+            f"{spot} Escrow USD on shipment cards comes from locked micro-ALGO × this spot.",
+            None,
+            None,
+            True,
+            None,
+        )
+    if any(w in q for w in ["passport", "npass", "supplier passport", "arc-69", "arc69"]):
+        return _navibot_pack(
+            "Supplier Passports are single-unit ASAs with ARC-69-style metadata minted by the oracle (POST /mint-supplier-passport). "
+            "They summarize on-chain reputation; verify the asset on any Algorand explorer.",
+            None,
+            None,
+            True,
+            None,
+        )
+    if any(w in q for w in ["feed", "dispute-feed", "insurer", "bank", "monitor", "infrastructure api"]):
+        return _navibot_pack(
+            "The public dispute feed is GET /dispute-feed (alias /dispute-feed.json): active on-chain disputes plus recent jury rows, with Lora links — no API key for reads.",
+            None,
+            None,
+            True,
+            None,
+        )
     if any(w in q for w in ["4 agent", "four agent", "jury", "sentinel", "auditor", "fraud", "arbiter"]):
         return _navibot_pack(
             "The 4-agent jury has: Weather Sentinel (live Open-Meteo data), Compliance Auditor (reads Algorand boxes), Fraud Detector (supplier history), and Chief Arbiter (final binding verdict). All reasoning is burned into the Algorand transaction note.",
@@ -3580,6 +3725,8 @@ def verify_shipment(shipment_id: str):
             if isinstance(v, dict) and v.get("tx_id")
         ],
         "verified_on": "Algorand Testnet",
+        "jury_hash": (latest or {}).get("jury_hash") if isinstance(latest, dict) else None,
+        "hash_lora_url": (latest or {}).get("jury_hash_lora_tx_url") if isinstance(latest, dict) else None,
     }
 
 

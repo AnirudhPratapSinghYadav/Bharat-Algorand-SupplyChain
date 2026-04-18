@@ -25,7 +25,7 @@ from algosdk.account import address_from_private_key
 from algosdk.atomic_transaction_composer import EmptySigner, TransactionWithSigner
 from algosdk import transaction as txn_mod
 from algosdk.logic import get_application_address
-from algosdk.transaction import wait_for_confirmation
+from algosdk.transaction import AssetConfigTxn, AssetTransferTxn, wait_for_confirmation
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +329,140 @@ def send_oracle_zero_note(note: str) -> Optional[dict]:
     if not addr:
         return None
     return send_oracle_payment_microalgo(addr, 0, note)
+
+
+ZERO_ALGO_ADDR = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ"
+
+
+def mint_supplier_passport_asa(
+    supplier_address: str,
+    reputation_score: int,
+    settled_count: int,
+    disputed_count: int,
+) -> Dict[str, Any]:
+    """
+    Mint a single-unit ASA (ARC-69-style metadata in note) as a Supplier Passport.
+    Creator holds the asset initially; transfer to supplier is attempted and may fail until they opt in.
+    """
+    addr = (supplier_address or "").strip()
+    if not addr:
+        raise ValueError("supplier_address required")
+    try:
+        encoding.decode_address(addr)
+    except Exception as e:
+        raise ValueError("invalid Algorand supplier address") from e
+    if not ORACLE_MNEMONIC:
+        raise ValueError("ORACLE_MNEMONIC (or DEPLOYER_MNEMONIC) required to mint")
+
+    sk = algosdk_mnemonic.to_private_key(ORACLE_MNEMONIC.strip())
+    sender = address_from_private_key(sk)
+    algod = algorand.client.algod
+    sp = algod.suggested_params()
+    sp.flat_fee = True
+    sp.fee = 1000
+
+    score_i = max(0, min(100, int(reputation_score)))
+    asset_name_bytes = f"NAVI-PASS-{score_i}".encode("utf-8")[:32]
+    base_url = (os.environ.get("PASSPORT_URL_BASE") or "https://navi-trust.vercel.app").rstrip("/")
+    url_str = (f"{base_url}/supplier/{addr}")[:96]
+
+    passport_note = {
+        "standard": "arc69",
+        "description": "Navi-Trust Supplier Passport — verified on Algorand",
+        "properties": {
+            "supplier": addr,
+            "reputation_score": score_i,
+            "settled_deliveries": int(settled_count),
+            "disputes": int(disputed_count),
+            "verified_by": "Navi-Trust Oracle",
+            "network": ALGO_NETWORK,
+            "app_id": APP_ID,
+        },
+    }
+    note_b = json.dumps(passport_note, separators=(",", ":")).encode("utf-8")[:1000]
+
+    create_txn = AssetConfigTxn(
+        sender=sender,
+        sp=sp,
+        index=0,
+        total=1,
+        decimals=0,
+        default_frozen=False,
+        unit_name=b"NPASS",
+        asset_name=asset_name_bytes,
+        manager=sender,
+        reserve=sender,
+        freeze=ZERO_ALGO_ADDR,
+        clawback=ZERO_ALGO_ADDR,
+        url=url_str,
+        metadata_hash=None,
+        note=note_b,
+    )
+    stxn = create_txn.sign(sk)
+    tx_id = algod.send_transaction(stxn)
+    wait_for_confirmation(algod, tx_id, 10)
+    ptx = algod.pending_transaction_info(tx_id)
+    asset_id = ptx.get("asset-index")
+    if asset_id is None:
+        txn_inner = (ptx.get("txn") or {}).get("txn") if isinstance(ptx.get("txn"), dict) else {}
+        if isinstance(txn_inner, dict):
+            asset_id = txn_inner.get("caid") or txn_inner.get("asset-index")
+
+    out: Dict[str, Any] = {
+        "asa_id": int(asset_id) if asset_id is not None else None,
+        "mint_tx_id": tx_id,
+        "lora_mint_url": lora_tx_url(tx_id),
+    }
+    if asset_id is None:
+        out["warning"] = "Could not parse created ASA id from confirmation; check Lora for mint tx."
+        return out
+
+    transfer_tx_id = None
+    transfer_err = None
+    try:
+        sp2 = algod.suggested_params()
+        sp2.flat_fee = True
+        sp2.fee = 1000
+        xfer = AssetTransferTxn(sender=sender, sp=sp2, receiver=addr, amt=1, index=int(asset_id))
+        st2 = xfer.sign(sk)
+        transfer_tx_id = algod.send_transaction(st2)
+        wait_for_confirmation(algod, transfer_tx_id, 10)
+        out["transfer_tx_id"] = transfer_tx_id
+        out["lora_transfer_url"] = lora_tx_url(transfer_tx_id)
+    except Exception as e:
+        transfer_err = str(e)
+        out["transfer_pending"] = True
+        out["transfer_note"] = (
+            "Supplier must opt in to this ASA in Pera (or another wallet), then mint can be retried "
+            f"or transfer completed manually. Underlying error: {transfer_err}"
+        )
+
+    return out
+
+
+def store_jury_hash_box(shipment_id: str, jury_hash_hex: str) -> Optional[dict]:
+    """
+    Phase 2: store the jury hash on-chain via a 0-ALGO witness payment note.
+    (Despite the name, this uses a transaction note to avoid contract changes.)
+    """
+    sid = (shipment_id or "").strip()
+    h = (jury_hash_hex or "").strip().lower()
+    if not sid or not h:
+        return None
+    try:
+        note_obj = {
+            "type": "NAVI_JURY_HASH",
+            "v": "1",
+            "app": APP_ID,
+            "sid": sid,
+            "hash": h,
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        note = json.dumps(note_obj, separators=(",", ":"))
+        return send_oracle_zero_note(note)
+    except Exception as e:
+        logger.warning("store_jury_hash_box failed: %s", e)
+        return None
 
 
 def get_app_client():
