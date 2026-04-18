@@ -4,23 +4,31 @@
 // algopy.arc4.ARC4Contract.approval_program() -> uint64:
 main:
     intcblock 0 1 2 32
-    bytecblock "total_disputed" "oracle_address" "total_shipments" "total_settled" 0x73745f "Settled" "Disputed" 0x666e5f "In_Transit" 0x73705f 0x72735f 0x151f7c75
+    bytecblock "total_disputed" "oracle_address" "is_paused" "total_shipments" "total_settled" 0x73745f "Settled" "Disputed" 0x666e5f "In_Transit" 0x73705f 0x72735f 0x76645f 0x151f7c75
     // smart_contracts/navi_trust/contract.py:21
     // class NaviTrust(ARC4Contract):
     txn NumAppArgs
-    bz main_create_app@15
+    bz main_create_app@18
     txn OnCompletion
     !
     assert
     txn ApplicationID
     assert
-    pushbytess 0xe485aa64 0x9c014257 0x6c8fb423 0xea951a4c 0x0e78492f 0xc78373cc // method "register_shipment(string,address,string)void", method "fund_shipment(string,pay)void", method "record_verdict(string,string,uint64)void", method "settle_shipment(string)uint64", method "update_oracle(address)void", method "get_global_stats()(uint64,uint64,uint64)"
+    pushbytess 0xe485aa64 0x9c014257 0x6c8fb423 0xea951a4c 0xe8e22b73 0xff2cfea0 0x0e78492f 0x73a23521 0x46133c39 // method "register_shipment(string,address,string)void", method "fund_shipment(string,pay)void", method "record_verdict(string,string,uint64)void", method "settle_shipment(string)uint64", method "pause_oracle()void", method "unpause_oracle()void", method "update_oracle(address)void", method "get_required_mbr()uint64", method "get_global_stats()(uint64,uint64,uint64,uint64)"
     txna ApplicationArgs 0
-    match register_shipment fund_shipment record_verdict settle_shipment update_oracle get_global_stats
+    match register_shipment fund_shipment record_verdict settle_shipment pause_oracle unpause_oracle update_oracle main_get_required_mbr_route@13 get_global_stats
     err
 
-main_create_app@15:
-    // smart_contracts/navi_trust/contract.py:56
+main_get_required_mbr_route@13:
+    // smart_contracts/navi_trust/contract.py:216
+    // @arc4.abimethod(readonly=True)
+    pushbytes 0x151f7c75000000000007a120
+    log
+    intc_1 // 1
+    return
+
+main_create_app@18:
+    // smart_contracts/navi_trust/contract.py:58
     // @arc4.baremethod(create="require")
     txn OnCompletion
     !
@@ -28,27 +36,32 @@ main_create_app@15:
     !
     &&
     assert
-    // smart_contracts/navi_trust/contract.py:58
-    // self.total_shipments.value = UInt64(0)
-    bytec_2 // "total_shipments"
-    intc_0 // 0
-    app_global_put
-    // smart_contracts/navi_trust/contract.py:59
-    // self.total_settled.value = UInt64(0)
-    bytec_3 // "total_settled"
-    intc_0 // 0
-    app_global_put
     // smart_contracts/navi_trust/contract.py:60
+    // self.total_shipments.value = UInt64(0)
+    bytec_3 // "total_shipments"
+    intc_0 // 0
+    app_global_put
+    // smart_contracts/navi_trust/contract.py:61
+    // self.total_settled.value = UInt64(0)
+    bytec 4 // "total_settled"
+    intc_0 // 0
+    app_global_put
+    // smart_contracts/navi_trust/contract.py:62
     // self.total_disputed.value = UInt64(0)
     bytec_0 // "total_disputed"
     intc_0 // 0
     app_global_put
-    // smart_contracts/navi_trust/contract.py:61
+    // smart_contracts/navi_trust/contract.py:63
     // self.oracle_address.value = Global.creator_address
     bytec_1 // "oracle_address"
     global CreatorAddress
     app_global_put
-    // smart_contracts/navi_trust/contract.py:56
+    // smart_contracts/navi_trust/contract.py:64
+    // self.is_paused.value = UInt64(0)
+    bytec_2 // "is_paused"
+    intc_0 // 0
+    app_global_put
+    // smart_contracts/navi_trust/contract.py:58
     // @arc4.baremethod(create="require")
     intc_1 // 1
     return
@@ -56,7 +69,7 @@ main_create_app@15:
 
 // smart_contracts.navi_trust.contract.NaviTrust.register_shipment[routing]() -> void:
 register_shipment:
-    // smart_contracts/navi_trust/contract.py:63
+    // smart_contracts/navi_trust/contract.py:66
     // @arc4.abimethod
     txna ApplicationArgs 1
     dup
@@ -84,7 +97,7 @@ register_shipment:
     len
     ==
     assert // invalid number of bytes for arc4.dynamic_array<arc4.uint8>
-    // smart_contracts/navi_trust/contract.py:71
+    // smart_contracts/navi_trust/contract.py:74
     // assert Txn.sender == self.oracle_address.value, "Oracle only"
     txn Sender
     intc_0 // 0
@@ -93,14 +106,21 @@ register_shipment:
     assert // check self.oracle_address exists
     ==
     assert // Oracle only
-    // smart_contracts/navi_trust/contract.py:72
+    // smart_contracts/navi_trust/contract.py:75
+    // assert self.is_paused.value == UInt64(0), "Oracle is paused"
+    intc_0 // 0
+    bytec_2 // "is_paused"
+    app_global_get_ex
+    assert // check self.is_paused exists
+    !
+    assert // Oracle is paused
+    // smart_contracts/navi_trust/contract.py:76
     // sid = shipment_id.native.bytes
     uncover 2
     extract 2 0
-    // smart_contracts/navi_trust/contract.py:73-74
-    // # Prevent overwriting an existing shipment's boxes.
+    // smart_contracts/navi_trust/contract.py:77
     // assert sid not in self.shipment_status, "Shipment already registered"
-    bytec 4 // 0x73745f
+    bytec 5 // 0x73745f
     dig 1
     concat
     dup
@@ -108,23 +128,23 @@ register_shipment:
     bury 1
     !
     assert // Shipment already registered
-    // smart_contracts/navi_trust/contract.py:75
+    // smart_contracts/navi_trust/contract.py:78
     // self.shipment_status[sid] = String("In_Transit")
     dup
     box_del
     pop
-    bytec 8 // "In_Transit"
+    bytec 9 // "In_Transit"
     box_put
-    // smart_contracts/navi_trust/contract.py:76
+    // smart_contracts/navi_trust/contract.py:79
     // self.shipment_supplier[sid] = supplier
-    bytec 9 // 0x73705f
+    bytec 10 // 0x73705f
     dig 1
     concat
     uncover 3
     box_put
-    // smart_contracts/navi_trust/contract.py:77
+    // smart_contracts/navi_trust/contract.py:80
     // self.shipment_funds[sid] = UInt64(0)
-    bytec 7 // 0x666e5f
+    bytec 8 // 0x666e5f
     dig 1
     concat
     intc_0 // 0
@@ -132,14 +152,14 @@ register_shipment:
     swap
     dig 1
     box_put
-    // smart_contracts/navi_trust/contract.py:78
+    // smart_contracts/navi_trust/contract.py:81
     // self.shipment_risk[sid] = UInt64(0)
-    bytec 10 // 0x72735f
+    bytec 11 // 0x72735f
     dig 2
     concat
     swap
     box_put
-    // smart_contracts/navi_trust/contract.py:79
+    // smart_contracts/navi_trust/contract.py:82
     // self.shipment_route[sid] = route.native.bytes
     swap
     extract 2 0
@@ -151,18 +171,18 @@ register_shipment:
     pop
     swap
     box_put
-    // smart_contracts/navi_trust/contract.py:80
+    // smart_contracts/navi_trust/contract.py:83
     // self.total_shipments.value = self.total_shipments.value + UInt64(1)
     intc_0 // 0
-    bytec_2 // "total_shipments"
+    bytec_3 // "total_shipments"
     app_global_get_ex
     assert // check self.total_shipments exists
     intc_1 // 1
     +
-    bytec_2 // "total_shipments"
+    bytec_3 // "total_shipments"
     swap
     app_global_put
-    // smart_contracts/navi_trust/contract.py:63
+    // smart_contracts/navi_trust/contract.py:66
     // @arc4.abimethod
     intc_1 // 1
     return
@@ -170,7 +190,7 @@ register_shipment:
 
 // smart_contracts.navi_trust.contract.NaviTrust.fund_shipment[routing]() -> void:
 fund_shipment:
-    // smart_contracts/navi_trust/contract.py:82
+    // smart_contracts/navi_trust/contract.py:85
     // @arc4.abimethod
     txna ApplicationArgs 1
     dup
@@ -190,14 +210,14 @@ fund_shipment:
     intc_1 // pay
     ==
     assert // transaction type is pay
-    // smart_contracts/navi_trust/contract.py:89
+    // smart_contracts/navi_trust/contract.py:92
     // assert payment.receiver == Global.current_application_address
     dup
     gtxns Receiver
     global CurrentApplicationAddress
     ==
     assert
-    // smart_contracts/navi_trust/contract.py:90
+    // smart_contracts/navi_trust/contract.py:93
     // assert payment.amount >= UInt64(100_000), "Minimum 0.1 ALGO"
     dup
     gtxns Amount
@@ -206,27 +226,27 @@ fund_shipment:
     pushint 100000
     >=
     assert // Minimum 0.1 ALGO
-    // smart_contracts/navi_trust/contract.py:91
+    // smart_contracts/navi_trust/contract.py:94
     // sid = shipment_id.native.bytes
     swap
     extract 2 0
-    // smart_contracts/navi_trust/contract.py:92
+    // smart_contracts/navi_trust/contract.py:95
     // assert sid in self.shipment_status, "Shipment not registered"
-    bytec 4 // 0x73745f
+    bytec 5 // 0x73745f
     dig 1
     concat
     dup
     box_len
     bury 1
     assert // Shipment not registered
-    // smart_contracts/navi_trust/contract.py:93
-    // assert self.shipment_status[sid] != String("Settled"), "Shipment already settled"
+    // smart_contracts/navi_trust/contract.py:96
+    // assert self.shipment_status[sid] != String("Settled"), "Cannot fund settled shipment"
     box_get
     pop
-    bytec 5 // "Settled"
+    bytec 6 // "Settled"
     !=
-    assert // Shipment already settled
-    // smart_contracts/navi_trust/contract.py:94
+    assert // Cannot fund settled shipment
+    // smart_contracts/navi_trust/contract.py:97
     // self.shipment_buyer[sid] = payment.sender
     swap
     gtxns Sender
@@ -235,9 +255,9 @@ fund_shipment:
     concat
     swap
     box_put
-    // smart_contracts/navi_trust/contract.py:95
+    // smart_contracts/navi_trust/contract.py:98
     // has_funds, current = self.shipment_funds.maybe(sid)
-    bytec 7 // 0x666e5f
+    bytec 8 // 0x666e5f
     swap
     concat
     dup
@@ -245,24 +265,24 @@ fund_shipment:
     box_get
     cover 2
     btoi
-    // smart_contracts/navi_trust/contract.py:97
+    // smart_contracts/navi_trust/contract.py:100
     // current + payment.amount if has_funds else payment.amount
     bz fund_shipment_ternary_false@3
     dig 1
     +
 
 fund_shipment_ternary_merge@4:
-    // smart_contracts/navi_trust/contract.py:96
+    // smart_contracts/navi_trust/contract.py:99
     // self.shipment_funds[sid] = (
     itob
-    // smart_contracts/navi_trust/contract.py:96-98
+    // smart_contracts/navi_trust/contract.py:99-101
     // self.shipment_funds[sid] = (
     //     current + payment.amount if has_funds else payment.amount
     // )
     dig 2
     swap
     box_put
-    // smart_contracts/navi_trust/contract.py:82
+    // smart_contracts/navi_trust/contract.py:85
     // @arc4.abimethod
     intc_1 // 1
     return
@@ -274,7 +294,7 @@ fund_shipment_ternary_false@3:
 // smart_contracts.navi_trust.contract.NaviTrust.record_verdict[routing]() -> void:
 record_verdict:
     intc_0 // 0
-    // smart_contracts/navi_trust/contract.py:100
+    // smart_contracts/navi_trust/contract.py:103
     // @arc4.abimethod
     txna ApplicationArgs 1
     dup
@@ -304,7 +324,7 @@ record_verdict:
     pushint 8
     ==
     assert // invalid number of bytes for arc4.uint64
-    // smart_contracts/navi_trust/contract.py:108
+    // smart_contracts/navi_trust/contract.py:111
     // assert Txn.sender == self.oracle_address.value, "Oracle only"
     txn Sender
     intc_0 // 0
@@ -313,15 +333,23 @@ record_verdict:
     assert // check self.oracle_address exists
     ==
     assert // Oracle only
-    // smart_contracts/navi_trust/contract.py:109
+    // smart_contracts/navi_trust/contract.py:112
+    // assert self.is_paused.value == UInt64(0), "Oracle is paused"
+    intc_0 // 0
+    bytec_2 // "is_paused"
+    app_global_get_ex
+    assert // check self.is_paused exists
+    !
+    assert // Oracle is paused
+    // smart_contracts/navi_trust/contract.py:113
     // sid = shipment_id.native.bytes
     swap
     extract 2 0
     dup
     cover 2
-    // smart_contracts/navi_trust/contract.py:110
+    // smart_contracts/navi_trust/contract.py:114
     // assert sid in self.shipment_status, "Shipment not registered"
-    bytec 4 // 0x73745f
+    bytec 5 // 0x73745f
     dig 1
     concat
     dup
@@ -330,32 +358,32 @@ record_verdict:
     box_len
     bury 1
     assert // Shipment not registered
-    // smart_contracts/navi_trust/contract.py:111
-    // assert self.shipment_status[sid] != String("Settled"), "Shipment already settled"
+    // smart_contracts/navi_trust/contract.py:115
+    // assert self.shipment_status[sid] != String("Settled"), "Cannot record verdict on settled shipment"
     box_get
     pop
-    bytec 5 // "Settled"
+    bytec 6 // "Settled"
     !=
-    assert // Shipment already settled
-    // smart_contracts/navi_trust/contract.py:112
+    assert // Cannot record verdict on settled shipment
+    // smart_contracts/navi_trust/contract.py:116
     // rs = risk_score.native
     swap
     btoi
     swap
-    // smart_contracts/navi_trust/contract.py:113
+    // smart_contracts/navi_trust/contract.py:117
     // old_r = UInt64(0)
     intc_0 // 0
     swap
-    // smart_contracts/navi_trust/contract.py:114
+    // smart_contracts/navi_trust/contract.py:118
     // if sid in self.shipment_risk:
-    bytec 10 // 0x72735f
+    bytec 11 // 0x72735f
     swap
     concat
     dup
     box_len
     bury 1
     bz record_verdict_after_if_else@3
-    // smart_contracts/navi_trust/contract.py:115
+    // smart_contracts/navi_trust/contract.py:119
     // old_r = self.shipment_risk[sid]
     dup
     box_get
@@ -364,18 +392,18 @@ record_verdict:
     bury 2
 
 record_verdict_after_if_else@3:
-    // smart_contracts/navi_trust/contract.py:116
+    // smart_contracts/navi_trust/contract.py:120
     // old_status = self.shipment_status[sid]
     dig 3
     box_get
     swap
     bury 8
     assert // check self.shipment_status entry exists
-    // smart_contracts/navi_trust/contract.py:117
+    // smart_contracts/navi_trust/contract.py:121
     // self.shipment_verdict[sid] = verdict_json.native.bytes
     dig 5
     extract 2 0
-    pushbytes 0x76645f
+    bytec 12 // 0x76645f
     dig 6
     concat
     dup
@@ -383,7 +411,7 @@ record_verdict_after_if_else@3:
     pop
     swap
     box_put
-    // smart_contracts/navi_trust/contract.py:118
+    // smart_contracts/navi_trust/contract.py:122
     // self.shipment_risk[sid] = rs
     dig 2
     dup
@@ -391,30 +419,30 @@ record_verdict_after_if_else@3:
     dig 2
     swap
     box_put
-    // smart_contracts/navi_trust/contract.py:119
+    // smart_contracts/navi_trust/contract.py:123
     // if rs > UInt64(65):
     pushint 65
     >
     bz record_verdict_else_body@8
-    // smart_contracts/navi_trust/contract.py:120
+    // smart_contracts/navi_trust/contract.py:124
     // self.shipment_status[sid] = String("Disputed")
     dig 3
     dup
     box_del
     pop
-    bytec 6 // "Disputed"
+    bytec 7 // "Disputed"
     box_put
-    // smart_contracts/navi_trust/contract.py:121
+    // smart_contracts/navi_trust/contract.py:125
     // if old_r <= UInt64(65) and old_status != String("Disputed"):
     dig 1
     pushint 65
     <=
     bz record_verdict_after_if_else@13
     dig 6
-    bytec 6 // "Disputed"
+    bytec 7 // "Disputed"
     !=
     bz record_verdict_after_if_else@13
-    // smart_contracts/navi_trust/contract.py:122
+    // smart_contracts/navi_trust/contract.py:126
     // self.total_disputed.value = self.total_disputed.value + UInt64(1)
     intc_0 // 0
     bytec_0 // "total_disputed"
@@ -427,28 +455,26 @@ record_verdict_after_if_else@3:
     app_global_put
 
 record_verdict_after_if_else@13:
-    // smart_contracts/navi_trust/contract.py:100
+    // smart_contracts/navi_trust/contract.py:103
     // @arc4.abimethod
     intc_1 // 1
     return
 
 record_verdict_else_body@8:
-    // smart_contracts/navi_trust/contract.py:124-125
-    // # A clean verdict returns the shipment to In_Transit unless it is already settled.
+    // smart_contracts/navi_trust/contract.py:128
     // if old_status == String("Disputed"):
     dig 6
-    bytec 6 // "Disputed"
+    bytec 7 // "Disputed"
     ==
     bz record_verdict_after_if_else@12
-    // smart_contracts/navi_trust/contract.py:126-127
-    // # If we previously counted it as disputed, decrement when clearing.
+    // smart_contracts/navi_trust/contract.py:129
     // if self.total_disputed.value > UInt64(0):
     intc_0 // 0
     bytec_0 // "total_disputed"
     app_global_get_ex
     assert // check self.total_disputed exists
     bz record_verdict_after_if_else@12
-    // smart_contracts/navi_trust/contract.py:128
+    // smart_contracts/navi_trust/contract.py:130
     // self.total_disputed.value = self.total_disputed.value - UInt64(1)
     intc_0 // 0
     bytec_0 // "total_disputed"
@@ -461,13 +487,13 @@ record_verdict_else_body@8:
     app_global_put
 
 record_verdict_after_if_else@12:
-    // smart_contracts/navi_trust/contract.py:129
+    // smart_contracts/navi_trust/contract.py:131
     // self.shipment_status[sid] = String("In_Transit")
     dig 3
     dup
     box_del
     pop
-    bytec 8 // "In_Transit"
+    bytec 9 // "In_Transit"
     box_put
     b record_verdict_after_if_else@13
 
@@ -477,7 +503,7 @@ settle_shipment:
     intc_0 // 0
     dup
     pushbytes ""
-    // smart_contracts/navi_trust/contract.py:131
+    // smart_contracts/navi_trust/contract.py:133
     // @arc4.abimethod
     txna ApplicationArgs 1
     dup
@@ -489,7 +515,7 @@ settle_shipment:
     len
     ==
     assert // invalid number of bytes for arc4.dynamic_array<arc4.uint8>
-    // smart_contracts/navi_trust/contract.py:140
+    // smart_contracts/navi_trust/contract.py:142
     // assert Txn.sender == self.oracle_address.value, "Oracle only"
     txn Sender
     intc_0 // 0
@@ -498,13 +524,13 @@ settle_shipment:
     assert // check self.oracle_address exists
     ==
     assert // Oracle only
-    // smart_contracts/navi_trust/contract.py:141
+    // smart_contracts/navi_trust/contract.py:143
     // sid = shipment_id.native.bytes
     extract 2 0
     dup
-    // smart_contracts/navi_trust/contract.py:142
+    // smart_contracts/navi_trust/contract.py:144
     // assert sid in self.shipment_status, "Shipment not registered"
-    bytec 4 // 0x73745f
+    bytec 5 // 0x73745f
     dig 1
     concat
     dup
@@ -513,21 +539,30 @@ settle_shipment:
     box_len
     bury 1
     assert // Shipment not registered
-    // smart_contracts/navi_trust/contract.py:143
+    // smart_contracts/navi_trust/contract.py:145
     // assert self.shipment_status[sid] != String("Settled"), "Shipment already settled"
     box_get
     pop
     dup
-    bytec 5 // "Settled"
+    bytec 6 // "Settled"
     !=
     assert // Shipment already settled
-    // smart_contracts/navi_trust/contract.py:144
-    // assert self.shipment_status[sid] != String("Disputed"), "Cannot settle a disputed shipment"
-    bytec 6 // "Disputed"
+    // smart_contracts/navi_trust/contract.py:146-148
+    // assert self.shipment_status[sid] != String(
+    //     "Disputed"
+    // ), "Cannot settle disputed shipment directly — record cleared verdict first"
+    bytec 7 // "Disputed"
     !=
-    assert // Cannot settle a disputed shipment
-    // smart_contracts/navi_trust/contract.py:145-146
-    // # Prevent double-mint via ce_ box if it already exists.
+    assert // Cannot settle disputed shipment directly — record cleared verdict first
+    // smart_contracts/navi_trust/contract.py:149
+    // assert sid in self.shipment_verdict, "No verdict recorded — run jury first"
+    bytec 12 // 0x76645f
+    dig 1
+    concat
+    box_len
+    bury 1
+    assert // No verdict recorded — run jury first
+    // smart_contracts/navi_trust/contract.py:150
     // if sid in self.shipment_cert:
     pushbytes 0x63655f
     swap
@@ -536,7 +571,7 @@ settle_shipment:
     box_len
     bury 1
     bz settle_shipment_after_if_else@3
-    // smart_contracts/navi_trust/contract.py:147
+    // smart_contracts/navi_trust/contract.py:151
     // assert self.shipment_cert[sid] == UInt64(0), "Certificate already minted"
     dup
     box_get
@@ -546,9 +581,9 @@ settle_shipment:
     assert // Certificate already minted
 
 settle_shipment_after_if_else@3:
-    // smart_contracts/navi_trust/contract.py:149
+    // smart_contracts/navi_trust/contract.py:153
     // funds_u = self.shipment_funds[sid]
-    bytec 7 // 0x666e5f
+    bytec 8 // 0x666e5f
     dig 3
     dup
     cover 2
@@ -557,57 +592,57 @@ settle_shipment_after_if_else@3:
     box_get
     assert // check self.shipment_funds entry exists
     btoi
-    // smart_contracts/navi_trust/contract.py:150
-    // assert funds_u > UInt64(0), "No funds to settle"
+    // smart_contracts/navi_trust/contract.py:154
+    // assert funds_u > UInt64(0), "No funds locked in escrow"
     dup
-    assert // No funds to settle
-    // smart_contracts/navi_trust/contract.py:152
+    assert // No funds locked in escrow
+    // smart_contracts/navi_trust/contract.py:156
     // supplier = self.shipment_supplier[sid]
-    bytec 9 // 0x73705f
+    bytec 10 // 0x73705f
     uncover 3
     concat
     box_get
     assert // check self.shipment_supplier entry exists
-    // smart_contracts/navi_trust/contract.py:154-159
+    // smart_contracts/navi_trust/contract.py:158-163
     // itxn.Payment(
     //     receiver=supplier,
     //     amount=funds_u,
-    //     note=Bytes(b"Navi-Trust: escrow released on clean settlement"),
+    //     note=Bytes(b"Pramanik: escrow released on verified settlement"),
     //     fee=UInt64(0),
     // ).submit()
     itxn_begin
-    // smart_contracts/navi_trust/contract.py:157
-    // note=Bytes(b"Navi-Trust: escrow released on clean settlement"),
-    pushbytes 0x4e6176692d54727573743a20657363726f772072656c6561736564206f6e20636c65616e20736574746c656d656e74
+    // smart_contracts/navi_trust/contract.py:161
+    // note=Bytes(b"Pramanik: escrow released on verified settlement"),
+    pushbytes 0x5072616d616e696b3a20657363726f772072656c6561736564206f6e20766572696669656420736574746c656d656e74
     itxn_field Note
     swap
     itxn_field Amount
     dup
     itxn_field Receiver
-    // smart_contracts/navi_trust/contract.py:154
+    // smart_contracts/navi_trust/contract.py:158
     // itxn.Payment(
     intc_1 // pay
     itxn_field TypeEnum
-    // smart_contracts/navi_trust/contract.py:158
+    // smart_contracts/navi_trust/contract.py:162
     // fee=UInt64(0),
     intc_0 // 0
     itxn_field Fee
-    // smart_contracts/navi_trust/contract.py:154-159
+    // smart_contracts/navi_trust/contract.py:158-163
     // itxn.Payment(
     //     receiver=supplier,
     //     amount=funds_u,
-    //     note=Bytes(b"Navi-Trust: escrow released on clean settlement"),
+    //     note=Bytes(b"Pramanik: escrow released on verified settlement"),
     //     fee=UInt64(0),
     // ).submit()
     itxn_submit
-    // smart_contracts/navi_trust/contract.py:161-173
+    // smart_contracts/navi_trust/contract.py:165-177
     // cert = itxn.AssetConfig(
     //     total=UInt64(1),
     //     decimals=UInt64(0),
     //     default_frozen=False,
-    //     asset_name=Bytes(b"NAVI-CERT"),
-    //     unit_name=Bytes(b"NCERT"),
-    //     url=Bytes(b"https://navi-trust.vercel.app/verify/"),
+    //     asset_name=Bytes(b"PRAMANIK-CERT"),
+    //     unit_name=Bytes(b"PCERT"),
+    //     url=Bytes(b"https://pramanik.vercel.app/verify/"),
     //     manager=Global.creator_address,
     //     reserve=Global.creator_address,
     //     freeze=Global.zero_address,
@@ -615,62 +650,62 @@ settle_shipment_after_if_else@3:
     //     fee=UInt64(0),
     // ).submit()
     itxn_begin
-    // smart_contracts/navi_trust/contract.py:168
+    // smart_contracts/navi_trust/contract.py:172
     // manager=Global.creator_address,
     global CreatorAddress
-    // smart_contracts/navi_trust/contract.py:169
+    // smart_contracts/navi_trust/contract.py:173
     // reserve=Global.creator_address,
     dup
-    // smart_contracts/navi_trust/contract.py:170
+    // smart_contracts/navi_trust/contract.py:174
     // freeze=Global.zero_address,
     global ZeroAddress
-    // smart_contracts/navi_trust/contract.py:171
+    // smart_contracts/navi_trust/contract.py:175
     // clawback=Global.zero_address,
     dup
     itxn_field ConfigAssetClawback
     itxn_field ConfigAssetFreeze
     itxn_field ConfigAssetReserve
     itxn_field ConfigAssetManager
-    // smart_contracts/navi_trust/contract.py:167
-    // url=Bytes(b"https://navi-trust.vercel.app/verify/"),
-    pushbytes 0x68747470733a2f2f6e6176692d74727573742e76657263656c2e6170702f7665726966792f
+    // smart_contracts/navi_trust/contract.py:171
+    // url=Bytes(b"https://pramanik.vercel.app/verify/"),
+    pushbytes 0x68747470733a2f2f7072616d616e696b2e76657263656c2e6170702f7665726966792f
     itxn_field ConfigAssetURL
-    // smart_contracts/navi_trust/contract.py:166
-    // unit_name=Bytes(b"NCERT"),
-    pushbytes 0x4e43455254
+    // smart_contracts/navi_trust/contract.py:170
+    // unit_name=Bytes(b"PCERT"),
+    pushbytes 0x5043455254
     itxn_field ConfigAssetUnitName
-    // smart_contracts/navi_trust/contract.py:165
-    // asset_name=Bytes(b"NAVI-CERT"),
-    pushbytes 0x4e4156492d43455254
+    // smart_contracts/navi_trust/contract.py:169
+    // asset_name=Bytes(b"PRAMANIK-CERT"),
+    pushbytes 0x5052414d414e494b2d43455254
     itxn_field ConfigAssetName
-    // smart_contracts/navi_trust/contract.py:164
+    // smart_contracts/navi_trust/contract.py:168
     // default_frozen=False,
     intc_0 // 0
     itxn_field ConfigAssetDefaultFrozen
-    // smart_contracts/navi_trust/contract.py:163
+    // smart_contracts/navi_trust/contract.py:167
     // decimals=UInt64(0),
     intc_0 // 0
     itxn_field ConfigAssetDecimals
-    // smart_contracts/navi_trust/contract.py:162
+    // smart_contracts/navi_trust/contract.py:166
     // total=UInt64(1),
     intc_1 // 1
     itxn_field ConfigAssetTotal
-    // smart_contracts/navi_trust/contract.py:161
+    // smart_contracts/navi_trust/contract.py:165
     // cert = itxn.AssetConfig(
     pushint 3 // acfg
     itxn_field TypeEnum
-    // smart_contracts/navi_trust/contract.py:172
+    // smart_contracts/navi_trust/contract.py:176
     // fee=UInt64(0),
     intc_0 // 0
     itxn_field Fee
-    // smart_contracts/navi_trust/contract.py:161-173
+    // smart_contracts/navi_trust/contract.py:165-177
     // cert = itxn.AssetConfig(
     //     total=UInt64(1),
     //     decimals=UInt64(0),
     //     default_frozen=False,
-    //     asset_name=Bytes(b"NAVI-CERT"),
-    //     unit_name=Bytes(b"NCERT"),
-    //     url=Bytes(b"https://navi-trust.vercel.app/verify/"),
+    //     asset_name=Bytes(b"PRAMANIK-CERT"),
+    //     unit_name=Bytes(b"PCERT"),
+    //     url=Bytes(b"https://pramanik.vercel.app/verify/"),
     //     manager=Global.creator_address,
     //     reserve=Global.creator_address,
     //     freeze=Global.zero_address,
@@ -679,22 +714,22 @@ settle_shipment_after_if_else@3:
     // ).submit()
     itxn_submit
     itxn CreatedAssetID
-    // smart_contracts/navi_trust/contract.py:177
+    // smart_contracts/navi_trust/contract.py:181
     // self.shipment_funds[sid] = UInt64(0)
     intc_0 // 0
     itob
     uncover 3
     swap
     box_put
-    // smart_contracts/navi_trust/contract.py:178
+    // smart_contracts/navi_trust/contract.py:182
     // self.shipment_status[sid] = String("Settled")
     dig 3
     dup
     box_del
     pop
-    bytec 5 // "Settled"
+    bytec 6 // "Settled"
     box_put
-    // smart_contracts/navi_trust/contract.py:179
+    // smart_contracts/navi_trust/contract.py:183
     // self.shipment_cert[sid] = cert_id
     itob
     dup
@@ -702,18 +737,18 @@ settle_shipment_after_if_else@3:
     dig 2
     swap
     box_put
-    // smart_contracts/navi_trust/contract.py:180
+    // smart_contracts/navi_trust/contract.py:184
     // self.total_settled.value = self.total_settled.value + UInt64(1)
     intc_0 // 0
-    bytec_3 // "total_settled"
+    bytec 4 // "total_settled"
     app_global_get_ex
     assert // check self.total_settled exists
     intc_1 // 1
     +
-    bytec_3 // "total_settled"
+    bytec 4 // "total_settled"
     swap
     app_global_put
-    // smart_contracts/navi_trust/contract.py:182
+    // smart_contracts/navi_trust/contract.py:186
     // if supplier in self.supplier_rep:
     pushbytes 0x72705f
     swap
@@ -723,7 +758,7 @@ settle_shipment_after_if_else@3:
     box_len
     bury 1
     bz settle_shipment_else_body@7
-    // smart_contracts/navi_trust/contract.py:183
+    // smart_contracts/navi_trust/contract.py:187
     // acc = self.supplier_rep[supplier]
     dig 5
     box_get
@@ -731,18 +766,18 @@ settle_shipment_after_if_else@3:
     btoi
 
 settle_shipment_after_if_else@8:
-    // smart_contracts/navi_trust/contract.py:186
+    // smart_contracts/navi_trust/contract.py:190
     // new_rep = acc + UInt64(5)
     pushint 5
     +
     dup
     bury 5
-    // smart_contracts/navi_trust/contract.py:187
+    // smart_contracts/navi_trust/contract.py:191
     // if new_rep > UInt64(100):
     pushint 100
     >
     bz settle_shipment_else_body@10
-    // smart_contracts/navi_trust/contract.py:188
+    // smart_contracts/navi_trust/contract.py:192
     // self.supplier_rep[supplier] = UInt64(100)
     pushint 100
     itob
@@ -751,9 +786,9 @@ settle_shipment_after_if_else@8:
     box_put
 
 settle_shipment_after_if_else@11:
-    // smart_contracts/navi_trust/contract.py:131
+    // smart_contracts/navi_trust/contract.py:133
     // @arc4.abimethod
-    bytec 11 // 0x151f7c75
+    bytec 13 // 0x151f7c75
     dig 5
     concat
     log
@@ -761,7 +796,7 @@ settle_shipment_after_if_else@11:
     return
 
 settle_shipment_else_body@10:
-    // smart_contracts/navi_trust/contract.py:190
+    // smart_contracts/navi_trust/contract.py:194
     // self.supplier_rep[supplier] = new_rep
     dig 3
     itob
@@ -771,15 +806,59 @@ settle_shipment_else_body@10:
     b settle_shipment_after_if_else@11
 
 settle_shipment_else_body@7:
-    // smart_contracts/navi_trust/contract.py:185
+    // smart_contracts/navi_trust/contract.py:189
     // acc = UInt64(50)
     pushint 50
     b settle_shipment_after_if_else@8
 
 
+// smart_contracts.navi_trust.contract.NaviTrust.pause_oracle[routing]() -> void:
+pause_oracle:
+    // smart_contracts/navi_trust/contract.py:201
+    // assert Txn.sender == self.oracle_address.value, "Oracle only"
+    txn Sender
+    intc_0 // 0
+    bytec_1 // "oracle_address"
+    app_global_get_ex
+    assert // check self.oracle_address exists
+    ==
+    assert // Oracle only
+    // smart_contracts/navi_trust/contract.py:202
+    // self.is_paused.value = UInt64(1)
+    bytec_2 // "is_paused"
+    intc_1 // 1
+    app_global_put
+    // smart_contracts/navi_trust/contract.py:198
+    // @arc4.abimethod
+    intc_1 // 1
+    return
+
+
+// smart_contracts.navi_trust.contract.NaviTrust.unpause_oracle[routing]() -> void:
+unpause_oracle:
+    // smart_contracts/navi_trust/contract.py:207
+    // assert Txn.sender == self.oracle_address.value, "Oracle only"
+    txn Sender
+    intc_0 // 0
+    bytec_1 // "oracle_address"
+    app_global_get_ex
+    assert // check self.oracle_address exists
+    ==
+    assert // Oracle only
+    // smart_contracts/navi_trust/contract.py:208
+    // self.is_paused.value = UInt64(0)
+    bytec_2 // "is_paused"
+    intc_0 // 0
+    app_global_put
+    // smart_contracts/navi_trust/contract.py:204
+    // @arc4.abimethod
+    intc_1 // 1
+    return
+
+
 // smart_contracts.navi_trust.contract.NaviTrust.update_oracle[routing]() -> void:
 update_oracle:
-    // smart_contracts/navi_trust/contract.py:194
+    // smart_contracts/navi_trust/contract.py:210
     // @arc4.abimethod
     txna ApplicationArgs 1
     dup
@@ -787,18 +866,18 @@ update_oracle:
     intc_3 // 32
     ==
     assert // invalid number of bytes for arc4.static_array<arc4.uint8, 32>
-    // smart_contracts/navi_trust/contract.py:197
+    // smart_contracts/navi_trust/contract.py:213
     // assert Txn.sender == Global.creator_address, "Creator only"
     txn Sender
     global CreatorAddress
     ==
     assert // Creator only
-    // smart_contracts/navi_trust/contract.py:198
+    // smart_contracts/navi_trust/contract.py:214
     // self.oracle_address.value = new_oracle
     bytec_1 // "oracle_address"
     swap
     app_global_put
-    // smart_contracts/navi_trust/contract.py:194
+    // smart_contracts/navi_trust/contract.py:210
     // @arc4.abimethod
     intc_1 // 1
     return
@@ -806,42 +885,53 @@ update_oracle:
 
 // smart_contracts.navi_trust.contract.NaviTrust.get_global_stats[routing]() -> void:
 get_global_stats:
-    // smart_contracts/navi_trust/contract.py:207
+    // smart_contracts/navi_trust/contract.py:231
     // arc4_UInt64(self.total_shipments.value),
     intc_0 // 0
-    bytec_2 // "total_shipments"
+    bytec_3 // "total_shipments"
     app_global_get_ex
     assert // check self.total_shipments exists
     itob
-    // smart_contracts/navi_trust/contract.py:208
+    // smart_contracts/navi_trust/contract.py:232
     // arc4_UInt64(self.total_settled.value),
     intc_0 // 0
-    bytec_3 // "total_settled"
+    bytec 4 // "total_settled"
     app_global_get_ex
     assert // check self.total_settled exists
     itob
-    // smart_contracts/navi_trust/contract.py:209
+    // smart_contracts/navi_trust/contract.py:233
     // arc4_UInt64(self.total_disputed.value),
     intc_0 // 0
     bytec_0 // "total_disputed"
     app_global_get_ex
     assert // check self.total_disputed exists
     itob
-    // smart_contracts/navi_trust/contract.py:205-211
+    // smart_contracts/navi_trust/contract.py:234
+    // arc4_UInt64(self.is_paused.value),
+    intc_0 // 0
+    bytec_2 // "is_paused"
+    app_global_get_ex
+    assert // check self.is_paused exists
+    itob
+    // smart_contracts/navi_trust/contract.py:229-236
     // return arc4.Tuple(
     //     (
     //         arc4_UInt64(self.total_shipments.value),
     //         arc4_UInt64(self.total_settled.value),
     //         arc4_UInt64(self.total_disputed.value),
+    //         arc4_UInt64(self.is_paused.value),
     //     )
     // )
-    cover 2
+    uncover 3
+    uncover 3
+    concat
+    uncover 2
     concat
     swap
     concat
-    // smart_contracts/navi_trust/contract.py:200
+    // smart_contracts/navi_trust/contract.py:224
     // @arc4.abimethod(readonly=True)
-    bytec 11 // 0x151f7c75
+    bytec 13 // 0x151f7c75
     swap
     concat
     log

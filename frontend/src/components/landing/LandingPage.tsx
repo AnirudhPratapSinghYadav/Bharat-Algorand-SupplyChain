@@ -47,7 +47,7 @@ export function LandingPage({ onConnectWallet }: LandingPageProps) {
                 <path d="M14 15h4M22 16v4M18 20h-2" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" opacity="0.55" />
               </svg>
             </span>
-            <span className="nt-nav-brand-text">Navi-Trust</span>
+            <span className="nt-nav-brand-text">Pramanik</span>
           </Link>
           <div className="nt-nav-actions">
             <button type="button" className="nt-btn nt-btn--primary nt-nav-wallet" onClick={onConnectWallet}>

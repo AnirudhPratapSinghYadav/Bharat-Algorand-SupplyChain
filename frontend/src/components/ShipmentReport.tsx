@@ -78,12 +78,12 @@ export function ShipmentReportActions({ shipment, appId, verifyBaseUrl = DEFAULT
             20,
             280,
         );
-        doc.save(`navi-trust-${shipment.shipment_id}.pdf`);
+        doc.save(`pramanik-${shipment.shipment_id}.pdf`);
     }
 
     const shareWhatsApp = () => {
         const verifyUrl = `${verifyBaseUrl.replace(/\/+$/, '')}/${encodeURIComponent(shipment.shipment_id)}`;
-        const text = `Navi-Trust Shipment Proof\n\nShipment: ${shipment.shipment_id}\nRoute: ${shipment.origin} → ${shipment.destination}\nStatus: ${shipment.stage}\nRisk: ${risk != null ? `${risk}/100` : 'N/A'}\n\nVerify:\n${verifyUrl}`;
+        const text = `Pramanik Shipment Proof\n\nShipment: ${shipment.shipment_id}\nRoute: ${shipment.origin} → ${shipment.destination}\nStatus: ${shipment.stage}\nRisk: ${risk != null ? `${risk}/100` : 'N/A'}\n\nVerify:\n${verifyUrl}`;
         window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
     };
 

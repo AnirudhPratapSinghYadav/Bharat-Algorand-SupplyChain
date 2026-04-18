@@ -1,5 +1,5 @@
 """
-Algorand reads/writes for Navi-Trust.
+Algorand reads/writes for Pramanik (NaviTrust contract id / imports unchanged).
 Requires artifacts/NaviTrust.arc56.json (legacy escrow ABI removed).
 """
 
@@ -86,7 +86,13 @@ STATUS_SETTLED = "Settled"
 
 # Global-state keys shown on /protocol (hide legacy badge / pact fields).
 NAVITRUST_DISPLAY_KEYS = frozenset(
-    {"total_shipments", "total_settled", "total_disputed", "oracle_address"}
+    {
+        "total_shipments",
+        "total_settled",
+        "total_disputed",
+        "oracle_address",
+        "is_paused",
+    }
 )
 
 
@@ -102,8 +108,11 @@ def _build_navitrust_arc4_name_map() -> Dict[str, str]:
         ("fund_shipment", ["string", "pay"], "void"),
         ("record_verdict", ["string", "string", "uint64"], "void"),
         ("settle_shipment", ["string"], "uint64"),
+        ("pause_oracle", [], "void"),
+        ("unpause_oracle", [], "void"),
         ("update_oracle", ["address"], "void"),
-        ("get_global_stats", [], "(uint64,uint64,uint64)"),
+        ("get_required_mbr", [], "uint64"),
+        ("get_global_stats", [], "(uint64,uint64,uint64,uint64)"),
     ]
     out: Dict[str, str] = {}
     for name, types, ret in specs:
@@ -120,7 +129,10 @@ METHOD_ACTION_LABELS = {
     "record_verdict": "Verdict recorded",
     "settle_shipment": "Shipment settled",
     "fund_shipment": "Escrow funded",
+    "pause_oracle": "Oracle paused",
+    "unpause_oracle": "Oracle unpaused",
     "update_oracle": "Oracle address updated",
+    "get_required_mbr": "MBR estimate lookup",
     "get_global_stats": "Global stats lookup",
 }
 
@@ -362,19 +374,19 @@ def mint_supplier_passport_asa(
     sp.fee = 1000
 
     score_i = max(0, min(100, int(reputation_score)))
-    asset_name_bytes = f"NAVI-PASS-{score_i}".encode("utf-8")[:32]
-    base_url = (os.environ.get("PASSPORT_URL_BASE") or "https://navi-trust.vercel.app").rstrip("/")
+    asset_name_bytes = f"PRAMANIK-PASS-{score_i}".encode("utf-8")[:32]
+    base_url = (os.environ.get("PASSPORT_URL_BASE") or "https://pramanik.vercel.app").rstrip("/")
     url_str = (f"{base_url}/supplier/{addr}")[:96]
 
     passport_note = {
         "standard": "arc69",
-        "description": "Navi-Trust Supplier Passport — verified on Algorand",
+        "description": "Pramanik Supplier Passport — verified on Algorand",
         "properties": {
             "supplier": addr,
             "reputation_score": score_i,
             "settled_deliveries": int(settled_count),
             "disputes": int(disputed_count),
-            "verified_by": "Navi-Trust Oracle",
+            "verified_by": "Pramanik Oracle",
             "network": ALGO_NETWORK,
             "app_id": APP_ID,
         },
@@ -388,7 +400,7 @@ def mint_supplier_passport_asa(
         total=1,
         decimals=0,
         default_frozen=False,
-        unit_name=b"NPASS",
+        unit_name=b"PPASS",
         asset_name=asset_name_bytes,
         manager=sender,
         reserve=sender,
@@ -792,6 +804,26 @@ def settle_shipment_chain(shipment_id: str) -> Optional[dict]:
         return None
 
 
+def call_pause_oracle(pause: bool) -> dict:
+    """Call pause_oracle or unpause_oracle (oracle-signed)."""
+    if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
+        raise ValueError("Missing oracle, APP_ID, or not NaviTrust")
+    deployer = _oracle_account()
+    app_client = get_app_client()
+    method = "pause_oracle" if pause else "unpause_oracle"
+    result = app_client.send.call(
+        params=AppClientMethodCallParams(
+            method=method,
+            args=[],
+            sender=deployer.address,
+            extra_fee=AlgoAmount(micro_algo=1000),
+        )
+    )
+    tx_id = result.tx_ids[0] if result.tx_ids else None
+    cr = result.confirmation.get("confirmed-round") if result.confirmation else None
+    return {"tx_id": tx_id, "confirmed_round": cr, "lora_url": lora_tx_url(tx_id)}
+
+
 def legacy_resolve_disaster(shipment_id: str, resolution_hash: str) -> bool:
     if not ORACLE_MNEMONIC or not APP_ID:
         return False
@@ -834,7 +866,7 @@ def ensure_navitrust_app_mbr(min_balance_algo: float = 2.5) -> None:
         dep_algo = dep_micro / 1_000_000.0
         if fund_amount > max(0, dep_algo - 0.3):
             logger.warning(
-                "NaviTrust app #%s balance %.4f ALGO — need ~%.2f more for new boxes; oracle balance %.4f ALGO",
+                "Pramanik (NaviTrust) app #%s balance %.4f ALGO — need ~%.2f more for new boxes; oracle balance %.4f ALGO",
                 APP_ID,
                 bal_algo,
                 fund_amount,
@@ -1058,6 +1090,8 @@ def global_stats_navitrust() -> dict:
         "total_shipments": 0,
         "total_settled": 0,
         "total_disputed": 0,
+        "is_paused": 0,
+        "oracle_status": "active",
         "app_id": APP_ID,
         "source": "algorand_box_enumeration",
         "escrow_total_algo": None,
@@ -1081,6 +1115,9 @@ def global_stats_navitrust() -> dict:
         out["total_shipments"] = int(gs.get("total_shipments") or 0)
         out["total_settled"] = int(gs.get("total_settled") or 0)
         out["total_disputed"] = int(gs.get("total_disputed") or 0)
+        paused_u = int(gs.get("is_paused") or 0)
+        out["is_paused"] = paused_u
+        out["oracle_status"] = "paused" if paused_u else "active"
         out["source"] = "algorand_global_state"
         return out
     pairs = list_shipment_statuses_from_boxes()

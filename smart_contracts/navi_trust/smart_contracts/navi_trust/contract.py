@@ -1,4 +1,4 @@
-"""Navi-Trust — supply chain dispute oracle (Algorand / Puya)."""
+"""Pramanik (प्रमाणिक) — supply chain dispute oracle (Algorand / Puya)."""
 
 from algopy import (
     ARC4Contract,
@@ -20,13 +20,14 @@ from algopy.arc4 import UInt64 as arc4_UInt64
 
 class NaviTrust(ARC4Contract):
     """
-    Navi-Trust: Supply Chain Dispute Oracle on Algorand.
+    Pramanik (प्रमाणिक) — Supply Chain Dispute Oracle on Algorand.
 
+    "Pramanik" means verified and authentic in Hindi.
     Buyer locks ALGO. 4-Agent AI jury examines evidence.
     Verdict is immutable on-chain. Settlement is atomic.
 
     Box prefix scheme (all keys are prefix + shipment_id bytes):
-      st_ = status          (Bytes)
+      st_ = status          (String: In_Transit / Disputed / Settled)
       sp_ = supplier        (Account)
       by_ = buyer           (Account)
       fn_ = funds           (UInt64 microALGO)
@@ -34,7 +35,7 @@ class NaviTrust(ARC4Contract):
       vd_ = verdict_json    (Bytes)
       rt_ = route           (Bytes)
       ce_ = certificate ASA (UInt64)
-      rp_ = supplier rep    (UInt64, key = supplier.bytes)
+      rp_ = supplier rep    (UInt64, key = supplier)
     """
 
     def __init__(self) -> None:
@@ -42,6 +43,7 @@ class NaviTrust(ARC4Contract):
         self.total_settled = GlobalState(UInt64)
         self.total_disputed = GlobalState(UInt64)
         self.oracle_address = GlobalState(Account)
+        self.is_paused = GlobalState(UInt64)
 
         self.shipment_status = BoxMap(Bytes, String, key_prefix=b"st_")
         self.shipment_supplier = BoxMap(Bytes, Account, key_prefix=b"sp_")
@@ -59,6 +61,7 @@ class NaviTrust(ARC4Contract):
         self.total_settled.value = UInt64(0)
         self.total_disputed.value = UInt64(0)
         self.oracle_address.value = Global.creator_address
+        self.is_paused.value = UInt64(0)
 
     @arc4.abimethod
     def register_shipment(
@@ -67,10 +70,10 @@ class NaviTrust(ARC4Contract):
         supplier: Account,
         route: arc4.String,
     ) -> None:
-        """Register a new shipment. Oracle only."""
+        """Register a new shipment. Oracle only. Cannot re-register."""
         assert Txn.sender == self.oracle_address.value, "Oracle only"
+        assert self.is_paused.value == UInt64(0), "Oracle is paused"
         sid = shipment_id.native.bytes
-        # Prevent overwriting an existing shipment's boxes.
         assert sid not in self.shipment_status, "Shipment already registered"
         self.shipment_status[sid] = String("In_Transit")
         self.shipment_supplier[sid] = supplier
@@ -85,12 +88,12 @@ class NaviTrust(ARC4Contract):
         shipment_id: arc4.String,
         payment: gtxn.PaymentTransaction,
     ) -> None:
-        """Buyer locks ALGO into escrow. Anyone can fund."""
+        """Buyer locks ALGO into escrow. Minimum 0.1 ALGO."""
         assert payment.receiver == Global.current_application_address
         assert payment.amount >= UInt64(100_000), "Minimum 0.1 ALGO"
         sid = shipment_id.native.bytes
         assert sid in self.shipment_status, "Shipment not registered"
-        assert self.shipment_status[sid] != String("Settled"), "Shipment already settled"
+        assert self.shipment_status[sid] != String("Settled"), "Cannot fund settled shipment"
         self.shipment_buyer[sid] = payment.sender
         has_funds, current = self.shipment_funds.maybe(sid)
         self.shipment_funds[sid] = (
@@ -106,9 +109,10 @@ class NaviTrust(ARC4Contract):
     ) -> None:
         """Oracle writes 4-agent jury verdict on-chain. Immutable."""
         assert Txn.sender == self.oracle_address.value, "Oracle only"
+        assert self.is_paused.value == UInt64(0), "Oracle is paused"
         sid = shipment_id.native.bytes
         assert sid in self.shipment_status, "Shipment not registered"
-        assert self.shipment_status[sid] != String("Settled"), "Shipment already settled"
+        assert self.shipment_status[sid] != String("Settled"), "Cannot record verdict on settled shipment"
         rs = risk_score.native
         old_r = UInt64(0)
         if sid in self.shipment_risk:
@@ -121,9 +125,7 @@ class NaviTrust(ARC4Contract):
             if old_r <= UInt64(65) and old_status != String("Disputed"):
                 self.total_disputed.value = self.total_disputed.value + UInt64(1)
         else:
-            # A clean verdict returns the shipment to In_Transit unless it is already settled.
             if old_status == String("Disputed"):
-                # If we previously counted it as disputed, decrement when clearing.
                 if self.total_disputed.value > UInt64(0):
                     self.total_disputed.value = self.total_disputed.value - UInt64(1)
             self.shipment_status[sid] = String("In_Transit")
@@ -133,7 +135,7 @@ class NaviTrust(ARC4Contract):
         """
         Atomic settlement:
           1. Pay supplier locked ALGO
-          2. Mint ARC-69 settlement certificate NFT
+          2. Mint ARC-69 settlement certificate NFT (PRAMANIK-CERT)
           3. Update supplier reputation
         Returns certificate ASA ID.
         """
@@ -141,20 +143,22 @@ class NaviTrust(ARC4Contract):
         sid = shipment_id.native.bytes
         assert sid in self.shipment_status, "Shipment not registered"
         assert self.shipment_status[sid] != String("Settled"), "Shipment already settled"
-        assert self.shipment_status[sid] != String("Disputed"), "Cannot settle a disputed shipment"
-        # Prevent double-mint via ce_ box if it already exists.
+        assert self.shipment_status[sid] != String(
+            "Disputed"
+        ), "Cannot settle disputed shipment directly — record cleared verdict first"
+        assert sid in self.shipment_verdict, "No verdict recorded — run jury first"
         if sid in self.shipment_cert:
             assert self.shipment_cert[sid] == UInt64(0), "Certificate already minted"
 
         funds_u = self.shipment_funds[sid]
-        assert funds_u > UInt64(0), "No funds to settle"
+        assert funds_u > UInt64(0), "No funds locked in escrow"
 
         supplier = self.shipment_supplier[sid]
 
         itxn.Payment(
             receiver=supplier,
             amount=funds_u,
-            note=Bytes(b"Navi-Trust: escrow released on clean settlement"),
+            note=Bytes(b"Pramanik: escrow released on verified settlement"),
             fee=UInt64(0),
         ).submit()
 
@@ -162,9 +166,9 @@ class NaviTrust(ARC4Contract):
             total=UInt64(1),
             decimals=UInt64(0),
             default_frozen=False,
-            asset_name=Bytes(b"NAVI-CERT"),
-            unit_name=Bytes(b"NCERT"),
-            url=Bytes(b"https://navi-trust.vercel.app/verify/"),
+            asset_name=Bytes(b"PRAMANIK-CERT"),
+            unit_name=Bytes(b"PCERT"),
+            url=Bytes(b"https://pramanik.vercel.app/verify/"),
             manager=Global.creator_address,
             reserve=Global.creator_address,
             freeze=Global.zero_address,
@@ -192,20 +196,41 @@ class NaviTrust(ARC4Contract):
         return arc4_UInt64(cert_id)
 
     @arc4.abimethod
+    def pause_oracle(self) -> None:
+        """Pause oracle write paths that check is_paused. Oracle only."""
+        assert Txn.sender == self.oracle_address.value, "Oracle only"
+        self.is_paused.value = UInt64(1)
+
+    @arc4.abimethod
+    def unpause_oracle(self) -> None:
+        """Resume oracle operations. Oracle only."""
+        assert Txn.sender == self.oracle_address.value, "Oracle only"
+        self.is_paused.value = UInt64(0)
+
+    @arc4.abimethod
     def update_oracle(self, new_oracle: Account) -> None:
         """Transfer oracle role. Creator only."""
         assert Txn.sender == Global.creator_address, "Creator only"
         self.oracle_address.value = new_oracle
 
     @arc4.abimethod(readonly=True)
+    def get_required_mbr(self) -> arc4_UInt64:
+        """
+        Minimum balance required to register one shipment (~9 boxes).
+        Conservative estimate: 0.5 ALGO = 500_000 microALGO.
+        """
+        return arc4_UInt64(UInt64(500_000))
+
+    @arc4.abimethod(readonly=True)
     def get_global_stats(
         self,
-    ) -> arc4.Tuple[arc4_UInt64, arc4_UInt64, arc4_UInt64]:
-        """Returns (total_shipments, total_settled, total_disputed)."""
+    ) -> arc4.Tuple[arc4_UInt64, arc4_UInt64, arc4_UInt64, arc4_UInt64]:
+        """Returns (total_shipments, total_settled, total_disputed, is_paused)."""
         return arc4.Tuple(
             (
                 arc4_UInt64(self.total_shipments.value),
                 arc4_UInt64(self.total_settled.value),
                 arc4_UInt64(self.total_disputed.value),
+                arc4_UInt64(self.is_paused.value),
             )
         )

@@ -21,7 +21,10 @@ def test_navitrust_abi_methods():
         "fund_shipment",
         "record_verdict",
         "settle_shipment",
+        "pause_oracle",
+        "unpause_oracle",
         "update_oracle",
+        "get_required_mbr",
         "get_global_stats",
     ):
         assert required in names, f"missing ABI method {required}"
@@ -39,6 +42,10 @@ def test_get_display_global_state_filters_keys(mock_app_info, _mock_enc):
             "value": {"type": 2, "uint": 3},
         },
         {
+            "key": "aXNfcGF1c2Vk",  # is_paused
+            "value": {"type": 2, "uint": 0},
+        },
+        {
             "key": "bGVnYWN5X2JhZGdl",  # legacy_badge — must be dropped
             "value": {"type": 1, "bytes": "AA=="},
         },
@@ -53,5 +60,6 @@ def test_get_display_global_state_filters_keys(mock_app_info, _mock_enc):
     mock_app_info.return_value = {"params": {"global-state": fake_gs}}
     out = ac.get_display_global_state(12345)
     assert "total_shipments" in out and out["total_shipments"] == 3
+    assert out.get("is_paused") == 0
     assert "legacy_badge" not in out
     assert out.get("oracle_address") == "ORACLE_ADDR_TEST"

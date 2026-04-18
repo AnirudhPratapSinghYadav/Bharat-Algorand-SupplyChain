@@ -21,7 +21,7 @@ export function LandingFooter({ appId }: LandingFooterProps) {
         ) : null}
       </div>
       <div>
-        © {year} Navi-Trust · Built on Algorand
+        © {year} Pramanik · Built on Algorand
       </div>
     </footer>
   );

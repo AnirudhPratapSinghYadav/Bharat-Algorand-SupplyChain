@@ -206,10 +206,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Navi-Trust Oracle API",
+    title="Pramanik — Supply Chain Oracle API",
     lifespan=lifespan,
     description="""
-Navi-Trust: Supply Chain Dispute Oracle API (Algorand Testnet).
+Pramanik (प्रमाणिक): Supply Chain Dispute Oracle API (Algorand Testnet).
 
 **Live Dispute Feed**: `GET /dispute-feed` — active disputes + recent jury verdicts  
 **Public Verification**: `GET /verify/{shipment_id}` — verify any shipment  
@@ -460,7 +460,7 @@ def _fetch_rss_logistics_news() -> List[dict]:
         import xml.etree.ElementTree as ET
         resp = requests.get(
             RSS_LOGISTICS_URL,
-            headers={"User-Agent": "Navi-Trust/1.0 (Logistics Monitor)"},
+            headers={"User-Agent": "Pramanik/1.0 (Logistics Monitor)"},
             timeout=8,
         )
         resp.raise_for_status()
@@ -707,7 +707,7 @@ def get_algo_usd_price() -> dict:
             "vs_currencies": "usd,inr",
             "include_24hr_change": "true",
         }
-        hdrs: dict = {"User-Agent": "Navi-Trust/2.0 (price-oracle)", "Accept": "application/json"}
+        hdrs: dict = {"User-Agent": "Pramanik/2.0 (price-oracle)", "Accept": "application/json"}
         if cg_key:
             hdrs["x-cg-demo-api-key"] = cg_key
         r = requests.get(
@@ -1722,7 +1722,7 @@ def run_weather_sentinel(
     weather: dict,
     chain_state: dict,
 ) -> dict:
-    prompt = f"""You are the Weather Sentinel AI agent for Navi-Trust supply chain oracle.
+    prompt = f"""You are the Weather Sentinel AI agent for Pramanik supply chain oracle.
 Analyze ONLY physical transport and weather risk. Be objective and data-driven.
 
 Shipment: {shipment_id}
@@ -1832,7 +1832,7 @@ def run_fraud_detector(
     auditor_report: dict,
     supplier_reputation: int,
 ) -> dict:
-    prompt = f"""You are the Fraud Detector AI agent for Navi-Trust supply chain oracle.
+    prompt = f"""You are the Fraud Detector AI agent for Pramanik supply chain oracle.
 Analyze fraud risk and supplier credibility. Be skeptical but fair.
 
 Shipment: {shipment_id}
@@ -1934,7 +1934,7 @@ def run_chief_arbiter(
     weighted_score: int,
     chain_status: str,
 ) -> dict:
-    prompt = f"""You are the Chief Arbiter AI agent for Navi-Trust.
+    prompt = f"""You are the Chief Arbiter AI agent for Pramanik.
 You receive reports from 3 specialist agents and deliver the FINAL BINDING VERDICT.
 This verdict will be written permanently to the Algorand blockchain.
 
@@ -2481,6 +2481,8 @@ def _stats_compute() -> dict:
     total_settled_k = 0
     total_disputed_k = 0
     total_shipments_count = 0
+    is_paused = 0
+    oracle_status = "active"
     if APP_ID and chain.use_navitrust():
         g_navitrust = chain.global_stats_navitrust()
         if g_navitrust.get("escrow_total_algo") is not None:
@@ -2491,6 +2493,10 @@ def _stats_compute() -> dict:
         total_settled_k = int(g_navitrust.get("total_settled") or 0)
         total_disputed_k = int(g_navitrust.get("total_disputed") or 0)
         active_shipments = max(0, total_shipments_count - total_settled_k - total_disputed_k)
+        is_paused = int(g_navitrust.get("is_paused") or 0)
+        oracle_status = str(
+            g_navitrust.get("oracle_status") or ("paused" if is_paused else "active")
+        )
     elif APP_ID:
         try:
             app_addr = get_application_address(APP_ID)
@@ -2511,6 +2517,7 @@ def _stats_compute() -> dict:
                 stats_source = "box_count_fallback"
         except Exception:
             pass
+
     return {
         "total_scans": total_verdicts,
         "verified_anomalies": total_anomalies,
@@ -2523,6 +2530,8 @@ def _stats_compute() -> dict:
         "active_shipments": active_shipments,
         "total_settled": total_settled_k,
         "total_disputed": total_disputed_k,
+        "is_paused": bool(is_paused),
+        "oracle_status": oracle_status,
         "source": stats_source,
     }
 
@@ -2537,6 +2546,32 @@ def get_stats():
     _STATS_CACHE["ts"] = now
     _STATS_CACHE["payload"] = body
     return body
+
+
+@app.post("/admin/pause")
+def pause_oracle_endpoint(body: dict = Body(default_factory=dict)):
+    """Pause oracle register/verdict writes. Requires ADMIN_SECRET."""
+    secret = (body or {}).get("admin_secret", "")
+    if secret != os.getenv("ADMIN_SECRET", ""):
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    try:
+        result = chain.call_pause_oracle(pause=True)
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return {"paused": True, "tx_id": result.get("tx_id")}
+
+
+@app.post("/admin/unpause")
+def unpause_oracle_endpoint(body: dict = Body(default_factory=dict)):
+    """Resume oracle after pause. Requires ADMIN_SECRET."""
+    secret = (body or {}).get("admin_secret", "")
+    if secret != os.getenv("ADMIN_SECRET", ""):
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    try:
+        result = chain.call_pause_oracle(pause=False)
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return {"paused": False, "tx_id": result.get("tx_id")}
 
 
 def _register_shipment_core(
@@ -2555,7 +2590,7 @@ def _register_shipment_core(
     if not APP_ID:
         raise HTTPException(
             status_code=503,
-            detail="APP_ID is not configured. Set APP_ID in .env to your NaviTrust application id.",
+            detail="APP_ID is not configured. Set APP_ID in .env to your Pramanik (NaviTrust) application id.",
         )
     if not chain.ORACLE_MNEMONIC:
         raise HTTPException(
@@ -2887,7 +2922,7 @@ def dispute_feed():
         merged = jury_items + active_items
         nd = len([x for x in active_items if isinstance(x, dict)])
         return {
-            "feed": "Navi-Trust Live Dispute Feed",
+            "feed": "Pramanik Live Dispute Feed",
             "network": "algorand_testnet",
             "app_id": aid or None,
             "generated_at": generated,
@@ -2899,7 +2934,7 @@ def dispute_feed():
     except Exception as e:
         logger.warning("dispute-feed: %s", e)
         return {
-            "feed": "Navi-Trust Live Dispute Feed",
+            "feed": "Pramanik Live Dispute Feed",
             "network": "algorand_testnet",
             "app_id": aid or None,
             "generated_at": generated,
@@ -3009,7 +3044,7 @@ def settle_shipment_api(body: SettleBody):
     if not r:
         raise HTTPException(
             status_code=400,
-            detail="settle_shipment failed (needs NaviTrust app, oracle mnemonic, and APP_ID)",
+            detail="settle_shipment failed (needs Pramanik app, oracle mnemonic, and APP_ID)",
         )
     cert = int(r.get("certificate_asa_id") or 0)
     tx_id = r.get("tx_id")
@@ -3027,7 +3062,7 @@ def settle_shipment_api(body: SettleBody):
 def fund_shipment_build(body: FundShipmentBuildBody):
     """Return unsigned atomic group (pay + fund_shipment) for the buyer wallet to sign."""
     if not chain.use_navitrust() or not APP_ID:
-        raise HTTPException(status_code=400, detail="NaviTrust APP_ID and ARC56 spec required.")
+        raise HTTPException(status_code=400, detail="Pramanik APP_ID and ARC56 spec required.")
     st = chain.read_shipment_status(body.shipment_id)
     if st in ("Unregistered", "Unknown"):
         raise HTTPException(status_code=400, detail="Shipment is not registered on-chain.")
@@ -3252,7 +3287,7 @@ async def _get_navibot_context() -> str:
         return _navibot_context_cache
     try:
         stats = await asyncio.to_thread(chain.global_stats_navitrust)
-        ctx = f"""You are NaviBot for Navi-Trust supply chain dispute oracle.
+        ctx = f"""You are NaviBot for Pramanik supply chain dispute oracle.
 
 LIVE ALGORAND TESTNET STATE (App #{APP_ID}):
 Total shipments on-chain: {int(stats.get('total_shipments') or 0)}
@@ -3275,7 +3310,7 @@ ANSWER RULES:
         _navibot_context_ts = time.time()
         return ctx
     except Exception:
-        return "NaviBot for Navi-Trust supply chain oracle on Algorand."
+        return "NaviBot for Pramanik supply chain oracle on Algorand."
 
 
 def _navibot_rule_match(query: str) -> Optional[dict]:
@@ -3301,7 +3336,7 @@ def _navibot_rule_match(query: str) -> Optional[dict]:
         )
     if any(w in q for w in ["hash", "verify hash", "proof", "authentic", "tamper"]):
         return _navibot_pack(
-            "Every Navi-Trust jury verdict has a SHA-256 hash anchored on Algorand (verdict note + optional NAVI_JURY_HASH witness). "
+            "Every Pramanik jury verdict has a SHA-256 hash anchored on Algorand (verdict note + optional NAVI_JURY_HASH witness). "
             "You can reproduce the hash from the canonical inputs via POST /verify-hash or use the Verify page.",
             "verify",
             None,

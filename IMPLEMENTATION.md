@@ -1,4 +1,4 @@
-# Navi-Trust — implementation index
+# Pramanik — implementation index
 
 This file is a short index for reviewers. The **canonical overview** is [README.md](./README.md). **On-chain proof links** are maintained in [LORA_PROOF.md](./LORA_PROOF.md) (regenerate with `python tools/refresh_lora_proof.py` after deployments).
 

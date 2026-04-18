@@ -19,7 +19,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error('[Navi-Trust] ErrorBoundary caught:', error, errorInfo);
+    console.error('[Pramanik] ErrorBoundary caught:', error, errorInfo);
   }
 
   handleRetry = () => {
@@ -45,7 +45,7 @@ export class ErrorBoundary extends Component<Props, State> {
           <div style={{ width: 64, height: 64, borderRadius: 16, background: 'rgba(255,255,255,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 20 }}>
             <Shield size={32} color="#60a5fa" />
           </div>
-          <h1 style={{ margin: '0 0 8px', fontSize: '1.5rem', fontWeight: 700 }}>Navi-Trust</h1>
+          <h1 style={{ margin: '0 0 8px', fontSize: '1.5rem', fontWeight: 700 }}>Pramanik</h1>
           <p style={{ margin: '0 0 24px', color: 'rgba(255,255,255,0.85)', fontSize: '0.95rem' }}>
             Something went wrong. Please try again.
           </p>

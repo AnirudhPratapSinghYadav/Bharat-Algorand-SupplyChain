@@ -35,7 +35,7 @@ export function ProblemSection() {
         Global trade runs on trust, but trust is broken
       </h2>
       <p className="nt-section-lead">
-        Navi-Trust exists so milestones, risk, and release conditions meet an auditable record, not a thread of emails.
+        Pramanik exists so milestones, risk, and release conditions meet an auditable record, not a thread of emails.
       </p>
       <div className="scroll-wrapper scroll-wrapper--problem">
         <div className="scroll-wrapper__strip nt-problem-scroll nt-problem-scroll--four">

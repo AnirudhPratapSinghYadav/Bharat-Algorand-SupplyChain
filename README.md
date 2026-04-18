@@ -1,8 +1,8 @@
-# Navi-Trust — Supply Chain Dispute Oracle on Algorand
+# Pramanik (प्रमाणिक) — Supply Chain Dispute Oracle on Algorand
 
 > Buyer locks ALGO. 4-agent AI jury decides. Verdict is permanent on Algorand.
 
-**Live Demo:** https://navi-trust.vercel.app  
+**Live Demo:** https://pramanik.vercel.app  
 **API:** https://navi-trust-api.onrender.com  
 **Contract on Lora:** https://lora.algokit.io/testnet/application/758734899  
 **On-chain proof:** [LORA_PROOF.md](./LORA_PROOF.md)
@@ -11,7 +11,7 @@
 
 ## What It Solves
 
-Supply chain disputes cost billions annually in delayed payments and litigation. Navi-Trust provides:
+Supply chain disputes cost billions annually in delayed payments and litigation. Pramanik provides:
 
 - **Trust-minimized escrow** — ALGO held by smart contract code, not a platform
 - **AI-powered evidence review** — four independent agents analyze weather, compliance, and fraud
@@ -23,10 +23,10 @@ Supply chain disputes cost billions annually in delayed payments and litigation.
 
 ## Why Algorand
 
-| Algorand Feature | How Navi-Trust Uses It |
+| Algorand Feature | How Pramanik Uses It |
 |---|---|
 | Box Storage | Per-shipment state: status, funds, verdict, risk score, route, certificate |
-| Atomic Groups | Settlement: payment to supplier + NAVI-CERT NFT mint in one transaction |
+| Atomic Groups | Settlement: payment to supplier + PRAMANIK-CERT NFT mint in one transaction |
 | ARC-69 NFTs | Unique settlement certificate per shipment (total supply: 1) |
 | Fast Finality | Jury verdict confirms in seconds on TestNet |
 | AlgoKit ARC-56 | Typed smart contract client, verified ABI on Lora |
@@ -76,8 +76,10 @@ curl -X POST https://navi-trust-api.onrender.com/verify-hash \
 | `register_shipment` | Oracle registers shipment, writes box storage |
 | `fund_shipment` | Buyer locks ALGO via atomic payment + app call |
 | `record_verdict` | Oracle writes verdict to boxes + transaction note |
-| `settle_shipment` | Atomic: pay supplier + mint NAVI-CERT NFT |
-| `get_global_stats` | Read-only: totals and oracle address |
+| `settle_shipment` | Atomic: pay supplier + mint PRAMANIK-CERT NFT |
+| `pause_oracle` / `unpause_oracle` | Oracle pauses or resumes write paths that honor `is_paused` |
+| `get_required_mbr` | Read-only: conservative MBR estimate for registration |
+| `get_global_stats` | Read-only: totals, dispute count, pause flag |
 
 Box prefixes: `st_` status · `fn_` funds · `vd_` verdict · `ce_` certificate · `rp_` reputation
 

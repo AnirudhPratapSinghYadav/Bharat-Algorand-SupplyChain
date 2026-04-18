@@ -35,6 +35,8 @@ export default function ProtocolPage() {
         total_settled?: number;
         total_disputed?: number;
         escrow_total_algo?: number;
+        oracle_status?: string;
+        is_paused?: boolean;
       },
     staleTime: 15_000,
   });
@@ -94,7 +96,7 @@ export default function ProtocolPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `navi-trust-protocol-proof-${appId || 'app'}.json`;
+      a.download = `pramanik-protocol-proof-${appId || 'app'}.json`;
       a.click();
       URL.revokeObjectURL(url);
     } catch {
@@ -108,6 +110,7 @@ export default function ProtocolPage() {
     { k: 'total_shipments', v: statsQ.data?.total_shipments ?? '—' },
     { k: 'total_settled', v: statsQ.data?.total_settled ?? '—' },
     { k: 'total_disputed', v: statsQ.data?.total_disputed ?? '—' },
+    { k: 'oracle_status', v: statsQ.data?.oracle_status ?? '—' },
     { k: 'escrow_total_algo', v: statsQ.data?.escrow_total_algo ?? '—' },
   ];
 
@@ -196,7 +199,7 @@ export default function ProtocolPage() {
             <strong>Network:</strong> {healthQ.data?.network || 'Algorand Testnet'}
           </div>
           <div style={{ marginTop: 10, color: 'var(--muted)', fontSize: '0.82rem' }}>
-            ARC-56 methods: register_shipment, fund_shipment, record_verdict, settle_shipment, update_oracle, get_global_stats
+            ARC-56 methods: register_shipment, fund_shipment, record_verdict, settle_shipment, pause_oracle, unpause_oracle, update_oracle, get_required_mbr, get_global_stats
           </div>
         </div>
       </section>

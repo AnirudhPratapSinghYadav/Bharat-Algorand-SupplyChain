@@ -15,7 +15,7 @@ export function GeopoliticalStakesSection() {
         </p>
         <p>
           Bills of lading, custody handoffs, and time-stamped telemetry then become the evidence insurers, buyers, and regulators
-          dispute over. That is the layer Navi-Trust records on Algorand.
+          dispute over. That is the layer Pramanik records on Algorand.
         </p>
       </blockquote>
     </section>

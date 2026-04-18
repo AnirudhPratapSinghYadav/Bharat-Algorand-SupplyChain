@@ -758,7 +758,7 @@ function MainApp() {
         const eventRows = events.map((e: any) => `
             <tr><td style="padding:10px 14px;border-bottom:1px solid #f3f4f6;vertical-align:top;font-size:0.9rem;">${esc((e.severity || 'N/A').toUpperCase())}</td>
             <td style="padding:10px 14px;border-bottom:1px solid #f3f4f6;font-size:0.9rem;">${esc(e.event || JSON.stringify(e))}</td></tr>`).join('') || '<tr><td colspan="2" style="padding:16px;color:#9ca3af;font-size:0.9rem;">No events logged</td></tr>';
-        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Navi-Trust Audit Report — ${ship.shipment_id}</title>
+        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pramanik Audit Report — ${ship.shipment_id}</title>
 <style>@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');</style></head>
 <body style="font-family:'Inter',system-ui,-apple-system,sans-serif;margin:0;padding:0;background:#f8fafc;">
 <div style="background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);color:#fff;padding:28px 40px;box-shadow:0 4px 6px rgba(0,0,0,0.1);">
@@ -786,7 +786,7 @@ function MainApp() {
     <table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f8fafc;"><th style="padding:12px 14px;text-align:left;font-size:0.7rem;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;width:100px;">Severity</th><th style="padding:12px 14px;text-align:left;font-size:0.7rem;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">Event</th></tr></thead><tbody>${eventRows}</tbody></table>
   </div>
   <div style="margin-top:32px;padding:16px 24px;background:#f1f5f9;border-radius:8px;font-size:0.8rem;color:#64748b;text-align:center;">
-    Navi-Trust · Algorand Testnet · APP_ID ${appId || 'N/A'} · ${new Date().toISOString()}
+    Pramanik · Algorand Testnet · APP_ID ${appId || 'N/A'} · ${new Date().toISOString()}
   </div>
 </div>
 </body></html>`;
@@ -835,7 +835,7 @@ function MainApp() {
                         <Shield size={20} color="#7dd3fc" strokeWidth={2} />
                     </div>
                     <div>
-                        <h1 className="dash-title">Navi-Trust</h1>
+                        <h1 className="dash-title">Pramanik</h1>
                     </div>
                 </div>
 
@@ -921,7 +921,7 @@ function MainApp() {
                 </h2>
                 <p style={{ margin: '6px 0 0', fontSize: '0.82rem', color: '#94a3b8' }}>
                     {role === 'stakeholder'
-                        ? 'ALGO you have locked in Navi-Trust smart contracts'
+                        ? 'ALGO you have locked in Pramanik smart contracts'
                         : 'Track incoming payments and your on-chain reputation'}
                 </p>
             </div>
@@ -1402,7 +1402,7 @@ function MainApp() {
                 <section className="card" style={{ marginTop: 16, padding: '18px 20px' }} aria-label="Escrow for selected shipment">
                     <div style={{ marginBottom: 14 }}>
                         <div style={{ fontWeight: 700, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <Truck size={16} color="#38bdf8" /> Escrow (NaviTrust)
+                            <Truck size={16} color="#38bdf8" /> Escrow (Pramanik)
                         </div>
                             <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: 4 }}>
                             Shipment <span style={{ color: '#e2e8f0', fontFamily: 'ui-monospace, monospace' }}>{focusVaultShip.shipment_id}</span> — escrow balance from the chain. Minimum deposit 0.5 ALGO per fund.
@@ -2611,7 +2611,7 @@ function MainApp() {
             )}
 
             <footer className="dash-footer">
-                <span className="dash-footer-brand">Navi-Trust</span>
+                <span className="dash-footer-brand">Pramanik</span>
                 <nav className="dash-footer-nav" aria-label="Footer">
                     <Link to="/verify">🔍 Verify</Link>
                     <Link to="/protocol">Protocol</Link>

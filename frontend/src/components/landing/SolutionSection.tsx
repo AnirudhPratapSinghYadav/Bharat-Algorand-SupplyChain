@@ -13,7 +13,7 @@ export function SolutionSection() {
   return (
     <section className="nt-section" aria-labelledby="nt-solution-title">
       <h2 id="nt-solution-title" className="nt-section-title">
-        Navi-Trust fixes this
+        Pramanik fixes this
       </h2>
       <p className="nt-section-lead">
         One protocol for evidence, verdicts, and settlement, anchored on Algorand.
