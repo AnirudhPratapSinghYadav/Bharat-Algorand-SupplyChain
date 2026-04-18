@@ -1578,7 +1578,6 @@ function MainApp() {
                                     destinationCity={ship.destination || '—'}
                                     originCity={ship.origin || ''}
                                     fundsLockedMicroalgo={fundsMicro}
-                                    fundsUsd={ship.funds_usd}
                                     appId={appId}
                                     onComplete={(_jr, _raw) => {
                                         void refreshAfterJury();

@@ -191,8 +191,6 @@ async def lifespan(app: FastAPI):
             raise
     load_logistics_events()
     load_verdict_history()
-    for _ in range(6):
-        generate_random_logistics_event()
     bg_task = asyncio.create_task(_live_feed_background_task())
     try:
         yield
@@ -394,6 +392,10 @@ LOGISTICS_EVENTS: List[dict] = []
 
 def load_logistics_events():
     global LOGISTICS_EVENTS
+    if os.environ.get("OFFCHAIN_EVENTS", "").strip().lower() not in ("1", "true", "yes"):
+        LOGISTICS_EVENTS = []
+        logger.info("OFFCHAIN_EVENTS not enabled — logistics context empty (set OFFCHAIN_EVENTS=1 to load offchain_events.json)")
+        return
     try:
         with open("offchain_events.json", "r", encoding="utf-8") as f:
             raw = f.read().strip()

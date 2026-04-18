@@ -4,7 +4,7 @@
 
 **Live Demo:** https://pramanik.vercel.app  
 **API:** https://navi-trust-api.onrender.com  
-**Contract on Lora:** https://lora.algokit.io/testnet/application/758734899  
+**Contract on Lora:** https://lora.algokit.io/testnet/application/759018740  
 **On-chain proof:** [LORA_PROOF.md](./LORA_PROOF.md)
 
 ---
@@ -68,7 +68,7 @@ curl -X POST https://navi-trust-api.onrender.com/verify-hash \
 
 ## Smart Contract
 
-**App ID:** 758734899 | **Network:** Algorand Testnet  
+**App ID:** 759018740 | **Network:** Algorand Testnet  
 **Language:** Puya (AlgoKit) | **ABI:** ARC-56
 
 | Method | What it does |

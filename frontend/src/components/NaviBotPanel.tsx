@@ -32,10 +32,10 @@ function readWallet(): string | undefined {
 }
 
 const GREETING_STAKEHOLDER =
-  'Connect your wallet to see live escrow. Ask how the 4-agent jury works, open Verify for any shipment_id, or use the dashboard cards to run AI Jury.';
+  '3 shipments tracked. 5 ALGO in escrow.\nSHIP_CHEN_002 is disputed — 3 ALGO frozen.\nClick Run AI Jury on SHIP_MUMBAI_001 to get a live verdict.';
 
 const GREETING_SUPPLIER =
-  'Track payments and on-chain reputation from your shipments. Ask about hashes, USD pricing, the dispute feed, or a Supplier Passport NFT.';
+  'Your reputation is 55/100 on Algorand.\nSHIP_DELHI_003 settled — 2 ALGO received.\nSHIP_CHEN_002 payment is frozen.';
 
 const QUICK_PILLS = [
   'Why is Chennai frozen?',
@@ -106,7 +106,7 @@ export function NaviBotPanel({
             ...prev,
             {
               role: 'assistant' as const,
-              text: 'I could not reach the assistant just now. Please try again in a moment.',
+              text: 'Request timed out or the server was busy. Please try again in a moment.',
               at: Date.now(),
             },
           ].slice(-MAX_MESSAGES),
@@ -177,7 +177,7 @@ export function NaviBotPanel({
       <div ref={listRef} className="navibot-panel__messages">
         {lines.map((m, i) => (
           <div key={`${m.at}-${i}`} className={`navibot-bubble navibot-bubble--${m.role}`}>
-            <div>{m.text}</div>
+            <div style={{ whiteSpace: 'pre-line' }}>{m.text}</div>
             <div className="navibot-bubble__time">
               {new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             </div>

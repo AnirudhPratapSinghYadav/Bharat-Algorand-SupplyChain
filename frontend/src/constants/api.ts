@@ -9,7 +9,7 @@ export const BACKEND_URL = _rawBase.replace(/\/+$/, '');
 
 export const API_TIMEOUT = 5000;
 
-export const FALLBACK_APP_ID = Number(import.meta.env.VITE_APP_ID) || 758734899;
+export const FALLBACK_APP_ID = Number(import.meta.env.VITE_APP_ID) || 0;
 
 /** Optional: pin landing “live proof” card to this shipment; otherwise first ID from /config or /shipments is used. */
 export const LANDING_DEMO_SHIPMENT_ID = String(import.meta.env.VITE_LANDING_DEMO_SHIPMENT_ID || '').trim();
