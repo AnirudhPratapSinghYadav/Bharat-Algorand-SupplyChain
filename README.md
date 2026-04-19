@@ -10,8 +10,10 @@
 ### Deploy frontend (Vercel)
 
 - **Root directory:** set to `frontend` *or* deploy the repo root (root `vercel.json` builds `frontend/dist`).
-- **Env (build):** set `VITE_APP_ID` and optionally `VITE_ALGORAND_NODE` / `VITE_INDEXER_URL` to match TestNet. Leave **`VITE_API_URL` unset** so the app uses same-origin `/api` and `vercel.json` proxies to the API (avoids CORS). To call a custom API URL instead, set `VITE_API_URL` and add your Vercel domain to the backend `CORS_EXTRA_ORIGINS` (or the allowlist in `app.py`).
-- **Backend:** host FastAPI separately (e.g. Render) and ensure `ORACLE_MNEMONIC`, `APP_ID`, and ARC56 artifacts match the contract you point wallets at.
+- **Env (build) — required for a working dashboard:** set **`VITE_API_URL`** to your live FastAPI base URL (e.g. `https://your-service.onrender.com` with **no** trailing slash). The public demo URL bundled as fallback is often cold or removed; do not rely on it for demos you care about.
+- Also set **`VITE_APP_ID`** (and optionally `VITE_ALGORAND_NODE` / indexer URLs) to match TestNet and your deployed contract.
+- Add your Vercel origin (`https://<project>.vercel.app`) to the API **CORS** allowlist (`CORS_EXTRA_ORIGINS` on the server or `app.py`).
+- **Backend:** host `app.py` (Render/Railway/Fly) with `ORACLE_MNEMONIC`, `APP_ID`, and ARC56 artifacts consistent with the chain.
 
 ---
 

@@ -1,8 +1,12 @@
 /**
+ * Legacy demo API host — often cold/offline on free tiers. For production, set `VITE_API_URL` to your deployed `app.py`.
+ */
+export const PUBLIC_DEFAULT_API_URL = 'https://navi-trust-api.onrender.com';
+
+/**
  * API base for axios/fetch.
- * - Dev: `/api` → Vite proxy strips prefix and forwards to local FastAPI (see `vite.config.ts`).
- * - Prod (Vercel): default `/api` → edge rewrite to public FastAPI (see `vercel.json`), same-origin (no CORS).
- * - Override: set `VITE_API_URL` to a full URL (e.g. your own Render/Railway API) if you do not use the proxy.
+ * - **Dev:** `/api` → Vite proxy → local FastAPI (`vite.config.ts`).
+ * - **Prod:** `VITE_API_URL` if set, else `PUBLIC_DEFAULT_API_URL` (full HTTPS URL; CORS must allow your frontend origin).
  */
 function resolveBackendUrl(): string {
   const trim = (s: string | undefined) => (s || '').trim().replace(/\/+$/, '');
@@ -14,7 +18,7 @@ function resolveBackendUrl(): string {
     return fromEnv;
   }
   if (import.meta.env.PROD) {
-    return '/api';
+    return PUBLIC_DEFAULT_API_URL;
   }
   return `http://${typeof window !== 'undefined' ? window.location.hostname : 'localhost'}:8000`;
 }

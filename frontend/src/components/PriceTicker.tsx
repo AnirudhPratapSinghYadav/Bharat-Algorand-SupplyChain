@@ -11,7 +11,12 @@ type PricePayload = {
     error?: string;
 };
 
-export function PriceTicker() {
+type PriceTickerProps = {
+  /** When false, show a neutral placeholder instead of “offline” copy (parent already showed API error). */
+  apiReachable?: boolean;
+};
+
+export function PriceTicker({ apiReachable = true }: PriceTickerProps) {
     const [data, setData] = useState<PricePayload | null>(null);
 
     useEffect(() => {
@@ -66,7 +71,9 @@ export function PriceTicker() {
                         ${usd.toFixed(4)}
                     </span>
                 ) : (
-                    <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>Price unavailable (offline or rate limit)</span>
+                    <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
+                        {apiReachable ? 'Price unavailable (offline or rate limit)' : '—'}
+                    </span>
                 )}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

@@ -980,14 +980,16 @@ function MainApp() {
                         textAlign: 'center',
                     }}
                 >
-                    API or chain unreachable. If this is production, confirm Vercel rewrites <code style={{ fontSize: '0.78rem' }}>/api</code> → your
-                    backend or set <code style={{ fontSize: '0.78rem' }}>VITE_API_URL</code> in the build. Check Algod / indexer URLs.
+                    <strong>Backend offline.</strong> Deploy FastAPI (<code style={{ fontSize: '0.78rem' }}>app.py</code>) and set{' '}
+                    <code style={{ fontSize: '0.78rem' }}>VITE_API_URL</code> in Vercel → Environment Variables to your API root (e.g.{' '}
+                    <code style={{ fontSize: '0.78rem' }}>https://your-service.onrender.com</code>). Add that origin to API CORS. The bundled
+                    default demo URL may be sleeping or removed — Algod/TestNet is separate; green “Testnet” only means public nodes are up.
                 </div>
             ) : null}
             <NewsTicker />
-            <PriceTicker />
+            <PriceTicker apiReachable={chainHealth} />
 
-            {shipmentsSyncError && accountAddress ? (
+            {shipmentsSyncError && accountAddress && chainHealth ? (
                 <div
                     style={{
                         marginTop: 10,
@@ -1025,7 +1027,7 @@ function MainApp() {
                                 setToast('Shipments synced.');
                             } catch {
                                 setShipmentsSyncError(
-                                    'Still failing — run backend on :8000; in dev, Vite proxies /api → VITE_API_URL (see frontend/.env).',
+                                    'Still failing — set VITE_API_URL to your live API, or run uvicorn locally (:8000) with Vite dev proxy.',
                                 );
                             }
                         }}
