@@ -9,8 +9,17 @@ export function HeroSection() {
           <span className="nt-hero-highlight">The AI Court for Supply Chain Disputes</span>
         </h1>
         <p className="nt-hero-sub">
-          Buyer locks ALGO. 4-agent AI jury decides. Verdict is on Algorand — forever.
+          Buyer locks ALGO. Four specialized agents score weather, chain truth, and fraud risk — then the Chief Arbiter
+          seals a verdict on-chain.
         </p>
+        <p className="nt-hero-subline">
+          No black box: Open-Meteo weather, real box reads, and an audit trail you can show to insurers or partners.
+        </p>
+        <div className="nt-hero-actions">
+          <a href="#agents" className="nt-btn nt-btn--ghost">
+            See how the agents work
+          </a>
+        </div>
       </div>
       <div className="nt-hero-visual">
         <img

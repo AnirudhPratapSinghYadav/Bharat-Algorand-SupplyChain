@@ -37,14 +37,52 @@ export function JuryRiskHistoryChart() {
         refetchInterval: false,
     });
     const raw = q.data?.points || [];
-    if (raw.length < 2) return null;
 
-    const data: RiskPoint[] = raw.map((p) => ({
-        ...p,
-        timeLabel: p.timestamp
-            ? new Date(p.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            : '—',
-    }));
+    if (q.isLoading) {
+        return (
+            <section className="card" style={{ marginTop: 16, padding: '16px 18px' }} aria-label="AI jury history">
+                <div style={{ fontWeight: 700, fontSize: '0.9rem', marginBottom: 8 }}>AI Jury History</div>
+                <p style={{ margin: 0, fontSize: '0.85rem', color: '#94a3b8' }}>Loading verdict history…</p>
+            </section>
+        );
+    }
+
+    if (q.isError) {
+        return (
+            <section className="card" style={{ marginTop: 16, padding: '16px 18px' }} aria-label="AI jury history">
+                <div style={{ fontWeight: 700, fontSize: '0.9rem', marginBottom: 8 }}>AI Jury History</div>
+                <p style={{ margin: 0, fontSize: '0.85rem', color: '#f87171' }}>Could not load risk history. Is the backend running?</p>
+            </section>
+        );
+    }
+
+    if (raw.length === 0) {
+        return (
+            <section className="card" style={{ marginTop: 16, padding: '16px 18px' }} aria-label="AI jury history">
+                <div style={{ fontWeight: 700, fontSize: '0.9rem', marginBottom: 8 }}>AI Jury History</div>
+                <p style={{ margin: 0, fontSize: '0.85rem', color: '#94a3b8', lineHeight: 1.5 }}>
+                    No risk points yet. Run <strong style={{ color: '#e2e8f0' }}>AI Jury</strong> on a shipment (saves to the server audit trail), or ensure shipments have on-chain{' '}
+                    <code style={{ color: '#e2e8f0', fontSize: '0.75rem' }}>record_verdict</code> / risk boxes — the API also merges live box scores into this chart.
+                </p>
+            </section>
+        );
+    }
+
+    const data: RiskPoint[] = raw.map((p) => {
+        const score =
+            typeof p.score === 'number' && !Number.isNaN(p.score)
+                ? p.score
+                : typeof (p as unknown as { sentinel_score?: number }).sentinel_score === 'number'
+                  ? (p as unknown as { sentinel_score: number }).sentinel_score
+                  : 0;
+        return {
+            ...p,
+            score,
+            timeLabel: p.timestamp
+                ? new Date(p.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                : '—',
+        };
+    });
 
     return (
         <section className="card" style={{ marginTop: 16, padding: '16px 18px' }} aria-label="AI jury history">
@@ -52,19 +90,19 @@ export function JuryRiskHistoryChart() {
             <div style={{ width: '100%', height: 260 }}>
                 <ResponsiveContainer>
                     <ScatterChart margin={{ top: 8, right: 12, bottom: 24, left: 8 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                        <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                         <XAxis
                             type="category"
                             dataKey="timeLabel"
-                            tick={{ fontSize: 11 }}
-                            label={{ value: 'Time', position: 'bottom', offset: 0, fontSize: 11 }}
+                            tick={{ fontSize: 11, fill: '#94a3b8' }}
+                            label={{ value: 'Time', position: 'bottom', offset: 0, fontSize: 11, fill: '#94a3b8' }}
                         />
                         <YAxis
                             type="number"
                             dataKey="score"
                             domain={[0, 100]}
-                            tick={{ fontSize: 11 }}
-                            label={{ value: 'Risk Score', angle: -90, position: 'insideLeft', fontSize: 11 }}
+                            tick={{ fontSize: 11, fill: '#94a3b8' }}
+                            label={{ value: 'Risk Score', angle: -90, position: 'insideLeft', fontSize: 11, fill: '#94a3b8' }}
                         />
                         <Tooltip
                             cursor={{ strokeDasharray: '3 3' }}

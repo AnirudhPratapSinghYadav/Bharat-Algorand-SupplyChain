@@ -12,3 +12,6 @@ def test_health_ok():
         assert "app_id" in body
         assert "network" in body
         assert "algod_ok" in body
+        assert "db_ok" in body
+        assert "oracle_configured" in body
+        assert "gemini_configured" in body

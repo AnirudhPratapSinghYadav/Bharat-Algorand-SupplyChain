@@ -56,6 +56,10 @@ INDEXER_URL = os.environ.get(
 LORA_TESTNET_TX = "https://lora.algokit.io/testnet/transaction"
 LORA_TESTNET_APP = "https://lora.algokit.io/testnet/application"
 
+# Algokit TransactionComposer defaults non-localnet app/payment txns to a 10-round validity window.
+# That is too narrow for simulate + network latency; match typical algod suggested_params (~1000 rounds).
+_DEFAULT_TXN_VALIDITY_WINDOW = 1000
+
 
 def lora_tx_url(tx_id: str | None) -> str:
     if not tx_id:
@@ -277,10 +281,62 @@ def oracle_address_string() -> Optional[str]:
         return None
 
 
+# Minimum oracle liquid balance (µALGO) before signing app calls / witness notes.
+MIN_ORACLE_MICRO_FOR_WRITE = 100_000  # ~0.1 ALGO — fees + small buffer
+# ASA creation + optional transfer holds extra MBR on the creator account.
+MIN_ORACLE_MICRO_FOR_MINT_ASA = 350_000  # ~0.35 ALGO
+
+
+def oracle_balance_microalgo() -> int:
+    """
+    Liquid µALGO balance of the oracle/deployer account.
+    Returns 0 if unconfigured or if algod cannot be queried.
+    """
+    _sync_env_globals()
+    if not ORACLE_MNEMONIC:
+        return 0
+    try:
+        addr = oracle_address_string()
+        if not addr:
+            return 0
+        info = algorand.client.algod.account_info(addr)
+        return int(info.get("amount", 0))
+    except Exception as e:
+        logger.debug("oracle_balance_microalgo: %s", e)
+        return 0
+
+
+def oracle_signer_matches_deployed_app() -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    NaviTrust register_* oracle methods require Txn.sender == global oracle_address
+    (set to the app creator at deploy, unless update_oracle ran).
+
+    Returns (matches, env_signer_address, on_chain_oracle_address).
+    If global state cannot be read, returns (True, signer, None) so registration can still be attempted.
+    """
+    _sync_env_globals()
+    signer = oracle_address_string()
+    if not APP_ID or not use_navitrust():
+        return (True, signer, None)
+    gs = get_display_global_state(APP_ID)
+    on_chain = gs.get("oracle_address")
+    if not isinstance(on_chain, str) or not on_chain.strip():
+        return (True, signer, on_chain if isinstance(on_chain, str) else None)
+    if not signer:
+        return (False, None, on_chain)
+    return (
+        signer.strip().lower() == on_chain.strip().lower(),
+        signer,
+        on_chain,
+    )
+
+
 def verify_oracle_setup() -> Optional[str]:
     """
     Validate ORACLE_MNEMONIC / DEPLOYER_MNEMONIC and log funded address at startup.
     Raises RuntimeError if mnemonic is missing or malformed (skipped under pytest).
+    When APP_ID + NaviTrust ARC56 are set, also requires env oracle == on-chain oracle global
+    (unless RELAX_ORACLE_APP_MATCH=1 — logs warning only).
     """
     if os.environ.get("PYTEST_CURRENT_TEST"):
         logger.info("Oracle verify skipped (pytest)")
@@ -294,6 +350,7 @@ def verify_oracle_setup() -> Optional[str]:
         logger.warning("VERCEL detected — skipping oracle startup check (read-only mode)")
         return None
 
+    _sync_env_globals()
     mnemonic_str = (os.environ.get("ORACLE_MNEMONIC") or os.environ.get("DEPLOYER_MNEMONIC") or "").strip()
     if not mnemonic_str or len(mnemonic_str.split()) != 25:
         raise RuntimeError(
@@ -310,6 +367,21 @@ def verify_oracle_setup() -> Optional[str]:
         print(f"[OK] Oracle: {addr[:12]}... | {balance:.2f} ALGO")
         if balance < 2:
             print("[WARN] Oracle balance low. Fund at bank.testnet.algorand.network")
+        if APP_ID and use_navitrust():
+            ok, signer, on_chain = oracle_signer_matches_deployed_app()
+            relax = os.environ.get("RELAX_ORACLE_APP_MATCH", "").strip().lower() in ("1", "true", "yes")
+            if on_chain and signer and not ok:
+                msg = (
+                    f"ORACLE_MNEMONIC signs as {signer}, but app {APP_ID} expects on-chain oracle {on_chain}. "
+                    "Use the same 25-word key that created the app (creator), or call update_oracle from the old oracle. "
+                    "Run: python scripts/verify_algorand_env.py"
+                )
+                if relax:
+                    logger.warning("%s", msg)
+                else:
+                    raise RuntimeError(msg)
+            elif on_chain and signer and ok:
+                print(f"[OK] Oracle matches app {APP_ID} on-chain oracle")
         return addr
     except RuntimeError:
         raise
@@ -741,6 +813,7 @@ def record_verdict_chain(
                 note=note[:1000] if note else None,
                 box_references=navitrust_shipment_box_refs(shipment_id),
                 extra_fee=AlgoAmount(micro_algo=1000),
+                validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
             )
         )
         tx_id = result.tx_ids[0] if result.tx_ids else None
@@ -766,6 +839,7 @@ def legacy_report_disaster(shipment_id: str, reasoning_hash: str) -> Optional[di
                 method="report_disaster_delay",
                 args=[shipment_id, reasoning_hash],
                 sender=deployer.address,
+                validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
             )
         )
         tx_id = result.tx_ids[0] if result.tx_ids else None
@@ -794,6 +868,7 @@ def settle_shipment_chain(shipment_id: str) -> Optional[dict]:
                 sender=deployer.address,
                 box_references=navitrust_settle_shipment_box_refs(shipment_id),
                 extra_fee=AlgoAmount(micro_algo=4000),
+                validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
             )
         )
         tx_id = result.tx_ids[0] if result.tx_ids else None
@@ -816,6 +891,32 @@ def settle_shipment_chain(shipment_id: str) -> Optional[dict]:
         return None
 
 
+def call_update_oracle(new_oracle_address: str) -> dict:
+    """Point the contract oracle to another address (must be signed by current on-chain oracle)."""
+    _sync_env_globals()
+    if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
+        raise ValueError("Missing oracle, APP_ID, or not NaviTrust")
+    addr = (new_oracle_address or "").strip()
+    try:
+        encoding.decode_address(addr)
+    except Exception as e:
+        raise ValueError("new_oracle_address must be a valid Algorand address") from e
+    deployer = _oracle_account()
+    app_client = get_app_client()
+    result = app_client.send.call(
+        params=AppClientMethodCallParams(
+            method="update_oracle",
+            args=[addr],
+            sender=deployer.address,
+            extra_fee=AlgoAmount(micro_algo=1000),
+            validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
+        )
+    )
+    tx_id = result.tx_ids[0] if result.tx_ids else None
+    cr = result.confirmation.get("confirmed-round") if result.confirmation else None
+    return {"tx_id": tx_id, "confirmed_round": cr, "lora_url": lora_tx_url(tx_id)}
+
+
 def call_pause_oracle(pause: bool) -> dict:
     """Call pause_oracle or unpause_oracle (oracle-signed)."""
     _sync_env_globals()
@@ -830,6 +931,7 @@ def call_pause_oracle(pause: bool) -> dict:
             args=[],
             sender=deployer.address,
             extra_fee=AlgoAmount(micro_algo=1000),
+            validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
         )
     )
     tx_id = result.tx_ids[0] if result.tx_ids else None
@@ -852,6 +954,7 @@ def legacy_resolve_disaster(shipment_id: str, resolution_hash: str) -> bool:
                 method="resolve_disaster",
                 args=[shipment_id, resolution_hash],
                 sender=deployer.address,
+                validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
             )
         )
         return True
@@ -893,6 +996,7 @@ def ensure_navitrust_app_mbr(min_balance_algo: float = 2.5) -> None:
                 sender=deployer.address,
                 receiver=app_addr,
                 amount=AlgoAmount(micro_algo=micro),
+                validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
             )
         )
         logger.info("Funded app #%s with %.4f ALGO for box MBR before register", APP_ID, fund_amount)
@@ -917,6 +1021,7 @@ def register_navitrust(shipment_id: str, supplier: str, route: str) -> dict:
             sender=deployer.address,
             box_references=navitrust_shipment_box_refs(shipment_id),
             extra_fee=AlgoAmount(micro_algo=4000),
+            validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
         )
     )
     tx_id = result.tx_ids[0] if result.tx_ids else None
@@ -1002,6 +1107,7 @@ def build_fund_shipment_txns_b64(payer_address: str, shipment_id: str, micro_alg
             sender=payer_address,
             box_references=navitrust_shipment_box_refs(shipment_id),
             extra_fee=AlgoAmount(micro_algo=1000),
+            validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
         )
     )
     txn_mod.assign_group_id(built.transactions)
@@ -1153,6 +1259,7 @@ def read_supplier_reputation_on_chain(supplier_address: str) -> dict:
             "address": supplier_address,
             "score": None,
             "source": "no_app",
+            "has_box": False,
             "lora_url": "",
         }
     try:
@@ -1165,6 +1272,7 @@ def read_supplier_reputation_on_chain(supplier_address: str) -> dict:
                 "address": supplier_address,
                 "score": score,
                 "source": "algorand_box_storage",
+                "has_box": True,
                 "lora_url": f"{LORA_TESTNET_APP}/{APP_ID}",
             }
     except Exception:
@@ -1173,5 +1281,6 @@ def read_supplier_reputation_on_chain(supplier_address: str) -> dict:
         "address": supplier_address,
         "score": None,
         "source": "no_box",
+        "has_box": False,
         "lora_url": f"{LORA_TESTNET_APP}/{APP_ID}",
     }

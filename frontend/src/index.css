@@ -492,6 +492,23 @@ code {
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
 }
 
+.dashboard-shell button.dash-wallet-pill--interactive {
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.dashboard-shell button.dash-wallet-pill--interactive:hover {
+  border-color: rgba(56, 189, 248, 0.45);
+  box-shadow: 0 4px 22px rgba(56, 189, 248, 0.12);
+}
+
+.dashboard-shell button.dash-wallet-pill--interactive:focus-visible {
+  outline: 2px solid rgba(56, 189, 248, 0.7);
+  outline-offset: 2px;
+}
+
 .dashboard-shell .dash-wallet-avatar {
   width: 28px;
   height: 28px;
@@ -618,6 +635,14 @@ code {
 
 .dashboard-shell .primary-btn:hover {
   filter: brightness(1.08);
+}
+
+/* Loading states: global button:disabled opacity 0.5 hides labels — keep "Registering…" readable */
+.dashboard-shell button.primary-btn:disabled {
+  opacity: 1 !important;
+  cursor: wait;
+  filter: brightness(0.88);
+  color: #fff !important;
 }
 
 .dashboard-shell .dash-tx-banner {

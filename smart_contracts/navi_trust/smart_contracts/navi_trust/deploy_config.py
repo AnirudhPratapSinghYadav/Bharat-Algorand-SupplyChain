@@ -46,3 +46,5 @@ def deploy() -> None:
         app_client.app_address,
         result.operation_performed,
     )
+    # Machine-readable line for scripts/bootstrap_testnet_oracle.py
+    print(f"PRAMANIK_APP_ID={app_client.app_id}", flush=True)

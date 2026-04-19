@@ -20,7 +20,7 @@ const STEPS = [
 
 export function StepsSection() {
   return (
-    <section className="nt-section" aria-labelledby="nt-steps-title">
+    <section className="nt-section" id="how-it-works" aria-labelledby="nt-steps-title">
       <h2 id="nt-steps-title" className="nt-section-title">
         How it works
       </h2>

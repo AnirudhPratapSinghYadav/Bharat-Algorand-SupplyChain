@@ -1,13 +1,29 @@
-/** In dev, use Vite proxy (`vite.config.ts`); production/preview uses absolute VITE_API_URL. */
-const _rawBase = import.meta.env.DEV
-  ? '/api'
-  : ((import.meta.env.VITE_API_URL as string) || '').replace(/\/+$/, '') ||
-    `http://${typeof window !== 'undefined' ? window.location.hostname : 'localhost'}:8000`;
+/**
+ * API base for axios/fetch.
+ * - Dev: `/api` → Vite proxy strips prefix and forwards to local FastAPI (see `vite.config.ts`).
+ * - Prod (Vercel): default `/api` → edge rewrite to public FastAPI (see `vercel.json`), same-origin (no CORS).
+ * - Override: set `VITE_API_URL` to a full URL (e.g. your own Render/Railway API) if you do not use the proxy.
+ */
+function resolveBackendUrl(): string {
+  const trim = (s: string | undefined) => (s || '').trim().replace(/\/+$/, '');
+  const fromEnv = trim(import.meta.env.VITE_API_URL);
+  if (import.meta.env.DEV) {
+    return '/api';
+  }
+  if (fromEnv) {
+    return fromEnv;
+  }
+  if (import.meta.env.PROD) {
+    return '/api';
+  }
+  return `http://${typeof window !== 'undefined' ? window.location.hostname : 'localhost'}:8000`;
+}
 
 /** No trailing slash — avoids `//navibot` and failed POSTs. */
-export const BACKEND_URL = _rawBase.replace(/\/+$/, '');
+export const BACKEND_URL = resolveBackendUrl().replace(/\/+$/, '');
 
-export const API_TIMEOUT = 5000;
+/** Bootstrap / heavy ledger reads — avoid false empty dashboard on slow chain or SQLite */
+export const API_TIMEOUT = 15000;
 
 export const FALLBACK_APP_ID = Number(import.meta.env.VITE_APP_ID) || 0;
 
@@ -17,3 +33,7 @@ export const LANDING_DEMO_SHIPMENT_ID = String(import.meta.env.VITE_LANDING_DEMO
 export const EXPLORER_URL = 'https://testnet.explorer.perawallet.app/tx/';
 
 export const LORA_APP = (id: number) => `https://lora.algokit.io/testnet/application/${id}`;
+
+/** Algod base URL (must match wallet / indexer network). */
+export const ALGOD_URL =
+  (import.meta.env.VITE_ALGORAND_NODE as string) || 'https://testnet-api.algonode.cloud';

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import axios from 'axios';
-import { X } from 'lucide-react';
+import { X, Cloud, ShieldCheck, ScanSearch, Gavel, CheckCircle2, Loader2 } from 'lucide-react';
 import { BACKEND_URL } from '../constants/api';
 
 const CYAN = '#00C2FF';
@@ -64,6 +64,8 @@ export type RunJuryApiResponse = {
     explorer_url?: string | null;
     lora_tx_url?: string | null;
     agent_dialogue?: { agent: string; message: string }[];
+    /** Present when backend computed tamper-evident hash for this run */
+    jury_hash?: { combined_hash?: string; hex?: string } | null;
 };
 
 export type JuryResult = {
@@ -117,24 +119,281 @@ function riskBand(rs: number): string {
     return 'LOW RISK';
 }
 
+const PIPELINE: { key: 's' | 'a' | 'f' | 'r'; label: string; short: string; Icon: typeof Cloud; color: string }[] = [
+    { key: 's', label: 'Weather Sentinel', short: 'Sentinel', Icon: Cloud, color: CYAN },
+    { key: 'a', label: 'Compliance Auditor', short: 'Audit', Icon: ShieldCheck, color: AMBER },
+    { key: 'f', label: 'Fraud Detector', short: 'Fraud', Icon: ScanSearch, color: '#a78bfa' },
+    { key: 'r', label: 'Chief Arbiter', short: 'Arbiter', Icon: Gavel, color: '#e2e8f0' },
+];
+
+function ScoreBar({ value, max = 100, color }: { value: number; max?: number; color: string }) {
+    const pct = Math.min(100, Math.max(0, (value / max) * 100));
+    return (
+        <div style={{ marginTop: 10 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#94a3b8', marginBottom: 4 }}>
+                <span>Risk score (0–{max})</span>
+                <span style={{ fontFamily: 'ui-monospace, monospace', color: '#e2e8f0', fontWeight: 700 }}>{Math.round(value)}</span>
+            </div>
+            <div style={{ height: 9, borderRadius: 5, background: 'rgba(15,23,42,0.9)', overflow: 'hidden', border: '1px solid rgba(148,163,184,0.15)' }}>
+                <div
+                    style={{
+                        width: `${pct}%`,
+                        height: '100%',
+                        borderRadius: 5,
+                        background: `linear-gradient(90deg, ${color}55, ${color})`,
+                        transition: 'width 0.65s cubic-bezier(0.22, 1, 0.36, 1)',
+                    }}
+                />
+            </div>
+        </div>
+    );
+}
+
+function PipelineStepper({
+    activeIndex,
+    doneMask,
+}: {
+    /** 0–3 = which agent is currently running; -1 = idle / all complete */
+    activeIndex: number;
+    doneMask: boolean[];
+}) {
+    return (
+        <div
+            style={{
+                marginBottom: 18,
+                padding: '14px 12px',
+                borderRadius: 10,
+                background: 'rgba(15, 23, 42, 0.65)',
+                border: '1px solid rgba(56, 189, 248, 0.15)',
+            }}
+            aria-label="Jury pipeline progress"
+        >
+            <div style={{ fontSize: '0.65rem', fontWeight: 800, letterSpacing: '0.08em', color: '#64748b', marginBottom: 12 }}>
+                PRAMANIK · 4-AGENT JURY PIPELINE
+            </div>
+            <div
+                style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+                    gap: 8,
+                    alignItems: 'start',
+                }}
+            >
+                {PIPELINE.map((p, i) => {
+                    const done = doneMask[i] === true;
+                    const active = activeIndex === i;
+                    const Icon = p.Icon;
+                    return (
+                        <div key={p.key} style={{ textAlign: 'center', minWidth: 0 }}>
+                            <div
+                                style={{
+                                    width: '100%',
+                                    maxWidth: 52,
+                                    margin: '0 auto 8px',
+                                    height: 44,
+                                    borderRadius: '50%',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    border: `2px solid ${done ? p.color : active ? `${p.color}bb` : 'rgba(71,85,105,0.45)'}`,
+                                    background: active ? `${p.color}28` : done ? `${p.color}18` : 'rgba(15,23,42,0.85)',
+                                    boxShadow: active ? `0 0 18px ${p.color}40` : 'none',
+                                    transition: 'all 0.35s ease',
+                                }}
+                            >
+                                {done ? (
+                                    <CheckCircle2 size={22} color={p.color} strokeWidth={2.5} />
+                                ) : active ? (
+                                    <Loader2 size={22} color={p.color} className="lv-jury-spin" />
+                                ) : (
+                                    <Icon size={19} color="#64748b" strokeWidth={2} />
+                                )}
+                            </div>
+                            <div style={{ fontSize: '0.58rem', fontWeight: 700, color: '#94a3b8', lineHeight: 1.2 }}>{p.label}</div>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
+type StatRow = { k: string; v: string };
+
+function AgentPerformanceCard({
+    step,
+    title,
+    accent,
+    score,
+    rows,
+    badge = 'Complete',
+}: {
+    step: number;
+    title: string;
+    accent: string;
+    score: number;
+    rows: StatRow[];
+    badge?: string;
+}) {
+    return (
+        <div
+            style={{
+                marginTop: 14,
+                padding: '14px 16px',
+                borderRadius: 10,
+                borderLeft: `4px solid ${accent}`,
+                background: 'linear-gradient(135deg, rgba(15,23,42,0.95) 0%, rgba(30,41,59,0.5) 100%)',
+                border: '1px solid rgba(148, 163, 184, 0.12)',
+                borderLeftWidth: 4,
+                animation: 'lv-card-in 0.45s ease both',
+            }}
+        >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                    <span
+                        style={{
+                            flexShrink: 0,
+                            width: 26,
+                            height: 26,
+                            borderRadius: 8,
+                            background: `${accent}22`,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '0.7rem',
+                            fontWeight: 800,
+                            color: accent,
+                        }}
+                    >
+                        {step}
+                    </span>
+                    <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 800, fontSize: '0.88rem', color: '#f1f5f9', lineHeight: 1.2 }}>{title}</div>
+                        <div style={{ fontSize: '0.68rem', color: '#64748b', marginTop: 2 }}>
+                            Live output from <code style={{ fontSize: '0.65rem', color: '#94a3b8' }}>POST /run-jury</code>
+                        </div>
+                    </div>
+                </div>
+                <span style={{ fontSize: '0.65rem', fontWeight: 700, color: GREEN, whiteSpace: 'nowrap' }}>{badge}</span>
+            </div>
+            <ScoreBar value={score} color={accent} />
+            <dl style={{ margin: '12px 0 0', display: 'grid', gap: 8 }}>
+                {rows.map((row) => (
+                    <div key={row.k} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: '0.74rem' }}>
+                        <dt style={{ margin: 0, color: '#64748b', flex: '0 0 38%', minWidth: 0 }}>{row.k}</dt>
+                        <dd style={{ margin: 0, color: '#cbd5e1', flex: 1, wordBreak: 'break-word', lineHeight: 1.45 }}>{row.v}</dd>
+                    </div>
+                ))}
+            </dl>
+        </div>
+    );
+}
+
+function buildSentinelPerf(d: RunJuryApiResponse, destinationCity: string): { score: number; rows: StatRow[] } {
+    const w = d.weather ?? {};
+    const s = d.sentinel ?? {};
+    const city = w.city || destinationCity;
+    const rs = typeof s.risk_score === 'number' && !Number.isNaN(s.risk_score) ? s.risk_score : 0;
+    const rec = String(s.reasoning_narrative || s.reasoning || s.recommendation || '').trim().slice(0, 280) || '—';
+    const precip = (w as { precipitation_mm?: number }).precipitation_mm ?? w.precipitation;
+    return {
+        score: rs,
+        rows: [
+            { k: 'Weather hub (Open-Meteo)', v: String(city) },
+            {
+                k: 'Live conditions',
+                v: `${w.temperature ?? '—'}°C · ${precip != null ? `${precip}mm` : '—'} rain · ${(w as { wind_kmh?: number }).wind_kmh ?? '—'} km/h wind`,
+            },
+            { k: 'Sky / WMO', v: wmoDescription(w.weather_code) },
+            { k: 'Sentinel analysis', v: rec },
+        ],
+    };
+}
+
+function buildAuditorPerf(d: RunJuryApiResponse, fundsAlgo: number): { score: number; rows: StatRow[] } {
+    const a = d.auditor ?? {};
+    const st = a.blockchain_status ?? a.chain_status ?? '—';
+    const ars = typeof a.risk_score === 'number' && !Number.isNaN(a.risk_score) ? a.risk_score : 0;
+    const passed = a.compliance_passed !== undefined ? a.compliance_passed : !a.fraud_flag;
+    const auditSnippet = String(a.audit_report || '').trim().slice(0, 240) || '—';
+    return {
+        score: ars,
+        rows: [
+            { k: 'On-chain status', v: String(st) },
+            { k: 'Escrow observed', v: `${fundsAlgo.toFixed(4)} ALGO (from jury read)` },
+            { k: 'Compliance', v: passed ? 'Passed — chain vs metadata aligned' : 'Flagged — mismatch or fraud signal' },
+            { k: 'Auditor report', v: auditSnippet },
+        ],
+    };
+}
+
+function buildFraudPerf(d: RunJuryApiResponse): { score: number; rows: StatRow[] } {
+    const f = d.fraud_detector ?? {};
+    const fr = typeof f.fraud_risk_score === 'number' && !Number.isNaN(f.fraud_risk_score) ? f.fraud_risk_score : 0;
+    const rep =
+        typeof d.supplier_reputation?.score === 'number' && !Number.isNaN(d.supplier_reputation.score)
+            ? d.supplier_reputation.score
+            : null;
+    const cred = String(f.supplier_credibility || '').trim() || '—';
+    const rec = String(f.recommendation || '').trim().slice(0, 220) || '—';
+    return {
+        score: fr,
+        rows: [
+            {
+                k: 'Supplier reputation',
+                v: rep != null ? `${rep}/100 (on-chain / indexer where available)` : 'Not yet indexed — jury uses defaults',
+            },
+            { k: 'Fraud risk', v: `${fr}/100` },
+            { k: 'Credibility', v: cred },
+            { k: 'Detector recommendation', v: rec },
+        ],
+    };
+}
+
+function buildArbiterPerf(d: RunJuryApiResponse): { score: number; rows: StatRow[] } {
+    const arb = d.arbiter;
+    const finalScoreRaw =
+        arb?.final_risk_score ??
+        (d.chief_justice as { final_risk_score?: number } | undefined)?.final_risk_score ??
+        d.sentinel?.risk_score ??
+        0;
+    const finalScore = typeof finalScoreRaw === 'number' && !Number.isNaN(finalScoreRaw) ? finalScoreRaw : 0;
+    const weightedRaw = arb?.weighted_score ?? finalScore;
+    const weighted = typeof weightedRaw === 'number' && !Number.isNaN(weightedRaw) ? weightedRaw : finalScore;
+    const v = verdictKind(d);
+    const quote = (
+        d.reasoning ||
+        arb?.reasoning ||
+        (d.chief_justice as { reasoning_narrative?: string } | undefined)?.reasoning_narrative ||
+        d.sentinel?.reasoning_narrative ||
+        ''
+    )
+        .trim()
+        .slice(0, 420);
+    return {
+        score: finalScore,
+        rows: [
+            { k: 'Binding verdict', v: `${v} · ${riskBand(finalScore)}` },
+            { k: 'Chief Arbiter score', v: `${weighted}/100` },
+            {
+                k: 'Reasoning (excerpt)',
+                v: quote ? `"${quote}${quote.length >= 420 ? '…' : ''}"` : '—',
+            },
+            {
+                k: 'record_verdict',
+                v: d.on_chain_tx_id
+                    ? `Tx ${String(d.on_chain_tx_id).slice(0, 10)}…${String(d.on_chain_tx_id).slice(-6)}`
+                    : 'Prepared in this response',
+            },
+        ],
+    };
+}
+
 function BlinkCursor() {
     return (
         <span style={{ animation: 'lvterm-blink 1s step-end infinite', marginLeft: 2 }} aria-hidden>
             ▌
         </span>
-    );
-}
-
-function StaticLines({ lines }: { lines: TermLine[] }) {
-    return (
-        <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '0.78rem', lineHeight: 1.65 }}>
-            {lines.map((ln, i) => (
-                <div key={i} style={{ color: ln.color, marginBottom: 2 }}>
-                    <span style={{ opacity: 0.65, marginRight: 6 }}>›</span>
-                    {ln.text}
-                </div>
-            ))}
-        </div>
     );
 }
 
@@ -395,6 +654,20 @@ export function LiveVerdictTerminal({
     const loraVerdictUrl =
         apiData?.lora_tx_url || apiData?.explorer_url || (txId ? `https://lora.algokit.io/testnet/transaction/${txId}` : '');
 
+    const waitingHttp = bootDone && !apiData && !apiError;
+    let pipelineActive = -1;
+    let pipelineDone = [false, false, false, false] as boolean[];
+    if (apiData && !apiError) {
+        pipelineDone = [secSentry, secAuditor, secFraud, secArbiter];
+        pipelineActive = !secSentry ? 0 : !secAuditor ? 1 : !secFraud ? 2 : !secArbiter ? 3 : -1;
+    } else if (waitingHttp) {
+        pipelineActive = 0;
+    }
+
+    const arbAccent = vk === 'SETTLE' ? GREEN : vk === 'DISPUTE' ? RED : HOLD_COLOR;
+    const juryHashHex = apiData?.jury_hash?.hex || apiData?.jury_hash?.combined_hash || '';
+    const arbiterPerf = apiData ? buildArbiterPerf(apiData) : null;
+
     return (
         <div
             style={{
@@ -438,9 +711,13 @@ export function LiveVerdictTerminal({
                     />
                 )}
 
+                {bootDone && !apiError && (
+                    <PipelineStepper activeIndex={pipelineActive} doneMask={pipelineDone} />
+                )}
+
                 {bootDone && !apiError && !apiData && (
-                    <div style={{ color: '#94a3b8', fontFamily: 'monospace', fontSize: '0.78rem', marginTop: 10 }}>
-                        › Awaiting oracle pipeline…
+                    <div style={{ color: '#94a3b8', fontFamily: 'monospace', fontSize: '0.78rem', marginTop: 4 }}>
+                        › Calling oracle — real Open-Meteo + Algorand boxes + Gemini / fallbacks…
                         <BlinkCursor />
                     </div>
                 )}
@@ -464,9 +741,12 @@ export function LiveVerdictTerminal({
                 )}
 
                 {apiData && secSentry && (
-                    <div style={{ marginTop: 14 }}>
-                        <StaticLines lines={buildSentryLines(apiData)} />
-                    </div>
+                    <AgentPerformanceCard
+                        step={1}
+                        title="Weather Sentinel"
+                        accent={CYAN}
+                        {...buildSentinelPerf(apiData, destinationCity)}
+                    />
                 )}
 
                 {apiData && secSentry && !secAuditor && (
@@ -482,9 +762,12 @@ export function LiveVerdictTerminal({
                 )}
 
                 {apiData && secAuditor && (
-                    <div style={{ marginTop: 16 }}>
-                        <StaticLines lines={buildAuditorLines(apiData)} />
-                    </div>
+                    <AgentPerformanceCard
+                        step={2}
+                        title="Compliance Auditor"
+                        accent={AMBER}
+                        {...buildAuditorPerf(apiData, fundsAlgo)}
+                    />
                 )}
 
                 {apiData && secAuditor && !secFraud && (
@@ -500,9 +783,12 @@ export function LiveVerdictTerminal({
                 )}
 
                 {apiData && secFraud && (
-                    <div style={{ marginTop: 16 }}>
-                        <StaticLines lines={buildFraudLines(apiData)} />
-                    </div>
+                    <AgentPerformanceCard
+                        step={3}
+                        title="Fraud Detector"
+                        accent="#a78bfa"
+                        {...buildFraudPerf(apiData)}
+                    />
                 )}
 
                 {apiData && secFraud && !secArbiter && (
@@ -517,11 +803,16 @@ export function LiveVerdictTerminal({
                     </div>
                 )}
 
-                {apiData && secArbiter && (
-                    <div style={{ marginTop: 16 }}>
-                        <StaticLines lines={buildArbiterLines(apiData)} />
-                    </div>
-                )}
+                {apiData && secArbiter && arbiterPerf ? (
+                    <AgentPerformanceCard
+                        step={4}
+                        title="Chief Arbiter"
+                        accent={arbAccent}
+                        badge="Verdict sealed"
+                        score={arbiterPerf.score}
+                        rows={arbiterPerf.rows}
+                    />
+                ) : null}
 
                 {apiData && showChain && (
                     <div
@@ -545,6 +836,12 @@ export function LiveVerdictTerminal({
                                 ) : (
                                     <div style={{ color: AMBER }}>› Submitted (confirming…)</div>
                                 )}
+                                {juryHashHex ? (
+                                    <div style={{ marginTop: 10, wordBreak: 'break-all', color: '#64748b', fontSize: '0.72rem' }}>
+                                        › Jury integrity hash (verify with <code style={{ color: '#94a3b8' }}>POST /verify-hash</code>):{' '}
+                                        <span style={{ color: '#a5b4fc' }}>{juryHashHex.slice(0, 20)}…{juryHashHex.slice(-12)}</span>
+                                    </div>
+                                ) : null}
                             </>
                         ) : (
                             <div style={{ color: AMBER }}>
@@ -674,6 +971,24 @@ export function LiveVerdictTerminal({
             <style>{`
                 @keyframes lvterm-blink {
                     50% { opacity: 0; }
+                }
+                @keyframes lv-card-in {
+                    from {
+                        opacity: 0;
+                        transform: translateY(8px);
+                    }
+                    to {
+                        opacity: 1;
+                        transform: translateY(0);
+                    }
+                }
+                .lv-jury-spin {
+                    animation: lv-jury-spin 0.9s linear infinite;
+                }
+                @keyframes lv-jury-spin {
+                    to {
+                        transform: rotate(360deg);
+                    }
                 }
             `}</style>
         </div>

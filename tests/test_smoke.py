@@ -39,7 +39,12 @@ def test_smoke_verify():
         assert r.status_code == 200
         body = r.json()
         assert body.get("shipment_id") == "SHIP_SMOKE_VERIFY_001"
-        assert "on_chain_status" in body
+        if body.get("status") == "Not_Found":
+            assert body.get("found") is False
+            assert "risk_score" not in body
+            assert "ai_verdict_panel" not in body
+        else:
+            assert "on_chain_status" in body
 
 
 def test_smoke_navibot():

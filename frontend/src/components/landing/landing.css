@@ -45,6 +45,13 @@
   box-sizing: border-box;
 }
 
+/* Anchor targets clear sticky nav */
+.nt-landing #agents,
+.nt-landing #how-it-works,
+.nt-landing #nt-cta {
+  scroll-margin-top: 5.5rem;
+}
+
 /* —— Landing viewport scrollbar (Chrome / Edge / Safari) —— */
 html:has(.nt-landing)::-webkit-scrollbar,
 body:has(.nt-landing)::-webkit-scrollbar {
@@ -239,10 +246,18 @@ body:has(.nt-landing) {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 1rem 1.5rem;
+  justify-content: center;
+  gap: 1rem 1.35rem;
   font-size: 0.875rem;
   font-weight: 500;
+  flex: 1;
+  padding: 0 0.75rem;
+}
+
+@media (max-width: 780px) {
+  .nt-nav-links {
+    display: none;
+  }
 }
 
 .nt-nav-links a {
@@ -375,11 +390,16 @@ body:has(.nt-landing) {
     0 0 24px rgba(0, 212, 255, 0.04);
 }
 
-/* Sections */
+/* Sections — generous vertical rhythm */
 .nt-section {
   max-width: var(--nt-max);
   margin: 0 auto;
-  padding: clamp(4.5rem, 9vw, 6.5rem) 1.5rem;
+  padding: clamp(5rem, 11vw, 7.75rem) 1.5rem;
+}
+
+.nt-section--airy {
+  padding-top: clamp(5.75rem, 12vw, 9rem);
+  padding-bottom: clamp(5.75rem, 12vw, 9rem);
 }
 
 .nt-section-title {
@@ -399,6 +419,176 @@ body:has(.nt-landing) {
   font-size: 1.05rem;
   line-height: 1.65;
   color: #cbd5e1;
+}
+
+.nt-section-lead--wide {
+  max-width: 42rem;
+}
+
+.nt-section-lead strong {
+  color: #e2e8f0;
+  font-weight: 600;
+}
+
+/* 4-agent jury narrative */
+.nt-agents-eyebrow {
+  text-align: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--nt-accent);
+  margin: 0 0 1rem;
+}
+
+.nt-agents-title {
+  margin-bottom: 1.35rem;
+}
+
+.nt-agents-flow {
+  max-width: 52rem;
+  margin: 2.75rem auto 2.5rem;
+  padding: 1.1rem 1.35rem;
+  border-radius: var(--nt-radius-xl);
+  border: 1px solid rgba(0, 212, 255, 0.14);
+  background: linear-gradient(180deg, rgba(12, 18, 36, 0.55) 0%, rgba(8, 12, 24, 0.35) 100%);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25) inset;
+}
+
+.nt-agents-flow-label {
+  display: block;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--nt-muted);
+  margin-bottom: 0.75rem;
+  text-align: center;
+}
+
+.nt-agents-flow-track {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem 0.65rem;
+  font-size: 0.78rem;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  color: #cbd5e1;
+}
+
+.nt-agents-flow-chevron {
+  color: var(--nt-accent);
+  opacity: 0.9;
+  flex-shrink: 0;
+}
+
+.nt-agents-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+}
+
+@media (min-width: 700px) and (max-width: 1023px) {
+  .nt-agents-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.5rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .nt-agents-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1.35rem;
+  }
+}
+
+.nt-agent-card {
+  padding: 1.5rem 1.45rem 1.65rem;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--nt-radius-xl) !important;
+}
+
+.nt-agent-card.nt-card:hover {
+  transform: translateY(-4px);
+}
+
+.nt-agent-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1.05rem;
+}
+
+.nt-agent-step {
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+
+.nt-agent-icon-wrap {
+  width: 54px;
+  height: 54px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid;
+}
+
+.nt-agent-card-title {
+  margin: 0 0 0.45rem;
+  font-size: 1.07rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #f8fafc;
+}
+
+.nt-agent-card-tag {
+  margin: 0 0 0.9rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #7dd3fc;
+  letter-spacing: 0.02em;
+  line-height: 1.35;
+}
+
+.nt-agent-card-body {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.68;
+  color: rgba(226, 232, 240, 0.92);
+  flex: 1;
+}
+
+.nt-agent-connector {
+  display: flex;
+  justify-content: center;
+  padding: 1rem 0 0.35rem;
+  color: rgba(148, 163, 184, 0.5);
+}
+
+.nt-agent-connector--mobile {
+  display: flex;
+}
+
+@media (min-width: 700px) {
+  .nt-agent-connector--mobile {
+    display: none;
+  }
+}
+
+.nt-agents-footnote {
+  margin: 3.25rem auto 0;
+  max-width: 40rem;
+  text-align: center;
+  font-size: 0.84rem;
+  line-height: 1.7;
+  color: rgba(168, 184, 204, 0.92);
 }
 
 /* Hero */
@@ -487,18 +677,26 @@ body:has(.nt-landing) {
 }
 
 .nt-hero-sub {
-  margin: 0 0 clamp(2rem, 4vh, 2.75rem);
+  margin: 0 0 clamp(1.75rem, 3.5vh, 2.25rem);
   font-size: 1.125rem;
   line-height: 1.78;
   color: #cbd5e1;
   max-width: 28rem;
 }
 
+.nt-hero-subline {
+  margin: 0 0 clamp(2rem, 4vh, 2.75rem);
+  font-size: 0.98rem;
+  line-height: 1.72;
+  color: rgba(148, 163, 184, 0.95);
+  max-width: 30rem;
+}
+
 /* Geopolitical / maritime stakes (Strait of Hormuz, sanctions, evidence) */
 .nt-stakes {
   max-width: var(--nt-max);
   margin: 0 auto;
-  padding: 0 1.5rem clamp(2rem, 5vw, 3rem);
+  padding: 0 1.5rem clamp(3rem, 7vw, 4.75rem);
 }
 
 .nt-stakes-heading {
@@ -1308,7 +1506,7 @@ body:has(.nt-landing) {
 .nt-quick-proof {
   max-width: var(--nt-max);
   margin: 0 auto;
-  padding: 0 1.25rem 2rem;
+  padding: clamp(1.5rem, 4vw, 2.5rem) 1.25rem clamp(2.5rem, 5vw, 3.5rem);
   text-align: center;
 }
 

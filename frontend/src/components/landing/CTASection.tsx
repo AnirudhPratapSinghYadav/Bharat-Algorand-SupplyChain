@@ -15,8 +15,8 @@ export function CTASection({ onCreateShipment }: CTASectionProps) {
       <div className="nt-cta-block">
         <h2 id="nt-cta-title">Lock escrow. Run the jury. Verify from your dashboard.</h2>
         <p className="nt-cta-lead">
-          Register shipments, fund escrow, and complete settlement so NAVI-CERT appears on Lora (testnet). Your wallet connects
-          when you continue in the app.
+          Register shipments, fund escrow, run the live jury, and settle so NAVI-CERT appears on Lora (testnet). Your wallet
+          signs money movement — the oracle signs registration and verdicts.
         </p>
         <div className="nt-cta-actions">
           <button type="button" className="nt-btn nt-btn--primary" onClick={onCreateShipment}>

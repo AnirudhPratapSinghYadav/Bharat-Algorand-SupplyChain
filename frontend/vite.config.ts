@@ -13,7 +13,7 @@ export default defineConfig(({ mode }) => {
         output: {
           manualChunks: {
             vendor: ['react', 'react-dom'],
-            algorand: ['algosdk'],
+            algorand: ['algosdk', '@algorandfoundation/algokit-utils'],
             charts: ['recharts'],
             wallet: ['@perawallet/connect'],
           },
@@ -31,6 +31,9 @@ export default defineConfig(({ mode }) => {
     server: {
       host: '0.0.0.0',
       port: 5173,
+      fs: {
+        allow: ['.', '..'],
+      },
       proxy: {
         '/api': {
           target: apiTarget,

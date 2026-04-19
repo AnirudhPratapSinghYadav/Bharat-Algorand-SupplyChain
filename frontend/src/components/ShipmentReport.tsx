@@ -15,7 +15,8 @@ type Props = {
     verifyBaseUrl?: string;
 };
 
-const DEFAULT_VERIFY = 'https://navitrustapp.vercel.app/verify';
+const DEFAULT_VERIFY =
+    typeof window !== 'undefined' ? `${window.location.origin}/verify` : 'https://pramanik.vercel.app/verify';
 
 export function ShipmentReportActions({ shipment, appId, verifyBaseUrl = DEFAULT_VERIFY }: Props) {
     const [copied, setCopied] = useState(false);
@@ -51,7 +52,13 @@ export function ShipmentReportActions({ shipment, appId, verifyBaseUrl = DEFAULT
         doc.text(`Route: ${shipment.origin} → ${shipment.destination}`, 20, 72);
         doc.text(`Status: ${shipment.stage}`, 20, 82);
         doc.text(`Risk Score: ${risk != null ? `${risk}/100` : 'N/A'}`, 20, 92);
-        doc.text(`Funds Locked: ${fundsAlgo != null ? `${fundsAlgo.toFixed(4)} ALGO` : 'N/A'}`, 20, 102);
+        if (risk != null) {
+            doc.setFillColor(230, 230, 230);
+            doc.rect(20, 96, 80, 5, 'F');
+            doc.setFillColor(0, 194, 255);
+            doc.rect(20, 96, (80 * Math.min(100, risk)) / 100, 5, 'F');
+        }
+        doc.text(`Funds Locked: ${fundsAlgo != null ? `${fundsAlgo.toFixed(4)} ALGO` : 'N/A'}`, 20, risk != null ? 110 : 102);
         doc.setFontSize(14);
         doc.text('Blockchain Proof', 20, 120);
         doc.setFontSize(11);
@@ -74,18 +81,14 @@ export function ShipmentReportActions({ shipment, appId, verifyBaseUrl = DEFAULT
         doc.setFontSize(9);
         doc.setTextColor(150, 150, 150);
         doc.text(
-            `Generated: ${new Date().toISOString()} | ${verifyBaseUrl}/${shipment.shipment_id}`,
+            `Lora: open verdict tx → Note tab (NAVI_VERDICT JSON) · Generated ${new Date().toISOString()}`,
             20,
-            280,
+            275,
+            { maxWidth: 170 },
         );
+        doc.text(`${verifyBaseUrl}/${shipment.shipment_id}`, 20, 285);
         doc.save(`pramanik-${shipment.shipment_id}.pdf`);
     }
-
-    const shareWhatsApp = () => {
-        const verifyUrl = `${verifyBaseUrl.replace(/\/+$/, '')}/${encodeURIComponent(shipment.shipment_id)}`;
-        const text = `Pramanik Shipment Proof\n\nShipment: ${shipment.shipment_id}\nRoute: ${shipment.origin} → ${shipment.destination}\nStatus: ${shipment.stage}\nRisk: ${risk != null ? `${risk}/100` : 'N/A'}\n\nVerify:\n${verifyUrl}`;
-        window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
-    };
 
     const copyLink = async () => {
         const url = `${verifyBaseUrl.replace(/\/+$/, '')}/${encodeURIComponent(shipment.shipment_id)}`;
@@ -102,22 +105,6 @@ export function ShipmentReportActions({ shipment, appId, verifyBaseUrl = DEFAULT
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
             <button type="button" className="primary-btn" style={{ fontSize: '0.72rem', padding: '6px 10px' }} onClick={() => void downloadPDF()}>
                 Download report (PDF)
-            </button>
-            <button
-                type="button"
-                style={{
-                    fontSize: '0.72rem',
-                    padding: '6px 10px',
-                    borderRadius: 8,
-                    border: '1px solid #22c55e',
-                    background: 'rgba(34,197,94,0.12)',
-                    color: '#166534',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                }}
-                onClick={shareWhatsApp}
-            >
-                Share on WhatsApp
             </button>
             <button
                 type="button"

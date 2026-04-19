@@ -2,10 +2,9 @@ import { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 import algosdk from 'algosdk';
 import { ExternalLink } from 'lucide-react';
-import { BACKEND_URL } from '../constants/api';
+import { ALGOD_URL, BACKEND_URL } from '../constants/api';
+import { buildWitnessTransaction } from '../algorand/buildWitnessTransaction';
 import { peraWallet } from '../wallet/pera';
-
-const ALGOD_SERVER = (import.meta.env.VITE_ALGORAND_NODE as string) || 'https://testnet-api.algonode.cloud';
 
 type WitnessRow = {
   address?: string;
@@ -15,12 +14,23 @@ type WitnessRow = {
 
 type Props = {
   shipmentId: string;
+  /** On-chain / API status string for NAVI_WITNESS note (e.g. In_Transit, Disputed). */
+  shipmentStatus?: string;
+  /** Pramanik application id — required to build witness note. */
+  appId: number | null;
   hasVerdict: boolean;
   walletAddress: string | null;
   onConnectRequest?: () => void;
 };
 
-export function WitnessButton({ shipmentId, hasVerdict, walletAddress, onConnectRequest }: Props) {
+export function WitnessButton({
+  shipmentId,
+  shipmentStatus = '',
+  appId,
+  hasVerdict,
+  walletAddress,
+  onConnectRequest,
+}: Props) {
   const [count, setCount] = useState(0);
   const [witnessed, setWitnessed] = useState(false);
   const [txId, setTxId] = useState<string | null>(null);
@@ -46,18 +56,12 @@ export function WitnessButton({ shipmentId, hasVerdict, walletAddress, onConnect
       onConnectRequest?.();
       return;
     }
+    if (!appId || appId <= 0) {
+      return;
+    }
     setBusy(true);
     try {
-      const build = await axios.post(
-        `${BACKEND_URL}/witness-shipment/build`,
-        { shipment_id: shipmentId, witness_address: walletAddress },
-        { timeout: 30_000 },
-      );
-      const txnB64 = build.data?.txn_b64 as string | undefined;
-      if (!txnB64) throw new Error('No txn from server');
-
-      const bin = Uint8Array.from(atob(txnB64), (c) => c.charCodeAt(0));
-      const txn = algosdk.decodeUnsignedTransaction(bin);
+      const txn = await buildWitnessTransaction(walletAddress, shipmentId, shipmentStatus, appId);
       const signed = await peraWallet.signTransaction([[{ txn, signers: [walletAddress] }]]);
       const rawSigned = Array.isArray(signed) ? signed : [];
       const blobs: Uint8Array[] = rawSigned.map((item: unknown) => {
@@ -70,7 +74,7 @@ export function WitnessButton({ shipmentId, hasVerdict, walletAddress, onConnect
       }).filter((b) => b.length > 0);
       if (!blobs.length) throw new Error('Sign failed');
 
-      const algod = new algosdk.Algodv2('', ALGOD_SERVER, '');
+      const algod = new algosdk.Algodv2('', ALGOD_URL, '');
       const sent = await algod.sendRawTransaction(blobs).do();
       const tid = (sent as { txId?: string; txid?: string }).txId ?? (sent as { txid?: string }).txid;
       if (!tid) throw new Error('No tx id');
@@ -78,8 +82,12 @@ export function WitnessButton({ shipmentId, hasVerdict, walletAddress, onConnect
       setTxId(tid);
       setWitnessed(true);
       setCount((c) => c + 1);
-    } catch {
-      /* user cancelled or network — no raw error string in UI */
+      refresh();
+    } catch (e: unknown) {
+      const msg = e && typeof e === 'object' && 'message' in e ? String((e as { message?: string }).message) : '';
+      if (!msg.toLowerCase().includes('reject')) {
+        console.error('Witness error:', e);
+      }
     } finally {
       setBusy(false);
     }
@@ -92,7 +100,7 @@ export function WitnessButton({ shipmentId, hasVerdict, walletAddress, onConnect
       {!witnessed ? (
         <button
           type="button"
-          disabled={!hasVerdict || busy}
+          disabled={!hasVerdict || busy || !appId}
           onClick={() => void onWitness()}
           style={{
             padding: '10px 14px',
@@ -100,7 +108,7 @@ export function WitnessButton({ shipmentId, hasVerdict, walletAddress, onConnect
             border: `1px solid ${hasVerdict ? 'var(--border)' : 'var(--dim)'}`,
             background: hasVerdict ? 'rgba(0,194,255,0.08)' : 'rgba(71,85,105,0.35)',
             color: hasVerdict ? 'var(--text)' : 'var(--dim)',
-            cursor: hasVerdict && !busy ? 'pointer' : 'not-allowed',
+            cursor: hasVerdict && !busy && appId ? 'pointer' : 'not-allowed',
             fontSize: '0.85rem',
             fontWeight: 600,
           }}

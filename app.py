@@ -15,9 +15,10 @@ import re
 import sqlite3
 import logging
 import asyncio
+import threading
 from contextlib import asynccontextmanager, contextmanager
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, Optional
 
 import requests
@@ -29,6 +30,7 @@ from pydantic import BaseModel
 from google import genai
 from google.genai import types as genai_types
 from algokit_utils import AlgorandClient
+from algosdk import encoding as algo_encoding
 from algosdk.logic import get_application_address
 
 import algorand_client as chain
@@ -166,6 +168,8 @@ _CORS_ORIGINS = [
     "http://127.0.0.1:4173",
     "https://navitrustapp.vercel.app",
     "https://navi-trust.vercel.app",
+    "https://pramanik.vercel.app",
+    "https://bharat-algorand-supply-chain.vercel.app",
     "https://navi-trust-api.onrender.com",
 ]
 if _CORS_EXTRA:
@@ -191,6 +195,7 @@ async def lifespan(app: FastAPI):
             raise
     load_logistics_events()
     load_verdict_history()
+    threading.Thread(target=_background_auto_seed_demo, daemon=True, name="pramanik-auto-seed").start()
     bg_task = asyncio.create_task(_live_feed_background_task())
     try:
         yield
@@ -358,6 +363,153 @@ def init_db():
             except sqlite3.OperationalError:
                 pass
         conn.commit()
+
+
+def _background_auto_seed_demo() -> None:
+    """
+    Idempotent demo seed (same story as `seed_blockchain.py`), in-process — no subprocess.
+    Registers / funds / verdict / settle the three canonical rows when missing on-chain.
+    Set AUTO_SEED_DEMO=0 to disable.
+    """
+    time.sleep(5)
+    if os.environ.get("AUTO_SEED_DEMO", "1").strip().lower() in ("0", "false", "no"):
+        return
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if not getattr(chain, "ORACLE_MNEMONIC", None) or not getattr(chain, "APP_ID", None):
+        logger.info("AUTO_SEED: skipped (oracle or APP_ID not configured)")
+        return
+    if not chain.use_navitrust():
+        logger.info("AUTO_SEED: skipped (NaviTrust ARC56 not available)")
+        return
+    ok_seed, _, _ = chain.oracle_signer_matches_deployed_app()
+    if not ok_seed:
+        logger.info(
+            "AUTO_SEED: skipped (ORACLE_MNEMONIC does not match app on-chain oracle — fix .env or run bootstrap deploy)",
+        )
+        return
+    try:
+        from seed_blockchain import (
+            DEMO_ROWS,
+            _fund_contract_mbr,
+            _merge_audit,
+            _maybe_retry_settle_pending,
+            _sqlite_upsert_demo_rows,
+        )
+    except ImportError as e:
+        logger.warning("AUTO_SEED: could not import seed_blockchain helpers: %s", e)
+        return
+
+    oracle_addr = chain.oracle_address_string()
+    if not oracle_addr:
+        logger.info("AUTO_SEED: skipped (no oracle address)")
+        return
+    try:
+        oracle_micro = int(chain.algorand.client.algod.account_info(oracle_addr).get("amount", 0))
+        min_oracle_micro = int(os.environ.get("SEED_MIN_ORACLE_MICRO", "7000000"))
+        if oracle_micro < min_oracle_micro:
+            logger.warning(
+                "AUTO_SEED: skipped — oracle balance %s microAlgo < %s (fund testnet oracle or lower SEED_MIN_ORACLE_MICRO)",
+                oracle_micro,
+                min_oracle_micro,
+            )
+            return
+    except Exception as e:
+        logger.warning("AUTO_SEED: oracle balance check failed: %s", e)
+        return
+
+    app_id = int(APP_ID or 0)
+    if not app_id:
+        return
+    app_address = str(get_application_address(app_id))
+
+    try:
+        algorand = AlgorandClient.testnet()
+        _fund_contract_mbr(algorand, oracle_addr, app_address)
+    except Exception as e:
+        logger.warning("AUTO_SEED: MBR top-up: %s", e)
+
+    summary: dict[str, dict] = {}
+    audit_merge: dict[str, list] = {}
+
+    for spec in DEMO_ROWS:
+        sid = spec["id"]
+        try:
+            st = chain.read_shipment_status(sid)
+            if st not in ("Unregistered", "Unknown"):
+                logger.info("AUTO_SEED: %s already on-chain — skip register/fund", sid)
+                summary[sid] = {"skipped": True}
+                try:
+                    _maybe_retry_settle_pending(sid, spec, summary)
+                except Exception as e:
+                    logger.debug("AUTO_SEED: settle retry %s: %s", sid, e)
+                continue
+
+            route = spec["route"]
+            logger.info("AUTO_SEED: registering %s", sid)
+            reg = chain.register_navitrust(sid, oracle_addr, route)
+            logger.info("AUTO_SEED: %s registered tx=%s", sid, reg.get("tx_id"))
+
+            logger.info("AUTO_SEED: funding %s (%s microAlgo)", sid, spec["fund_micro"])
+            fund = chain.fund_shipment_oracle_microalgo(sid, int(spec["fund_micro"]))
+            if not fund:
+                logger.warning("AUTO_SEED: fund failed for %s", sid)
+                continue
+            logger.info("AUTO_SEED: %s funded tx=%s", sid, fund.get("tx_id"))
+
+            if spec.get("verdict_json") and spec.get("risk") is not None:
+                rv = chain.record_verdict_chain(sid, spec["verdict_json"], int(spec["risk"]))
+                if rv:
+                    logger.info("AUTO_SEED: %s verdict tx=%s", sid, rv.get("tx_id"))
+                    vnote = json.loads(spec["verdict_json"])
+                    audit_merge[sid] = [
+                        {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "sentinel_score": int(spec["risk"]),
+                            "verdict": str(vnote.get("verdict", "UNKNOWN")).upper(),
+                            "reasoning_narrative": str(vnote.get("reasoning", ""))[:800],
+                            "summary": str(vnote.get("reasoning", ""))[:200],
+                            "tx_id": rv.get("tx_id"),
+                        }
+                    ]
+
+            if spec.get("settle"):
+                st_res = chain.settle_shipment_chain(sid)
+                if st_res:
+                    logger.info(
+                        "AUTO_SEED: %s settled tx=%s cert=%s",
+                        sid,
+                        st_res.get("tx_id"),
+                        st_res.get("certificate_asa_id"),
+                    )
+                    audit_merge.setdefault(sid, []).append(
+                        {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "sentinel_score": int(spec.get("risk") or 0),
+                            "verdict": "SETTLE",
+                            "reasoning_narrative": "Shipment settled on-chain; escrow released to supplier.",
+                            "summary": "Settled",
+                            "tx_id": st_res.get("tx_id"),
+                        }
+                    )
+        except Exception as e:
+            logger.warning("AUTO_SEED: %s failed: %s", sid, e)
+
+    if audit_merge:
+        try:
+            _merge_audit(audit_merge)
+            load_verdict_history()
+        except Exception as e:
+            logger.warning("AUTO_SEED: audit merge: %s", e)
+
+    try:
+        _sqlite_upsert_demo_rows(oracle_addr)
+    except Exception as e:
+        logger.warning("AUTO_SEED: sqlite upsert: %s", e)
+
+    _SHIPMENTS_CACHE["payload"] = None
+    _STATS_CACHE["payload"] = None
+    logger.info("AUTO_SEED: done")
 
 
 def _maybe_seed_demo_shipments() -> None:
@@ -1627,6 +1779,17 @@ def fetch_live_weather(city: str) -> dict:
     }
 
 
+def _weather_for_destination(destination: str) -> Optional[dict]:
+    """Open-Meteo weather for destination city name; None if unknown or fetch fails."""
+    try:
+        d0 = (destination or "").split(",")[0].strip()
+        if not d0 or d0 == "—":
+            return None
+        return fetch_live_weather(d0)
+    except Exception:
+        return None
+
+
 def _clean_json_response(raw: str) -> dict:
     """Strip markdown fences and parse JSON from Gemini / OpenAI response."""
     text = (raw or "").strip()
@@ -1693,14 +1856,24 @@ def _chain_snapshot_for_jury(shipment_id: str) -> dict:
 
 
 def get_supplier_reputation_score(supplier_address: str) -> dict:
-    """On-chain rp_ box score; score may be None until first settlement."""
+    """On-chain rp_ box score; default 50 when no box (never expose internal no_box to clients)."""
     if not supplier_address:
-        return {"score": 50, "source": "default_no_supplier"}
+        return {"score": 50, "source": "default", "has_box": False, "address": ""}
     rep = chain.read_supplier_reputation_on_chain(supplier_address)
     sc = rep.get("score")
     if sc is None:
-        return {"score": 50, "source": rep.get("source") or "no_box", "address": supplier_address}
-    return {"score": int(sc), "source": rep.get("source") or "algorand_box_storage", "address": supplier_address}
+        return {
+            "score": 50,
+            "source": "default",
+            "has_box": False,
+            "address": supplier_address,
+        }
+    return {
+        "score": int(sc),
+        "source": "algorand_box_storage",
+        "has_box": True,
+        "address": supplier_address,
+    }
 
 
 def _fallback_weather_sentinel(weather: dict, chain_state: dict) -> dict:
@@ -2158,8 +2331,12 @@ def _shipment_row_for_ui(sid: str, chain_status: str, db_row, price: Optional[di
     rep_src = None
     if sup_addr and APP_ID and chain.use_navitrust():
         rep = chain.read_supplier_reputation_on_chain(sup_addr)
-        rep_score = rep.get("score")
-        rep_src = rep.get("source")
+        if rep.get("score") is not None:
+            rep_score = int(rep.get("score"))
+            rep_src = "algorand_box_storage"
+        else:
+            rep_score = 50
+            rep_src = "default"
     return {
         "shipment_id": sid,
         "origin": origin or "—",
@@ -2172,7 +2349,7 @@ def _shipment_row_for_ui(sid: str, chain_status: str, db_row, price: Optional[di
         "funds_locked_microalgo": funds_micro,
         "funds_usd": funds_usd,
         "funds_inr": funds_inr,
-        "weather": {"temperature": 0.0, "precipitation": 0.0, "weather_code": 0},
+        "weather": _weather_for_destination(dest),
         "logistics_events": ev_out,
         "last_jury": lj,
         "supplier_address": sup_addr,
@@ -2185,7 +2362,7 @@ def _shipment_row_for_ui(sid: str, chain_status: str, db_row, price: Optional[di
 
 
 def build_sync_ledger_shipments() -> List[dict]:
-    """Enumerate on-chain shipments via boxes, merge DB metadata; append DB-only rows as Not_Registered."""
+    """Shipments that exist on-chain (boxes only). SQLite supplies metadata when present; no DB-only placeholder rows."""
     ledger_pairs = _list_ledger_shipments()
     px = None
     try:
@@ -2194,14 +2371,7 @@ def build_sync_ledger_shipments() -> List[dict]:
         px = None
     with get_db() as conn:
         db_rows = {r["id"]: r for r in conn.execute("SELECT * FROM shipments").fetchall()}
-    seen = {sid for sid, _ in ledger_pairs}
     rows = [_shipment_row_for_ui(sid, st, db_rows.get(sid), px) for sid, st in ledger_pairs]
-    for sid, db_row in db_rows.items():
-        if sid in seen:
-            continue
-        st = chain.read_shipment_status(sid)
-        if st in ("Unregistered", "Unknown"):
-            rows.append(_shipment_row_for_ui(sid, "Not_Registered", db_row, px))
     return rows
 
 
@@ -2446,17 +2616,69 @@ async def get_audit_trail(shipment_id: str):
 
 @app.get("/risk-history")
 async def get_risk_history():
-    """Last 10 audit entries across all shipments; [] if fewer than 2 entries total."""
+    """
+    Risk / verdict timeline for the dashboard chart.
+    Primary source: in-memory audit trail (populated when POST /run-jury succeeds and persists to audit_trail.json).
+    Merged with: live Algorand box reads (risk_score, status) so the chart is not empty when audit file was never written.
+    """
     flat: list[dict] = []
     for ship_id, verdicts in AUDIT_TRAIL.items():
+        if str(ship_id).startswith("DEMO_"):
+            continue
         for v in verdicts:
             if not isinstance(v, dict):
                 continue
-            flat.append({**v, "shipment_id": ship_id})
-    if len(flat) < 2:
-        return {"points": []}
+            row = {**v, "shipment_id": ship_id}
+            row.setdefault("source", "audit_trail")
+            flat.append(row)
+
+    seen: set[tuple[str, int, str]] = set()
+    for p in flat:
+        sid = str(p.get("shipment_id") or "")
+        sc = int(p.get("score") or p.get("sentinel_score") or 0)
+        ver = str(p.get("verdict") or "")
+        seen.add((sid, sc, ver))
+
+    if APP_ID and chain.use_navitrust():
+        try:
+            pairs = sorted(_list_ledger_shipments(), key=lambda t: t[0])
+        except Exception:
+            pairs = []
+        base = datetime.now(timezone.utc)
+        for idx, (sid, st) in enumerate(pairs):
+            try:
+                full = chain.read_shipment_full(sid)
+            except Exception:
+                continue
+            rs = int(full.get("risk_score") or 0)
+            vj = full.get("verdict_json") or full.get("verdict")
+            has_vj = bool(vj and str(vj).strip())
+            if rs <= 0 and not has_vj and st not in ("Disputed", "Delayed_Disaster", "Settled"):
+                continue
+            if st in ("Disputed", "Delayed_Disaster"):
+                ver = "DISPUTE"
+            elif st == "Settled":
+                ver = "SETTLE"
+            else:
+                ver = "HOLD"
+            plot_score = rs if rs > 0 else (1 if st in ("Disputed", "Delayed_Disaster") else rs)
+            key = (sid, plot_score, ver)
+            if key in seen:
+                continue
+            seen.add(key)
+            ts = (base - timedelta(minutes=max(0, len(pairs) - idx - 1))).isoformat()
+            flat.append(
+                {
+                    "shipment_id": sid,
+                    "score": plot_score,
+                    "verdict": ver,
+                    "timestamp": ts,
+                    "source": "algorand_box",
+                }
+            )
+
     flat.sort(key=lambda x: str(x.get("timestamp") or ""))
-    return {"points": flat[-10:]}
+    return {"points": flat[-25:]}
 
 
 def _stats_compute() -> dict:
@@ -2563,6 +2785,55 @@ def pause_oracle_endpoint(body: dict = Body(default_factory=dict)):
     return {"paused": True, "tx_id": result.get("tx_id")}
 
 
+def _require_oracle_gas(min_micro: int, action: str) -> None:
+    """Return 503 when oracle mnemonic is set but the account cannot cover fees/MBR."""
+    try:
+        chain._sync_env_globals()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    if not (chain.ORACLE_MNEMONIC or "").strip():
+        return
+    bal = chain.oracle_balance_microalgo()
+    if bal >= min_micro:
+        return
+    addr = chain.oracle_address_string() or "the oracle address from ORACLE_MNEMONIC"
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            f"Oracle wallet needs more TestNet ALGO to {action} "
+            f"(current balance {bal / 1_000_000:.6f} ALGO). "
+            f"Fund {addr} at https://bank.testnet.algorand.network/ "
+            "or run `algokit dispenser fund -a 5 --whole-units` after `algokit dispenser login`."
+        ),
+    )
+
+
+def _format_oracle_chain_error(action: str, exc: BaseException) -> str:
+    """Short user-facing message; avoid dumping full simulate traces for overspend."""
+    low = str(exc).lower()
+    if "overspend" in low:
+        addr = chain.oracle_address_string() or "the oracle address in .env"
+        return (
+            f"{action}: oracle account has insufficient ALGO for fees on TestNet. "
+            f"Fund {addr} (https://bank.testnet.algorand.network/)."
+        )
+    if "oracle only" in low:
+        ok, signer, on_chain = chain.oracle_signer_matches_deployed_app()
+        if not ok and signer and on_chain:
+            return (
+                f"{action}: ORACLE_MNEMONIC signs as {signer}, but app {APP_ID} expects the on-chain oracle "
+                f"{on_chain} (usually the app creator). Use that account's mnemonic, or call update_oracle from the current oracle."
+            )
+        return (
+            f"{action}: transaction sender is not the contract oracle (see global oracle_address). "
+            "Use the deploy/creator mnemonic in ORACLE_MNEMONIC, or update_oracle on-chain."
+        )
+    msg = str(exc)
+    if len(msg) > 900:
+        return f"{action}: {msg[:900]}…"
+    return f"{action}: {msg}"
+
+
 @app.post("/admin/unpause")
 def unpause_oracle_endpoint(body: dict = Body(default_factory=dict)):
     """Resume oracle after pause. Requires ADMIN_SECRET."""
@@ -2599,6 +2870,29 @@ def _register_shipment_core(
             status_code=503,
             detail="ORACLE_MNEMONIC (or DEPLOYER_MNEMONIC) is not set. The API must sign register_shipment with the deployer wallet.",
         )
+    sup = (supplier or "").strip()
+    try:
+        algo_encoding.decode_address(sup)
+    except Exception:
+        raise HTTPException(
+            status_code=422,
+            detail="supplier_address must be a full 58-character Algorand address (copy from Pera / wallet).",
+        ) from None
+    supplier = sup
+    _require_oracle_gas(chain.MIN_ORACLE_MICRO_FOR_WRITE, "register shipments")
+    if chain.use_navitrust():
+        ok, signer_a, app_oracle = chain.oracle_signer_matches_deployed_app()
+        if not ok and signer_a and app_oracle:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Oracle key mismatch: ORACLE_MNEMONIC signs as "
+                    f"{signer_a}, but app {APP_ID} on-chain oracle is {app_oracle}. "
+                    "The contract only accepts register_shipment from that on-chain oracle (normally the app creator). "
+                    "Fix: use the creator/deployer mnemonic in ORACLE_MNEMONIC, or call update_oracle(new_address) "
+                    "signed by the current oracle."
+                ),
+            )
 
     shipment_data = {
         "origin": origin,
@@ -2709,11 +3003,7 @@ def _register_shipment_core(
                 conn.commit()
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"On-chain registration failed: {msg}. "
-                "If the error mentions err opcode / PC: try a new shipment_id, fund the app account for box MBR, "
-                "and verify ORACLE_MNEMONIC and APP_ID."
-            ),
+            detail=_format_oracle_chain_error("On-chain registration failed", e),
         ) from e
     except Exception as e:
         logger.error("Registration failed: %s", e)
@@ -2723,11 +3013,7 @@ def _register_shipment_core(
                 conn.commit()
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"On-chain registration failed: {e!s}. "
-                "If the error mentions err opcode / PC: try a new shipment_id, fund the app account for box MBR, "
-                "and verify ORACLE_MNEMONIC and APP_ID."
-            ),
+            detail=_format_oracle_chain_error("On-chain registration failed", e),
         ) from e
 
 
@@ -2740,7 +3026,11 @@ def register_shipment(body: RegisterShipmentBody):
     sup = (body.supplier_address or "").strip()
     if not sid or not org or not dst or not sup:
         raise HTTPException(status_code=422, detail="shipment_id, origin, destination, and supplier_address are required.")
-    return _register_shipment_core(sid, org, dst, sup, 30, 1.0, 7, 50)
+    out = _register_shipment_core(sid, org, dst, sup, 30, 1.0, 7, 50)
+    # Bust in-memory caches so GET /shipments and /stats reflect the new box immediately (otherwise 15s stale UI).
+    _SHIPMENTS_CACHE["payload"] = None
+    _STATS_CACHE["payload"] = None
+    return out
 
 
 @app.get("/health")
@@ -2761,6 +3051,38 @@ def health():
     except Exception:
         indexer_ok = False
     aid = APP_ID if isinstance(APP_ID, int) else int(os.environ.get("APP_ID") or 0)
+    db_ok = False
+    try:
+        with get_db() as conn:
+            conn.execute("SELECT 1").fetchone()
+        db_ok = True
+    except Exception:
+        db_ok = False
+    oracle_configured = bool(
+        (os.environ.get("ORACLE_MNEMONIC") or "").strip()
+        or (os.environ.get("DEPLOYER_MNEMONIC") or "").strip()
+    )
+    gemini_configured = bool((os.environ.get("GEMINI_API_KEY") or "").strip())
+    oracle_balance_microalgo = None
+    oracle_address = None
+    oracle_ready_for_writes = None
+    if oracle_configured:
+        try:
+            oracle_address = chain.oracle_address_string()
+            oracle_balance_microalgo = chain.oracle_balance_microalgo()
+            oracle_ready_for_writes = oracle_balance_microalgo >= chain.MIN_ORACLE_MICRO_FOR_WRITE
+        except Exception:
+            oracle_balance_microalgo = None
+            oracle_ready_for_writes = False
+    on_chain_oracle_address = None
+    oracle_matches_app = None
+    try:
+        if oracle_configured and aid and chain.use_navitrust():
+            om, _, oaddr = chain.oracle_signer_matches_deployed_app()
+            oracle_matches_app = om
+            on_chain_oracle_address = oaddr
+    except Exception:
+        pass
     return {
         "status": "ok",
         "app_id": aid,
@@ -2768,6 +3090,14 @@ def health():
         "algod_ok": algod_ok,
         "indexer_ok": indexer_ok,
         "last_round": last_round,
+        "db_ok": db_ok,
+        "oracle_configured": oracle_configured,
+        "oracle_address": oracle_address,
+        "oracle_balance_microalgo": oracle_balance_microalgo,
+        "oracle_ready_for_writes": oracle_ready_for_writes,
+        "on_chain_oracle_address": on_chain_oracle_address,
+        "oracle_matches_app": oracle_matches_app,
+        "gemini_configured": gemini_configured,
     }
 
 
@@ -2973,12 +3303,17 @@ def get_supplier_reputation(address: str):
     addr = address.strip()
     r = chain.read_supplier_reputation_on_chain(addr)
     sc = r.get("score")
+    has_box = sc is not None
     if sc is None:
         sc = 50
+        src = "default"
+    else:
+        src = "algorand_box_storage"
     return {
         "address": addr,
         "score": int(sc),
-        "source": r.get("source") or "algorand_box_storage",
+        "source": src,
+        "has_box": has_box,
         "lora_url": f"https://lora.algokit.io/testnet/account/{addr}",
         "passport_asa_id": None,
     }
@@ -3007,6 +3342,7 @@ def mint_supplier_passport(body: dict = Body(...)):
     supplier_address = str((body or {}).get("supplier_address") or "").strip()
     if not supplier_address:
         raise HTTPException(status_code=400, detail="supplier_address required")
+    _require_oracle_gas(chain.MIN_ORACLE_MICRO_FOR_MINT_ASA, "mint the supplier passport ASA")
     rep = get_supplier_reputation_score(supplier_address)
     score = int(rep.get("score") or 50)
     settled, disputed = _audit_settle_dispute_counts()
@@ -3021,7 +3357,7 @@ def mint_supplier_passport(body: dict = Body(...)):
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.warning("mint_supplier_passport: %s", e)
-        raise HTTPException(status_code=503, detail=f"Mint failed: {e!s}") from e
+        raise HTTPException(status_code=503, detail=_format_oracle_chain_error("Mint failed", e)) from e
     aid = result.get("asa_id")
     return {
         "supplier_address": supplier_address,
@@ -3062,28 +3398,30 @@ def settle_shipment_api(body: SettleBody):
 
 @app.post("/fund-shipment/build")
 def fund_shipment_build(body: FundShipmentBuildBody):
-    """Return unsigned atomic group (pay + fund_shipment) for the buyer wallet to sign."""
+    """
+    Validate fund-escrow inputs. Unsigned pay + fund_shipment is built in the browser with
+    algosdk v3 + Algokit (Python msgpack bytes are not decodable by JS decodeUnsignedTransaction).
+    """
     if not chain.use_navitrust() or not APP_ID:
         raise HTTPException(status_code=400, detail="Pramanik APP_ID and ARC56 spec required.")
     st = chain.read_shipment_status(body.shipment_id)
     if st in ("Unregistered", "Unknown"):
         raise HTTPException(status_code=400, detail="Shipment is not registered on-chain.")
     try:
-        payer = body.resolved_payer()
         micro = body.resolved_micro()
-        txns = chain.build_fund_shipment_txns_b64(payer, body.shipment_id, micro)
+        if micro < 100_000:
+            raise ValueError("Minimum funding is 100000 microAlgo (0.1 ALGO)")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.exception("fund-shipment build failed")
-        raise HTTPException(status_code=500, detail=f"Could not build transactions: {e!s}") from e
+        raise HTTPException(status_code=500, detail=f"Could not validate fund request: {e!s}") from e
     return {
-        "txns": txns,
-        "txns_b64": txns,
         "shipment_id": body.shipment_id,
         "micro_algo": micro,
         "amount_microalgo": micro,
         "amount_algo": micro / 1_000_000.0,
+        "app_id": APP_ID,
         "app_address": get_application_address(APP_ID),
         "receiver": get_application_address(APP_ID),
     }
@@ -3315,17 +3653,32 @@ ANSWER RULES:
         return "NaviBot for Pramanik supply chain oracle on Algorand."
 
 
+def _navibot_live_disputed_blurb() -> str:
+    """Facts from GET /shipments merge — avoids hardcoded demo numbers that drift from chain."""
+    try:
+        rows = build_sync_ledger_shipments()
+        disp = [r for r in rows if str(r.get("stage") or "") == "Disputed"]
+        if disp:
+            r = disp[0]
+            sid = str(r.get("shipment_id") or "?")
+            o, d = r.get("origin") or "?", r.get("destination") or "?"
+            return (
+                f"On-chain now: {sid} ({o}→{d}) is Disputed — buyer ALGO stays frozen in escrow until a new verdict or resolution. "
+                "Open the dashboard or GET /shipments for every lane."
+            )
+        return (
+            "No disputed shipments on-chain right now. Use GET /shipments or the dashboard for live status "
+            "(after seeding, demo IDs are often SHIP_MUMBAI_001, SHIP_CHEN_002, SHIP_DELHI_003)."
+        )
+    except Exception:
+        return "Use GET /shipments for live on-chain shipment status."
+
+
 def _navibot_rule_match(query: str) -> Optional[dict]:
     """Keyword-only answers (no Gemini). None → caller may run LLM."""
     q = (query or "").lower()
     if "chennai" in q and any(w in q for w in ("frozen", "freeze", "disput", "stuck", "why")):
-        return _navibot_pack(
-            "Chennai→Rotterdam (SHIP_CHEN_002) is on-chain Disputed: live weather + jury risk landed around 87/100, so buyer ALGO (~3 ALGO) stays frozen in escrow until a new verdict or resolution.",
-            None,
-            None,
-            True,
-            "SHIP_CHEN_002",
-        )
+        return _navibot_pack(_navibot_live_disputed_blurb(), None, None, True, None)
     if ("all shipments" in q or ("status" in q and "shipment" in q)) and any(
         w in q for w in ("mumbai", "chennai", "delhi", "all", "each", "every")
     ):
@@ -3664,6 +4017,16 @@ async def get_config():
 def verify_shipment(shipment_id: str):
     """Public verification interface — anyone can verify a shipment's on-chain status."""
     full = chain.read_shipment_full(shipment_id) if APP_ID else {}
+    oc_st = str(full.get("status") or "")
+    if oc_st == "Not_Found":
+        aid = APP_ID if isinstance(APP_ID, int) else int(os.environ.get("APP_ID") or 0)
+        return {
+            "shipment_id": shipment_id,
+            "status": "Not_Found",
+            "found": False,
+            "app_id": aid,
+            "lora_app_url": f"{LORA_TESTNET_APP}/{aid}" if aid else LORA_TESTNET_APP,
+        }
     on_chain = full.get("status", "Not found on-chain")
     box_raw = None
     if not chain.use_navitrust():

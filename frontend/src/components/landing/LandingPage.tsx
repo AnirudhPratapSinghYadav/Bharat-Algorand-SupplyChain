@@ -8,6 +8,7 @@ import { HeroSection } from './HeroSection';
 import { GeopoliticalStakesSection } from './GeopoliticalStakesSection';
 import { ProblemSection } from './ProblemSection';
 import { SolutionSection } from './SolutionSection';
+import { AgentsPipelineSection } from './AgentsPipelineSection';
 import { StepsSection } from './StepsSection';
 import { QuickProofSection } from './QuickProofSection';
 import { DemoStory } from '../DemoStory';
@@ -49,6 +50,11 @@ export function LandingPage({ onConnectWallet }: LandingPageProps) {
             </span>
             <span className="nt-nav-brand-text">Pramanik</span>
           </Link>
+          <nav className="nt-nav-links" aria-label="On this page">
+            <a href="#agents">AI jury</a>
+            <a href="#how-it-works">Escrow flow</a>
+            <Link to="/verify">Verify</Link>
+          </nav>
           <div className="nt-nav-actions">
             <button type="button" className="nt-btn nt-btn--primary nt-nav-wallet" onClick={onConnectWallet}>
               Connect wallet
@@ -62,6 +68,7 @@ export function LandingPage({ onConnectWallet }: LandingPageProps) {
         <GeopoliticalStakesSection />
         <ProblemSection />
         <SolutionSection />
+        <AgentsPipelineSection />
         <StepsSection />
         <QuickProofSection />
         <DemoStory />

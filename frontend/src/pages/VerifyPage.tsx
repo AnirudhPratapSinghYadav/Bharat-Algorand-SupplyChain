@@ -3,7 +3,14 @@ import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
 import { ExternalLink, Search, Shield } from 'lucide-react';
-import { BACKEND_URL, LORA_APP } from '../constants/api';
+import { BACKEND_URL, FALLBACK_APP_ID, LORA_APP } from '../constants/api';
+
+function isVerifyNotFound(d: Record<string, unknown> | undefined): boolean {
+  if (!d) return false;
+  if (d.status === 'Not_Found') return true;
+  if (d.found === false) return true;
+  return false;
+}
 import { WitnessButton } from '../components/WitnessButton';
 import { useWallet } from '../context/WalletContext';
 
@@ -22,10 +29,11 @@ function statusBadgeStyle(st: string): { bg: string; color: string; border: stri
 }
 
 export default function VerifyPage() {
-  const { shipmentId: routeShipmentId } = useParams<{ shipmentId?: string }>();
+  const { shipmentId: routeShipmentId, wallet: routeWallet } = useParams<{ shipmentId?: string; wallet?: string }>();
   const [id, setId] = useState(routeShipmentId || 'SHIP_MUMBAI_001');
   const [submitted, setSubmitted] = useState(routeShipmentId || 'SHIP_MUMBAI_001');
   const { address, connect } = useWallet();
+  const walletFromRoute = routeWallet?.trim() || '';
 
   useEffect(() => {
     if (routeShipmentId && routeShipmentId.trim()) {
@@ -50,7 +58,7 @@ export default function VerifyPage() {
       const res = await axios.get(`${BACKEND_URL}/witnesses/${encodeURIComponent(submitted)}`, { timeout: 12_000 });
       return res.data as { witness_count?: number; witnesses?: { address?: string; tx_id?: string; lora_url?: string }[] };
     },
-    enabled: submitted.length > 0,
+    enabled: submitted.length > 0 && !isVerifyNotFound(q.data as Record<string, unknown> | undefined),
     staleTime: 20_000,
   });
 
@@ -131,6 +139,30 @@ export default function VerifyPage() {
         </Link>
       </header>
 
+      {walletFromRoute ? (
+        <div
+          style={{
+            maxWidth: 640,
+            marginBottom: 20,
+            padding: '14px 16px',
+            borderRadius: 10,
+            border: '1px solid rgba(56, 189, 248, 0.35)',
+            background: 'rgba(56, 189, 248, 0.08)',
+            fontSize: '0.82rem',
+            lineHeight: 1.5,
+            color: 'var(--text)',
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: 6, color: 'var(--accent)' }}>Linked wallet (shareable URL)</div>
+          <p style={{ margin: '0 0 8px', fontFamily: 'var(--mono)', wordBreak: 'break-all', fontSize: '0.78rem' }}>
+            {walletFromRoute}
+          </p>
+          <p style={{ margin: 0, color: 'var(--muted)', fontSize: '0.78rem' }}>
+            Enter a shipment ID below to load escrow, jury scores, and certificate data from the API. This page does not list all shipments for an address — use the dashboard for your own cargo.
+          </p>
+        </div>
+      ) : null}
+
       <div style={{ display: 'flex', gap: 8, maxWidth: 560, marginBottom: 20 }}>
         <input
           value={id}
@@ -193,7 +225,21 @@ export default function VerifyPage() {
         </div>
       )}
 
-      {q.data && (
+      {q.data && isVerifyNotFound(q.data as Record<string, unknown>) && (
+        <div className="card" style={{ maxWidth: 520, border: '1px solid var(--border)', padding: '20px 22px' }}>
+          <div style={{ fontWeight: 800, fontSize: '1.05rem', marginBottom: 8, color: 'var(--text)' }}>Shipment not found on Algorand</div>
+          <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--muted)', lineHeight: 1.55 }}>
+            This shipment ID does not exist in the NaviTrust contract (no on-chain box for this ID).
+          </p>
+          {showAppIdOnVerify && resolvedAppId ? (
+            <a href={LORA_APP(Number(resolvedAppId))} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 14, fontWeight: 600, color: 'var(--accent)', fontSize: '0.88rem' }}>
+              Open app #{resolvedAppId} on Lora ↗
+            </a>
+          ) : null}
+        </div>
+      )}
+
+      {q.data && !isVerifyNotFound(q.data as Record<string, unknown>) && (
         <div style={{ maxWidth: 640, display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div
             className="card"
@@ -295,7 +341,14 @@ export default function VerifyPage() {
               </a>
             ) : null}
 
-            <WitnessButton shipmentId={submitted} hasVerdict={hasVerdict} walletAddress={address} onConnectRequest={connect} />
+            <WitnessButton
+              shipmentId={submitted}
+              shipmentStatus={st}
+              appId={typeof resolvedAppId === 'number' && resolvedAppId > 0 ? resolvedAppId : FALLBACK_APP_ID || null}
+              hasVerdict={hasVerdict}
+              walletAddress={address}
+              onConnectRequest={connect}
+            />
           </div>
 
           {st === 'Settled' && certId != null && certId > 0 ? (

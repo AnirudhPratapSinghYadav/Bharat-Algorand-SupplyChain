@@ -18,13 +18,19 @@ import { NaviBotPanel } from './components/NaviBotPanel';
 import { WalletProvider, useWallet } from './context/WalletContext';
 import { LandingPage } from './components/landing/LandingPage';
 import { ShipmentDestinationWeatherRow } from './components/DestinationWeather';
+import { JuryPipelineSection, TrustFlowSection } from './components/DashboardEducation';
 import { JuryRiskHistoryChart } from './components/JuryRiskHistoryChart';
+import { UserProfileModal } from './components/UserProfileModal';
 import { LiveVerdictTerminal } from './components/LiveVerdictTerminal';
 import { WitnessButton } from './components/WitnessButton';
 import { NewsTicker } from './components/NewsTicker';
 import { PriceTicker } from './components/PriceTicker';
 import { ShipmentReportActions } from './components/ShipmentReport';
+import { TrustStackIllustration } from './components/TrustStackIllustration';
+import { DashboardPdfReport } from './components/DashboardPdfReport';
+import { LoraVerificationGuide } from './components/LoraVerificationGuide';
 import { peraWallet } from './wallet/pera';
+import { buildNavitrustFundShipmentTransactions } from './algorand/buildNavitrustFundShipment';
 
 const CITIES = ['Mumbai', 'Chennai', 'Delhi', 'Singapore', 'Dubai', 'Rotterdam'] as const;
 
@@ -86,6 +92,16 @@ function escrowUsdText(ship: { funds_usd?: number | null }): string | null {
         return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(ship.funds_usd);
     }
     return null;
+}
+
+/** Toast uses green by default; treat failures (incl. "Mint failed: …") as errors for styling. */
+function isErrorToastMessage(message: string): boolean {
+    if (message.startsWith('✓')) return false;
+    const m = message.toLowerCase();
+    if (m.includes('registering on-chain (oracle signs')) return false;
+    return /(^|[\s:])fail|failed|error|overspend|blocked|insufficient|not synced|could not|unauthorized|forbidden|registration failed|on-chain registration|mint failed|settlement failed|transaction was cancelled/i.test(
+        m,
+    );
 }
 
 interface Shipment {
@@ -167,6 +183,7 @@ function MainApp() {
         total_disputed?: number;
     }>({ total_scans: 0, verified_anomalies: 0 });
     const [recentTxns, setRecentTxns] = useState<DashboardTxn[]>([]);
+    const [profileModalOpen, setProfileModalOpen] = useState(false);
     const [registerModal, setRegisterModal] = useState(false);
     const [regForm, setRegForm] = useState({
         shipment_id: '',
@@ -183,12 +200,22 @@ function MainApp() {
     const [mitigateText, setMitigateText] = useState('');
     const [mitigateSubmitting, setMitigateSubmitting] = useState(false);
     const [toast, setToast] = useState<string | null>(null);
-    const [liveTelemetry, setLiveTelemetry] = useState<Record<string, { temp: number; humidity: number; vibration: number }>>({});
     const [confirmingTxLabel, setConfirmingTxLabel] = useState<string | null>(null);
     const [lastConfirmedTx, setLastConfirmedTx] = useState<ConfirmedActivity | null>(null);
     const [activityFeed, setActivityFeed] = useState<ConfirmedActivity[]>([]);
     const [oracleAddress, setOracleAddress] = useState<string | null>(null);
     const [chainHealth, setChainHealth] = useState(false);
+    const [healthSnapshot, setHealthSnapshot] = useState<{
+        algod_ok?: boolean;
+        indexer_ok?: boolean;
+        db_ok?: boolean;
+        oracle_configured?: boolean;
+        gemini_configured?: boolean;
+        last_round?: number;
+        oracle_address?: string | null;
+        on_chain_oracle_address?: string | null;
+        oracle_matches_app?: boolean | null;
+    } | null>(null);
     /** When set, that shipment's card shows LiveVerdictTerminal instead of the standard body. */
     const [juryTerminalShipmentId, setJuryTerminalShipmentId] = useState<string | null>(null);
     const [settleReceipt, setSettleReceipt] = useState<{
@@ -201,6 +228,8 @@ function MainApp() {
     const [supplierRep, setSupplierRep] = useState<{ score: number | null; source?: string } | null>(null);
     const [passportAsa, setPassportAsa] = useState<string | null>(null);
     const [passportMinting, setPassportMinting] = useState(false);
+    /** Last error loading /shipments (API down, CORS, wrong VITE_API_URL, etc.) */
+    const [shipmentsSyncError, setShipmentsSyncError] = useState<string | null>(null);
 
     const refreshRecentTxns = useCallback(() => {
         axios
@@ -220,10 +249,22 @@ function MainApp() {
         const check = async () => {
             try {
                 const r = await fetch(`${BACKEND_URL}/health`);
-                const d = (await r.json()) as { algod_ok?: boolean };
+                const d = (await r.json()) as {
+                    algod_ok?: boolean;
+                    indexer_ok?: boolean;
+                    db_ok?: boolean;
+                    oracle_configured?: boolean;
+                    gemini_configured?: boolean;
+                    last_round?: number;
+                    oracle_address?: string | null;
+                    on_chain_oracle_address?: string | null;
+                    oracle_matches_app?: boolean | null;
+                };
                 setChainHealth(d.algod_ok === true);
+                setHealthSnapshot(d);
             } catch {
                 setChainHealth(false);
+                setHealthSnapshot(null);
             }
         };
         void check();
@@ -278,31 +319,6 @@ function MainApp() {
             /* ignore */
         }
     }, []);
-
-    /* ── Supplier: live telemetry fluctuation every 3s (generative monitoring) ─ */
-    useEffect(() => {
-        if (role !== 'supplier' || shipments.length === 0) return;
-        const tick = () => {
-            setLiveTelemetry(prev => {
-                const next: Record<string, { temp: number; humidity: number; vibration: number }> = {};
-                shipments.forEach(ship => {
-                    const baseTemp = ship.weather?.temperature ?? 22;
-                    const base = prev[ship.shipment_id] ?? {
-                        temp: baseTemp,
-                        humidity: 50 + (ship.shipment_id.length % 25),
-                        vibration: 2 + (ship.shipment_id.length % 4),
-                    };
-                    next[ship.shipment_id] = {
-                        temp: Math.round((base.temp + (Math.random() - 0.5) * 1.2) * 10) / 10,
-                        humidity: Math.max(20, Math.min(95, Math.round(base.humidity + (Math.random() - 0.5) * 4))),
-                        vibration: Math.max(0.5, Math.round((base.vibration + (Math.random() - 0.5) * 0.8) * 10) / 10),
-                    };
-                });
-                return next;
-            });
-        };
-        tick();
-    }, [role, shipments]);
 
     /* ── Toast auto-dismiss ─ */
     useEffect(() => {
@@ -419,6 +435,7 @@ function MainApp() {
                 }
                 if (statsRes.status === 'fulfilled') setStats(statsRes.value.data);
                 if (shipmentsRes.status === 'fulfilled') {
+                    setShipmentsSyncError(null);
                     const raw = shipmentsRes.value.data;
                     const data = Array.isArray(raw) ? raw : [];
                     setShipments(sortShipmentsStable(data));
@@ -430,18 +447,57 @@ function MainApp() {
                 } else {
                     setShipments([]);
                     setBoxStatuses({});
+                    const reason = shipmentsRes.reason;
+                    const msg =
+                        reason && typeof reason === 'object' && 'message' in reason
+                            ? String((reason as { message?: string }).message)
+                            : 'Could not load shipments';
+                    setShipmentsSyncError(
+                        axios.isAxiosError(reason) && !reason.response
+                            ? 'API unreachable — start the backend (uvicorn on port 8000) and check VITE_API_URL / Vite proxy.'
+                            : msg,
+                    );
                 }
             } catch {
                 setShipments([]);
                 setBoxStatuses({});
+                setShipmentsSyncError('Network error loading dashboard data.');
             } finally {
                 setIsLoading(false);
             }
         };
-        bootstrap();
+        void bootstrap();
 
-        const safety = setTimeout(() => setIsLoading(false), 5500);
+        const safety = setTimeout(() => setIsLoading(false), 12000);
         return () => clearTimeout(safety);
+    }, [accountAddress]);
+
+    /* ── Poll ledger every 20s — fixes empty UI if first request failed or after external registration ─ */
+    useEffect(() => {
+        if (!accountAddress) return;
+        const poll = async () => {
+            try {
+                const [s, st] = await Promise.all([
+                    axios.get(`${BACKEND_URL}/shipments`, { timeout: API_TIMEOUT }),
+                    axios.get(`${BACKEND_URL}/stats`, { timeout: API_TIMEOUT }),
+                ]);
+                const data = Array.isArray(s.data) ? s.data : [];
+                setShipments(sortShipmentsStable(data));
+                setStats(st.data);
+                setShipmentsSyncError(null);
+                const bx: Record<string, string> = {};
+                data.forEach((row: { shipment_id?: string; stage?: string }) => {
+                    if (row.shipment_id) bx[row.shipment_id] = row.stage || '';
+                });
+                setBoxStatuses(bx);
+            } catch {
+                setShipmentsSyncError(
+                    'Could not sync shipments — confirm `python -m uvicorn app:app --port 8000` is running and frontend uses `/api` in dev.',
+                );
+            }
+        };
+        const id = window.setInterval(() => void poll(), 20_000);
+        return () => window.clearInterval(id);
     }, [accountAddress]);
 
     /* ── Ledger sync (5s) via GET /shipments — single source of truth ── */
@@ -491,7 +547,7 @@ function MainApp() {
         setRegisterBusy(true);
         try {
             setToast('Registering on-chain (oracle signs on the server)…');
-            await axios.post(
+            const regRes = await axios.post(
                 `${BACKEND_URL}/register-shipment`,
                 {
                     shipment_id: regForm.shipment_id.trim(),
@@ -504,13 +560,26 @@ function MainApp() {
                     timeout: 120_000,
                 },
             );
+            const rid = regForm.shipment_id.trim();
+            const rtx = typeof regRes.data?.tx_id === 'string' ? regRes.data.tx_id : '';
+            const rlora = typeof regRes.data?.lora_tx_url === 'string' ? regRes.data.lora_tx_url : '';
             setRegisterModal(false);
             setRegForm((f) => ({ ...f, shipment_id: '' }));
-            setToast('Shipment registered on Algorand.');
-            const fresh = await axios.get(`${BACKEND_URL}/shipments`);
+            setToast(
+                rtx
+                    ? `✓ ${rid} registered on Algorand · TX ${rtx.slice(0, 10)}…${rlora ? ' (open Lora from Recent activity)' : ''}`
+                    : `✓ ${rid} registered on Algorand.`,
+            );
+            const fresh = await axios.get(`${BACKEND_URL}/shipments`, {
+                params: { _: Date.now() },
+                timeout: API_TIMEOUT,
+            });
             setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
+            setShipmentsSyncError(null);
             axios.get(`${BACKEND_URL}/stats`).then((r) => setStats(r.data)).catch(() => {});
             refreshRecentTxns();
+            void queryClient.invalidateQueries({ queryKey: ['risk-history'] });
+            void queryClient.invalidateQueries({ queryKey: ['stats'] });
         } catch (e: unknown) {
             const err = e as { response?: { data?: { detail?: unknown }; status?: number } };
             const d = err.response?.data?.detail;
@@ -645,7 +714,10 @@ function MainApp() {
                 const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
                 return algosdk.decodeUnsignedTransaction(bin);
             });
-            const signed = await peraWallet.signTransaction([txns.map((txn) => ({ txn, signers: [accountAddress] }))]);
+            // Pera API: SignerTransaction[][] — outer array = atomic groups, inner = txns in that group
+            const signed = await peraWallet.signTransaction([
+                txns.map((txn) => ({ txn, signers: [accountAddress] })),
+            ]);
             const rawSigned = Array.isArray(signed) ? signed : [];
             const blobs: Uint8Array[] = rawSigned.map((item: unknown) => {
                 if (item instanceof Uint8Array) return item;
@@ -680,11 +752,21 @@ function MainApp() {
                 buyer_address: accountAddress,
                 amount_algo: amountAlgo,
             });
-            const txnsB64: string[] = res.data.txns_b64;
-            const txns = txnsB64.map((b64) => {
-                const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-                return algosdk.decodeUnsignedTransaction(bin);
+            const micro =
+                typeof res.data.micro_algo === 'number'
+                    ? res.data.micro_algo
+                    : typeof res.data.amount_microalgo === 'number'
+                      ? res.data.amount_microalgo
+                      : Math.round(Number(amountAlgo) * 1_000_000);
+            const algodClient = new algosdk.Algodv2('', ALGOD_SERVER, '');
+            const txns = await buildNavitrustFundShipmentTransactions({
+                algod: algodClient,
+                appId: appId!,
+                buyerAddress: accountAddress,
+                shipmentId,
+                microAlgosAmt: micro,
             });
+            // Pera API: SignerTransaction[][] — outer array = atomic groups, inner = txns in that group
             const signed = await peraWallet.signTransaction([
                 txns.map((txn) => ({ txn, signers: [accountAddress] })),
             ]);
@@ -828,6 +910,7 @@ function MainApp() {
                             type="button"
                             onClick={() => switchRole('stakeholder')}
                             className={`dash-role-btn${role === 'stakeholder' ? ' dash-role-btn--stakeholder-active' : ''}`}
+                            title="Buyer / escrow: fund shipments, run jury, settle — your wallet signs fund transactions."
                         >
                             <Eye size={13} style={{ marginRight: 4, verticalAlign: 'middle' }} />
                             {role === 'stakeholder' ? '● ' : ''}Stakeholder
@@ -836,15 +919,32 @@ function MainApp() {
                             type="button"
                             onClick={() => switchRole('supplier')}
                             className={`dash-role-btn${role === 'supplier' ? ' dash-role-btn--supplier-active' : ''}`}
+                            title="Supplier: view shipments where you are the registered supplier; track escrow and reputation."
                         >
                             <Truck size={13} style={{ marginRight: 4, verticalAlign: 'middle' }} />
                             {role === 'supplier' ? '● ' : ''}Supplier
                         </button>
                     </div>
 
+                    <button
+                        type="button"
+                        className="primary-btn"
+                        style={{ padding: '8px 14px', fontSize: '0.78rem', whiteSpace: 'nowrap' }}
+                        onClick={() => setRegisterModal(true)}
+                        title="Calls the API — the oracle account signs register_shipment on TestNet"
+                    >
+                        Register shipment
+                    </button>
+
                     {/* Wallet Pill */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <div className="dash-wallet-pill">
+                        <button
+                            type="button"
+                            className="dash-wallet-pill dash-wallet-pill--interactive"
+                            onClick={() => setProfileModalOpen(true)}
+                            title="Open profile"
+                            aria-label="Open wallet profile"
+                        >
                             <div className="dash-wallet-avatar">
                                 <User size={14} color="#e0e7ff" />
                             </div>
@@ -852,7 +952,7 @@ function MainApp() {
                             <span className="dash-wallet-addr">
                                 {accountAddress.substring(0, 4)}...{accountAddress.substring(accountAddress.length - 5)}
                             </span>
-                        </div>
+                        </button>
                         <button type="button" onClick={disconnectWallet} className="dash-disconnect">
                             <LogOut size={13} /> Disconnect
                         </button>
@@ -880,11 +980,122 @@ function MainApp() {
                         textAlign: 'center',
                     }}
                 >
-                    Reconnecting to Algorand… check network or your API / algod configuration.
+                    API or chain unreachable. If this is production, confirm Vercel rewrites <code style={{ fontSize: '0.78rem' }}>/api</code> → your
+                    backend or set <code style={{ fontSize: '0.78rem' }}>VITE_API_URL</code> in the build. Check Algod / indexer URLs.
                 </div>
             ) : null}
             <NewsTicker />
             <PriceTicker />
+
+            {shipmentsSyncError && accountAddress ? (
+                <div
+                    style={{
+                        marginTop: 10,
+                        padding: '12px 16px',
+                        borderRadius: 10,
+                        background: 'rgba(127, 29, 29, 0.25)',
+                        border: '1px solid rgba(248, 113, 113, 0.45)',
+                        color: '#fecaca',
+                        fontSize: '0.82rem',
+                        lineHeight: 1.5,
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 12,
+                    }}
+                    role="alert"
+                >
+                    <span>
+                        <strong style={{ color: '#fca5a5' }}>Shipment list not synced:</strong> {shipmentsSyncError}
+                    </span>
+                    <button
+                        type="button"
+                        className="primary-btn"
+                        style={{ padding: '8px 14px', fontSize: '0.78rem', flexShrink: 0 }}
+                        onClick={async () => {
+                            setShipmentsSyncError(null);
+                            try {
+                                const [s, st] = await Promise.all([
+                                    axios.get(`${BACKEND_URL}/shipments`, { timeout: API_TIMEOUT }),
+                                    axios.get(`${BACKEND_URL}/stats`, { timeout: API_TIMEOUT }),
+                                ]);
+                                setShipments(sortShipmentsStable(Array.isArray(s.data) ? s.data : []));
+                                setStats(st.data);
+                                setToast('Shipments synced.');
+                            } catch {
+                                setShipmentsSyncError(
+                                    'Still failing — run backend on :8000; in dev, Vite proxies /api → VITE_API_URL (see frontend/.env).',
+                                );
+                            }
+                        }}
+                    >
+                        Retry now
+                    </button>
+                </div>
+            ) : null}
+
+            {healthSnapshot?.oracle_matches_app === false ? (
+                <div
+                    style={{
+                        marginTop: 10,
+                        padding: '12px 16px',
+                        borderRadius: 10,
+                        background: 'rgba(127, 29, 29, 0.28)',
+                        border: '1px solid rgba(248, 113, 113, 0.5)',
+                        color: '#fecaca',
+                        fontSize: '0.8rem',
+                        lineHeight: 1.55,
+                    }}
+                    role="alert"
+                >
+                    <strong style={{ color: '#fca5a5' }}>Oracle key mismatch:</strong> your <code style={{ fontSize: '0.72rem' }}>ORACLE_MNEMONIC</code>{' '}
+                    address does not match this app&apos;s on-chain oracle — <strong>register shipment</strong> and other oracle calls will fail. Put the{' '}
+                    <strong>deploy/creator</strong> mnemonic in <code style={{ fontSize: '0.72rem' }}>.env</code>, or run{' '}
+                    <code style={{ fontSize: '0.72rem' }}>python scripts/verify_algorand_env.py</code> for details.
+                    {healthSnapshot.oracle_address && healthSnapshot.on_chain_oracle_address ? (
+                        <div style={{ marginTop: 8, fontSize: '0.72rem', opacity: 0.95, wordBreak: 'break-all' }}>
+                            Env oracle: {healthSnapshot.oracle_address.slice(0, 10)}…{healthSnapshot.oracle_address.slice(-6)} · On-chain:{' '}
+                            {healthSnapshot.on_chain_oracle_address.slice(0, 10)}…{healthSnapshot.on_chain_oracle_address.slice(-6)}
+                        </div>
+                    ) : null}
+                </div>
+            ) : null}
+
+            {healthSnapshot ? (
+                <div
+                    style={{
+                        marginTop: 10,
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        gap: '10px 18px',
+                        padding: '8px 14px',
+                        borderRadius: 10,
+                        background: 'rgba(15, 23, 42, 0.55)',
+                        border: `1px solid ${healthSnapshot.algod_ok ? 'rgba(56, 189, 248, 0.12)' : 'rgba(248,113,113,0.35)'}`,
+                        fontSize: '0.68rem',
+                        color: '#94a3b8',
+                    }}
+                    aria-label="Backend readiness"
+                >
+                    <span>
+                        <strong style={{ color: '#cbd5e1' }}>Last round</strong> {healthSnapshot.last_round ?? '—'}
+                    </span>
+                    <span style={{ opacity: 0.4 }}>|</span>
+                    <span style={{ color: healthSnapshot.indexer_ok ? '#6ee7b7' : '#fbbf24' }}>
+                        Indexer {healthSnapshot.indexer_ok ? '●' : '○'}
+                    </span>
+                    <span style={{ color: healthSnapshot.db_ok ? '#6ee7b7' : '#f87171' }}>SQLite {healthSnapshot.db_ok ? '●' : '○'}</span>
+                    <span style={{ color: healthSnapshot.oracle_configured ? '#6ee7b7' : '#fbbf24' }}>
+                        Oracle keys {healthSnapshot.oracle_configured ? '●' : '○'}
+                    </span>
+                    <span style={{ color: healthSnapshot.gemini_configured ? '#6ee7b7' : '#94a3b8' }}>
+                        Gemini {healthSnapshot.gemini_configured ? '●' : '○'}
+                    </span>
+                </div>
+            ) : null}
 
             <div className={role === 'stakeholder' ? 'role-banner-stakeholder' : 'role-banner-supplier'}>
                 {role === 'stakeholder' ? 'Buyer view — protecting your escrow' : 'Supplier view — tracking your payments'}
@@ -901,6 +1112,13 @@ function MainApp() {
                         : 'Track incoming payments and your on-chain reputation'}
                 </p>
             </div>
+
+            <JuryPipelineSection />
+            <TrustFlowSection />
+            <TrustStackIllustration />
+            {accountAddress && !isLoading ? (
+                <DashboardPdfReport stats={stats} shipments={shipments} appId={appId} wallet={accountAddress} />
+            ) : null}
 
             {role === 'supplier' && accountAddress && !isLoading ? (
                 <section
@@ -967,9 +1185,9 @@ function MainApp() {
                     )}
                     <div style={{ fontSize: '0.72rem', color: '#64748b', marginBottom: 12 }}>
                         {supplierRep?.source === 'algorand_box_storage'
-                            ? 'Verified in Algorand box storage'
-                            : supplierRep?.source
-                              ? `Source: ${supplierRep.source}`
+                            ? 'Verified on Algorand'
+                            : typeof supplierRep?.score === 'number'
+                              ? 'Default score — no on-chain reputation box yet'
                               : null}
                     </div>
                     <div style={{ marginTop: 14, fontSize: '0.78rem', color: '#94a3b8' }}>
@@ -993,8 +1211,12 @@ function MainApp() {
                                 marginBottom: 8,
                             }}
                         >
-                            SUPPLIER PASSPORT
+                            ON-CHAIN PASSPORT · ARC-69
                         </div>
+                        <p style={{ fontSize: '0.72rem', color: '#64748b', margin: '0 0 12px', lineHeight: 1.5 }}>
+                            <strong style={{ color: '#94a3b8' }}>Shipments</strong> are registered by the <strong style={{ color: '#e2e8f0' }}>oracle</strong> (not your wallet).
+                            This button mints a separate <strong style={{ color: '#e2e8f0' }}>reputation NFT</strong> (NAVI-PASS) so buyers can verify your supplier profile on Lora — like a digital business card on Algorand.
+                        </p>
                         {passportAsa ? (
                             <div>
                                 <p style={{ fontSize: '0.82rem', color: '#e2e8f0', margin: '0 0 8px', lineHeight: 1.45 }}>
@@ -1006,16 +1228,16 @@ function MainApp() {
                                     rel="noreferrer"
                                     style={{ color: 'var(--accent)', fontWeight: 600, fontSize: '0.82rem' }}
                                 >
-                                    View passport on Lora ↗
+                                    Open passport on Lora (ARC-69 metadata) ↗
                                 </a>
                                 <p style={{ fontSize: '0.72rem', color: '#64748b', margin: '8px 0 0', lineHeight: 1.45 }}>
-                                    This ASA encodes your verified on-chain reputation metadata. Any buyer can verify it on an Algorand explorer.
+                                    On Lora, use the <strong style={{ color: '#94a3b8' }}>ARC-69</strong> tab to read JSON traits — proof the asset came from this app, not a screenshot.
                                 </p>
                             </div>
                         ) : (
                             <div>
                                 <p style={{ fontSize: '0.75rem', color: '#94a3b8', margin: '0 0 10px', lineHeight: 1.45 }}>
-                                    Mint an oracle-signed Supplier Passport NFT (ARC-69 metadata). You may need to opt in to the ASA in Pera to receive the transfer.
+                                    One-click mint: oracle pays fees and transfers the ASA to your wallet. Opt in to the asset in Pera if prompted, then refresh this page.
                                 </p>
                                 <button
                                     type="button"
@@ -1045,21 +1267,25 @@ function MainApp() {
                                             }
                                         } catch (err: unknown) {
                                             const detail = axios.isAxiosError(err) ? err.response?.data : undefined;
-                                            const msg =
-                                                typeof detail === 'object' && detail !== null && 'detail' in detail
-                                                    ? String((detail as { detail?: unknown }).detail)
-                                                    : 'Mint failed (API needs ORACLE_MNEMONIC and gas on TestNet).';
+                                            let msg = 'Mint failed (API needs ORACLE_MNEMONIC and gas on TestNet).';
+                                            if (detail && typeof detail === 'object' && 'detail' in detail) {
+                                                const d = (detail as { detail?: unknown }).detail;
+                                                if (typeof d === 'string') msg = d;
+                                                else if (Array.isArray(d))
+                                                    msg = d.map((x: { msg?: string }) => x.msg || '').filter(Boolean).join(' ') || msg;
+                                            }
                                             setToast(msg);
                                         } finally {
                                             setPassportMinting(false);
                                         }
                                     }}
                                 >
-                                    {passportMinting ? 'Minting…' : 'Mint Supplier Passport'}
+                                    {passportMinting ? 'Minting…' : 'Mint NAVI-PASS on TestNet'}
                                 </button>
                             </div>
                         )}
                     </div>
+                    <LoraVerificationGuide variant="compact" />
                 </section>
             ) : null}
 
@@ -1372,7 +1598,7 @@ function MainApp() {
                 )}
             </section>
 
-            {!isLoading && role === 'stakeholder' ? <JuryRiskHistoryChart /> : null}
+            {!isLoading ? <JuryRiskHistoryChart /> : null}
 
             {!isLoading && role === 'stakeholder' && focusVaultShip && (
                 <section className="card" style={{ marginTop: 16, padding: '18px 20px' }} aria-label="Escrow for selected shipment">
@@ -1412,18 +1638,29 @@ function MainApp() {
                                 : ''}
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
-                            <div style={{ fontSize: '0.7rem', fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                                Vault balance (on-chain)
-                            </div>
-                            <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#e2e8f0' }}>
-                                {((focusVaultShip.funds_locked_microalgo ?? 0) / 1e6).toFixed(4)}{' '}
-                                <span style={{ fontSize: '0.85rem', fontWeight: 500, color: '#94a3b8' }}>ALGO</span>
-                            </div>
-                            {escrowUsdText(focusVaultShip) ? (
-                                <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#6ee7b7', marginTop: 4 }}>
-                                    Escrow ≈ {escrowUsdText(focusVaultShip)}
-                                </div>
-                            ) : null}
+                            {(focusVaultShip.funds_locked_microalgo ?? 0) <= 0 ? (
+                                <>
+                                    <div style={{ fontSize: '0.95rem', fontWeight: 700, color: '#e2e8f0' }}>No escrow locked yet</div>
+                                    <div style={{ fontSize: '0.78rem', color: '#94a3b8', lineHeight: 1.45 }}>
+                                        Fund this shipment to lock ALGO in the smart contract (minimum 0.5 ALGO per deposit).
+                                    </div>
+                                </>
+                            ) : (
+                                <>
+                                    <div style={{ fontSize: '0.7rem', fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                                        Vault balance (on-chain)
+                                    </div>
+                                    <div style={{ fontSize: '1.5rem', fontWeight: 700, color: '#e2e8f0' }}>
+                                        {((focusVaultShip.funds_locked_microalgo ?? 0) / 1e6).toFixed(4)}{' '}
+                                        <span style={{ fontSize: '0.85rem', fontWeight: 500, color: '#94a3b8' }}>ALGO</span>
+                                    </div>
+                                    {escrowUsdText(focusVaultShip) ? (
+                                        <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#6ee7b7', marginTop: 4 }}>
+                                            Escrow ≈ {escrowUsdText(focusVaultShip)}
+                                        </div>
+                                    ) : null}
+                                </>
+                            )}
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                                 {vaultMilestones.map((m) => (
                                     <span
@@ -1449,6 +1686,10 @@ function MainApp() {
                             <div style={{ maxHeight: 120, overflowY: 'auto', fontSize: '0.78rem', color: '#cbd5e1' }}>
                                 <span style={{ color: '#64748b' }}>After you deposit, a confirmation banner appears with a Lora link.</span>
                             </div>
+                            <p style={{ fontSize: '0.72rem', color: '#94a3b8', lineHeight: 1.45, margin: '0 0 8px' }}>
+                                <strong style={{ color: '#cbd5e1' }}>Why Pera?</strong> Escrow moves <em>your</em> TestNet ALGO into the contract — only your wallet can authorize that (Algokit + Pera; not VibeKit).{' '}
+                                <strong style={{ color: '#cbd5e1' }}>Register shipment</strong> is server-signed with the oracle key — no wallet popup.
+                            </p>
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
                                 <button
                                     type="button"
@@ -1506,8 +1747,13 @@ function MainApp() {
                     >
                         <Package size={32} color="#38bdf8" style={{ marginBottom: 12 }} />
                         <div style={{ fontWeight: 700, fontSize: '1rem', color: '#f1f5f9', marginBottom: 8 }}>No shipments registered yet.</div>
-                        <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: '0 0 18px', maxWidth: 400, marginLeft: 'auto', marginRight: 'auto' }}>
-                            Register a shipment on Algorand to see it here.
+                        <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: '0 0 18px', maxWidth: 520, marginLeft: 'auto', marginRight: 'auto' }}>
+                            Use <strong style={{ color: '#e2e8f0' }}>Register shipment</strong> in the header (oracle signs on the server), or run{' '}
+                            <code style={{ color: '#e2e8f0' }}>python seed_blockchain.py</code> with a funded oracle. The API must be on port 8000.{' '}
+                            <Link to="/verify" style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                                Verify by shipment ID
+                            </Link>
+                            .
                         </p>
                         <button type="button" className="primary-btn" onClick={() => setRegisterModal(true)}>
                             Register shipment
@@ -1786,7 +2032,9 @@ function MainApp() {
                                     <strong>{ship.supplier_reputation_score}</strong>/100
                                     {ship.supplier_reputation_source === 'algorand_box_storage' ? (
                                         <span style={{ color: '#15803d', marginLeft: 6 }}>(Verified on Algorand)</span>
-                                    ) : null}
+                                    ) : (
+                                        <span style={{ color: '#64748b', marginLeft: 6 }}>(Default — no deliveries recorded on-chain yet)</span>
+                                    )}
                                 </div>
                             ) : null}
 
@@ -1904,33 +2152,35 @@ function MainApp() {
                                 </div>
                             )}
 
-                            {/* Stats: Live Sensor Feed (Supplier) or Weather (Stakeholder) */}
+                            {/* Open-Meteo live weather at destination (same for buyer and supplier) */}
                             <div style={{ fontSize: '0.65rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#94a3b8', marginBottom: 8 }}>
-                                Telemetry &amp; weather
+                                Route conditions
                             </div>
                             <div style={{ display: 'flex', gap: 16, marginBottom: 14, flexWrap: 'wrap' }}>
-                                {role === 'supplier' ? (
-                                    <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-                                        <div>
-                                            <div style={{ color: '#9ca3af', fontSize: '0.65rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Live Sensor Feed</div>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: '0.8rem', color: '#374151', marginTop: 2 }}>
-                                                <span style={{ fontFamily: 'monospace' }}>Temp {(liveTelemetry[ship.shipment_id]?.temp ?? ship.weather?.temperature ?? 22).toFixed(1)}°C</span>
-                                                <span style={{ color: '#e5e7eb' }}>|</span>
-                                                <span style={{ fontFamily: 'monospace' }}>Hum {(liveTelemetry[ship.shipment_id]?.humidity ?? 55)}%</span>
-                                                <span style={{ color: '#e5e7eb' }}>|</span>
-                                                <span style={{ fontFamily: 'monospace' }}>Vib {(liveTelemetry[ship.shipment_id]?.vibration ?? 2).toFixed(1)}g</span>
-                                            </div>
-                                            <div style={{ fontSize: '0.6rem', color: '#16a34a', marginTop: 2 }}>• Pulsing every 3s</div>
-                                        </div>
-                                    </div>
-                                ) : ship.weather && (
+                                {ship.weather &&
+                                typeof ship.weather === 'object' &&
+                                (ship.weather.temp_c != null || ship.weather.temperature != null) ? (
                                     <div>
-                                        <div style={{ color: '#9ca3af', fontSize: '0.7rem', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Weather</div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: '0.875rem', color: '#374151' }}>
-                                            <Cloud size={13} color="#6b7280" /> {ship.weather.temperature}°C / {ship.weather.precipitation}mm
+                                        <div style={{ color: '#9ca3af', fontSize: '0.65rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                            Live weather at destination (Open-Meteo)
                                         </div>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.8rem', color: '#374151', marginTop: 4 }}>
+                                            <Cloud size={13} color="#6b7280" />
+                                            {ship.weather.temp_c != null
+                                                ? `${Number(ship.weather.temp_c).toFixed(1)}°C`
+                                                : ship.weather.temperature != null
+                                                  ? `${Number(ship.weather.temperature).toFixed(1)}°C`
+                                                  : '—'}
+                                            {ship.weather.precipitation_mm != null || ship.weather.precipitation != null
+                                                ? ` · precip ${ship.weather.precipitation_mm ?? ship.weather.precipitation} mm`
+                                                : ''}
+                                            {ship.weather.wind_kmh != null ? ` · wind ${ship.weather.wind_kmh} km/h` : ''}
+                                        </div>
+                                        {ship.weather.description ? (
+                                            <div style={{ fontSize: '0.65rem', color: '#64748b', marginTop: 4 }}>{String(ship.weather.description)}</div>
+                                        ) : null}
                                     </div>
-                                )}
+                                ) : null}
                                 <div>
                                     <div style={{ color: '#9ca3af', fontSize: '0.7rem', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Events</div>
                                     <div style={{
@@ -2036,6 +2286,8 @@ function MainApp() {
                             {role === 'stakeholder' && jury && !terminalOpen ? (
                                 <WitnessButton
                                     shipmentId={ship.shipment_id}
+                                    shipmentStatus={ship.stage}
+                                    appId={appId}
                                     hasVerdict={!!(jury.on_chain_tx_id || ship.last_jury)}
                                     walletAddress={accountAddress}
                                     onConnectRequest={handleConnectWallet}
@@ -2379,6 +2631,14 @@ function MainApp() {
                 </div>
             )}
 
+            <UserProfileModal
+                open={profileModalOpen}
+                onClose={() => setProfileModalOpen(false)}
+                address={accountAddress}
+                role={role}
+                appId={appId}
+            />
+
             {/* ── Register shipment modal ─────────────────────── */}
             {registerModal && (
                 <div className="modal-backdrop">
@@ -2391,7 +2651,7 @@ function MainApp() {
                         </div>
                         <p style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: 12, lineHeight: 1.45 }}>
                             The smart contract only accepts <strong>register_shipment</strong> from the oracle account. This form calls your backend; the server signs with{' '}
-                            <code style={{ fontSize: '0.72rem' }}>ORACLE_MNEMONIC</code>. Use a <strong>new</strong> ID (e.g. SHIP_TEST_001) — demo IDs may already exist.
+                            <code style={{ fontSize: '0.72rem' }}>ORACLE_MNEMONIC</code> — <strong>no Pera prompt</strong>. Use a <strong>new</strong> ID (e.g. SHIP_TEST_001) — demo IDs may already exist.
                         </p>
                         <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: 4 }}>Shipment ID</label>
                         <input
@@ -2428,7 +2688,20 @@ function MainApp() {
                             style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #e5e7eb', marginBottom: 16, fontSize: '0.85rem', fontFamily: 'ui-monospace, monospace' }}
                         />
                         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                            <button type="button" onClick={() => setRegisterModal(false)} style={{ padding: '10px 16px' }}>
+                            <button
+                                type="button"
+                                onClick={() => setRegisterModal(false)}
+                                style={{
+                                    padding: '10px 16px',
+                                    borderRadius: 8,
+                                    cursor: 'pointer',
+                                    background: 'rgba(148, 163, 184, 0.12)',
+                                    border: '1px solid #475569',
+                                    color: '#e2e8f0',
+                                    fontWeight: 600,
+                                    fontSize: '0.875rem',
+                                }}
+                            >
                                 Cancel
                             </button>
                             <button type="button" className="primary-btn" disabled={registerBusy} onClick={() => void handleRegisterShipment()}>
@@ -2475,8 +2748,8 @@ function MainApp() {
             {toast && (
                 <div style={{
                     position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
-                    padding: '12px 24px', borderRadius: 8, background: toast.includes('Failed') ? '#fef2f2' : '#f0fdf4',
-                    color: toast.includes('Failed') ? '#dc2626' : '#16a34a', fontWeight: 600, fontSize: '0.875rem',
+                    padding: '12px 24px', borderRadius: 8, background: isErrorToastMessage(toast) ? '#fef2f2' : '#f0fdf4',
+                    color: isErrorToastMessage(toast) ? '#dc2626' : '#16a34a', fontWeight: 600, fontSize: '0.875rem',
                     boxShadow: '0 4px 12px rgba(0,0,0,0.15)', zIndex: 2000,
                 }}>
                     {toast}
