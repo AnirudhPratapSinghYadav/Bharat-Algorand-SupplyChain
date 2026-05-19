@@ -1,7 +1,8 @@
 /**
  * Legacy demo API host — often cold/offline on free tiers. For production, set `VITE_API_URL` to your deployed `app.py`.
  */
-export const PUBLIC_DEFAULT_API_URL = 'https://navi-trust-api.onrender.com';
+/** Fallback when `VITE_API_URL` is unset in the Vercel build (must be a live `app.py` root, no trailing slash). */
+export const PUBLIC_DEFAULT_API_URL = 'https://bharat-algorand-supplychain.onrender.com';
 
 /**
  * API base for axios/fetch.

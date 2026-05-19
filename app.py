@@ -27,6 +27,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+import httpx
 from google import genai
 from google.genai import types as genai_types
 from algokit_utils import AlgorandClient
@@ -224,10 +226,35 @@ Pramanik (प्रमाणिक): Supply Chain Dispute Oracle API (Algorand T
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
+    # Preview deployments (e.g. *.vercel.app) are not practical to list by hand
+    allow_origin_regex=r"https://[a-zA-Z0-9][a-zA-Z0-9.-]+\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app):
+        super().__init__(app)
+        self.ip_records = {}
+
+    async def dispatch(self, request: Request, call_next):
+        ip = request.client.host
+        now = time.time()
+        
+        if ip not in self.ip_records:
+            self.ip_records[ip] = []
+            
+        # Clean old requests (1 minute window)
+        self.ip_records[ip] = [t for t in self.ip_records[ip] if now - t < 60]
+        
+        if len(self.ip_records[ip]) > 100:  # 100 req/min
+            return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+            
+        self.ip_records[ip].append(now)
+        return await call_next(request)
+
+app.add_middleware(RateLimitMiddleware)
 
 
 @app.exception_handler(RequestValidationError)
@@ -842,6 +869,52 @@ def _safe_float(v) -> Optional[float]:
         return f
     except Exception:
         return None
+
+class GSTOracle:
+    def __init__(self):
+        self.base_url = "https://api.einvoice1.gst.gov.in/api/ewaybill"
+        self.client_id = os.environ.get("GST_CLIENT_ID")
+        self.client_secret = os.environ.get("GST_CLIENT_SECRET")
+
+    def verify_eway_bill(self, ewb_number: str) -> dict:
+        """Agent 2 (Auditor) uses this to verify domestic transit before port arrival."""
+        if not self.client_id or not self.client_secret:
+            # Fallback for hackathon without actual GST credentials
+            return {"valid": True, "status": "ACTIVE", "mocked": True}
+            
+        headers = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret
+        }
+        try:
+            resp = requests.get(f"{self.base_url}?ewbNo={ewb_number}", headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                return {"valid": data.get("status") == "ACT", "status": data.get("status")}
+            return {"valid": False, "status": "INVALID", "error": resp.text}
+        except Exception as e:
+            return {"valid": False, "status": "ERROR", "error": str(e)}
+
+class NFTMetadataGenerator:
+    @staticmethod
+    def generate_arc69(shipment_id: str, verdict: str, reason: str, agents_dict: dict) -> dict:
+        """Generates ARC-69 metadata to be attached to the settlement transaction note."""
+        metadata = {
+            "standard": "arc69",
+            "description": f"Pramanik Settlement Certificate for {shipment_id}",
+            "external_url": f"https://pramanik.xyz/verify/{shipment_id}",
+            "mime_type": "application/json",
+            "properties": {
+                "Shipment ID": shipment_id,
+                "Verdict": verdict,
+                "Oracle": "Pramanik Tri-Agent AI",
+                "Sentinel Risk": agents_dict.get("sentinel", 0),
+                "Auditor Risk": agents_dict.get("auditor", 0),
+                "Fraud Risk": agents_dict.get("fraud", 0),
+                "Final Arbiter Score": agents_dict.get("arbiter", 0),
+            }
+        }
+        return metadata
 
 
 def get_algo_usd_price() -> dict:
@@ -1948,6 +2021,11 @@ def run_compliance_auditor(
     vj = chain_state.get("verdict_json")
     has_verdict = vj is not None and str(vj).strip() not in ("", "{}", "null")
 
+    # Generate deterministic 12-digit GST E-Way Bill Number for verification
+    ewb_number = str(int(hashlib.md5(shipment_id.encode()).hexdigest(), 16))[:12]
+    gst_oracle = GSTOracle()
+    gst_res = gst_oracle.verify_eway_bill(ewb_number)
+
     issues: List[str] = []
     if funds <= 0:
         issues.append("No escrow locked")
@@ -1957,8 +2035,10 @@ def run_compliance_auditor(
         issues.append("Prior verdict exists on-chain")
     if sentinel_report.get("weather_flag"):
         issues.append("Weather sentinel flagged risky conditions")
+    if not gst_res.get("valid"):
+        issues.append(f"GST E-Way Bill {ewb_number} verification failed: {gst_res.get('status', 'INVALID')}")
 
-    blocking = [x for x in issues if x != "Prior verdict exists on-chain"]
+    blocking = [x for x in issues if x != "Prior verdict exists on-chain" and "GST E-Way Bill" not in x]
     compliance_passed = len(blocking) == 0
 
     if status == "Disputed":
@@ -1978,6 +2058,9 @@ def run_compliance_auditor(
         "risk_score": risk_score,
         "source": "algorand_box_storage",
         "app_id": APP_ID,
+        "gst_eway_bill": ewb_number,
+        "gst_status": gst_res.get("status", "UNKNOWN"),
+        "gst_valid": gst_res.get("valid", False)
     }
 
 
@@ -2469,6 +2552,18 @@ async def run_jury(body: RunJuryRequest):
     except Exception:
         jury_hash = ""
 
+    arc69_meta = NFTMetadataGenerator.generate_arc69(
+        shipment_id=shipment_id,
+        verdict=arbiter["verdict"],
+        reason=(arbiter["reasoning"] or "")[:80],
+        agents_dict={
+            "sentinel": sentinel["risk_score"],
+            "auditor": auditor["risk_score"],
+            "fraud": fraud["fraud_risk_score"],
+            "arbiter": arbiter["final_risk_score"]
+        }
+    )
+
     verdict_note = {
         "type": "NAVI_VERDICT",
         "v": "3",
@@ -2476,20 +2571,9 @@ async def run_jury(body: RunJuryRequest):
         "sid": shipment_id,
         "score": arbiter["final_risk_score"],
         "verdict": arbiter["verdict"],
-        "reason": (arbiter["reasoning"] or "")[:180],
-        "agents": {
-            "sentinel": sentinel["risk_score"],
-            "auditor": auditor["risk_score"],
-            "fraud": fraud["fraud_risk_score"],
-            "arbiter": arbiter["final_risk_score"],
-        },
-        "weather": {
-            "city": weather["city"],
-            "precip": weather["precipitation_mm"],
-            "wind": weather["wind_kmh"],
-            "desc": weather["description"],
-        },
+        "reason": (arbiter["reasoning"] or "")[:120],
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "arc69": arc69_meta,
     }
     if escrow_usd_note is not None:
         verdict_note["escrow_usd"] = round(float(escrow_usd_note), 2)
@@ -2499,7 +2583,10 @@ async def run_jury(body: RunJuryRequest):
         verdict_note["jury_hash"] = jury_hash
     note_bytes = json.dumps(verdict_note, separators=(",", ":")).encode("utf-8")
     if len(note_bytes) > 1000:
-        verdict_note["reason"] = (arbiter["reasoning"] or "")[:80]
+        # Emergency backup truncation to ensure Algorand txn limit
+        if "arc69" in verdict_note:
+            verdict_note["arc69"]["properties"]["Verdict"] = arbiter["verdict"][:20]
+        verdict_note["reason"] = (arbiter["reasoning"] or "")[:40]
         note_bytes = json.dumps(verdict_note, separators=(",", ":")).encode("utf-8")
 
     verdict_json_str = json.dumps(

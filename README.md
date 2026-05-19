@@ -2,7 +2,9 @@
 
 > Buyer locks ALGO. 4-agent AI jury decides. Verdict is permanent on Algorand.
 
-**Live Demo:** https://vercel.com/anirudhpratapsinghyadavs-projects/bharat-algorand-supply-chain
+**New here?** Read **[BUILDERS.md](./BUILDERS.md)** — full story for builders: *why* this exists, *what* we built, *how* the stack fits together (escrow, jury, oracle, wallet, deploy), and *what* engineering choices matter when you fork the repo.
+
+**Live Demo:** https://pramanik.vercel.app
 **API:** https://navi-trust-api.onrender.com  
 **Contract on Lora:** https://lora.algokit.io/testnet/application/759018740  
 **On-chain proof:** [LORA_PROOF.md](./LORA_PROOF.md)
