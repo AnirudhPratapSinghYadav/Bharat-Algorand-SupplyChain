@@ -1,155 +1,277 @@
-# Pramanik (प्रमाणिक) — Supply Chain Dispute Oracle on Algorand
+# Pramanik (प्रमाणिक) — Dispute Oracle for Indian Exporters
 
-> Buyer locks ALGO. 4-agent AI jury decides. Verdict is permanent on Algorand.
+**Pramanik** means *verified* and *authentic*. An MSME exporter locks **ALGO escrow** on Algorand; a **four-agent AI jury** reviews weather, compliance, and fraud; the **oracle** writes an immutable verdict; escrow **releases or stays frozen**—with a **Settlement Certificate** you can open on [Lora](https://lora.algokit.io).
 
-**New here?** Read **[BUILDERS.md](./BUILDERS.md)** — full story for builders: *why* this exists, *what* we built, *how* the stack fits together (escrow, jury, oracle, wallet, deploy), and *what* engineering choices matter when you fork the repo.
-
-**Live Demo:** https://pramanik.vercel.app
-**API:** https://navi-trust-api.onrender.com  
-**Contract on Lora:** set `APP_ID` / `VITE_APP_ID` after deploy, then open `{lora_base_url}/application/{APP_ID}` (see `config.json` `lora_base_url`, often `https://lora.algokit.io/testnet`).  
-**On-chain proof:** [LORA_PROOF.md](./LORA_PROOF.md)
-
-### Deploy frontend (Vercel)
-
-- **Root directory:** set to `frontend` *or* deploy the repo root (root `vercel.json` builds `frontend/dist`).
-- **Env (build) — required for a working dashboard:** set **`VITE_API_URL`** to your live FastAPI base URL (e.g. `https://your-service.onrender.com` with **no** trailing slash). The public demo URL bundled as fallback is often cold or removed; do not rely on it for demos you care about.
-- Also set **`VITE_APP_ID`** (and optionally `VITE_ALGORAND_NODE` / indexer URLs) to match TestNet and your deployed contract.
-- Add your Vercel origin (`https://<project>.vercel.app`) to the API **CORS** allowlist (`CORS_EXTRA_ORIGINS` on the server or `app.py`).
-- **Backend:** host `app.py` (Render/Railway/Fly) with `ORACLE_MNEMONIC`, `APP_ID`, and ARC56 artifacts consistent with the chain.
-
----
-
-## What It Solves
-
-Supply chain disputes cost billions annually in delayed payments and litigation. Pramanik provides:
-
-- **Trust-minimized escrow** — ALGO held by smart contract code, not a platform
-- **AI-powered evidence review** — four independent agents analyze weather, compliance, and fraud
-- **Immutable verdict** — decision written to an Algorand transaction note
-- **Atomic settlement** — escrow payment + NFT certificate in one atomic group (where the contract supports it)
-- **Public verification** — anyone verifies any shipment at `/verify/{id}` without login
-
----
-
-## Why Algorand
-
-| Algorand Feature | How Pramanik Uses It |
+| | |
 |---|---|
-| Box Storage | Per-shipment state: status, funds, verdict, risk score, route, certificate |
-| Atomic Groups | Settlement: payment to supplier + PRAMANIK-CERT NFT mint in one transaction |
-| ARC-69 NFTs | Unique settlement certificate per shipment (total supply: 1) |
-| Fast Finality | Jury verdict confirms in seconds on TestNet |
-| AlgoKit ARC-56 | Typed smart contract client, verified ABI on Lora |
-| Low Fees | Oracle writes transactions per shipment at negligible cost |
+| **Dashboard** | React app in `frontend/` |
+| **API** | FastAPI `app.py` |
+| **Contract** | Puya app in `smart_contracts/navi_trust/` |
+| **Config** | `config.json` + `.env` (no hardcoded App IDs in code) |
+
+**Live app:** [pramanik.vercel.app](https://pramanik.vercel.app) · **Lora (current TestNet app):** [Application 759052600](https://lora.algokit.io/testnet/application/759052600)
 
 ---
 
-## 4-Agent AI Jury
+## The story (60 seconds)
 
-Each agent runs sequentially. Live Open-Meteo weather and real box reads are required; deterministic fallbacks apply only when an API is unreachable.
+Rajesh in Mumbai ships cotton to Rotterdam. The buyer locks **2 ALGO** in a smart contract—not in Pramanik’s database. Mid-voyage, weather spikes near the port; the buyer hesitates to pay.
 
+Instead of months of email dispute:
+
+1. **Register** the corridor on-chain (oracle-signed).
+2. **Fund** escrow from the buyer’s wallet (Pera).
+3. **Request Settlement Review** — four AI agents run in sequence; a **SHA-256 jury hash** is anchored in a transaction note.
+4. **Verdict** lands on-chain (`SETTLE`, `HOLD`, or dispute path).
+5. **Release Payment** — supplier receives ALGO; a **PRAMANIK-CERT** ASA is minted in the same atomic flow.
+6. Anyone can **Verify** the shipment at `/verify/{id}` without logging in.
+
+Rajesh gets a **Telegram** message: *Mumbai → Rotterdam \| Cotton Fabric \| ≈ ₹5,900 escrow · Payment Released* — not a raw `PRM-EX-…` code.
+
+That is the product narrative we built for **AlgoBharat**: trust-minimized escrow + explainable AI + public proofs.
+
+---
+
+## End-to-end flow
+
+```mermaid
+flowchart TB
+    subgraph People
+        B[Buyer / Stakeholder wallet]
+        S[Supplier wallet]
+        O[Oracle account]
+    end
+
+    subgraph OffChain
+        UI[Pramanik Dashboard]
+        API[FastAPI Oracle API]
+        AI[4-Agent Jury Gemini]
+        TG[Telegram alerts]
+        BOT[Pramanik Bot text + voice]
+    end
+
+    subgraph OnChain["Algorand TestNet — App on Lora"]
+        SC[NaviTrust smart contract]
+        BOX[(Box storage per shipment)]
+        LOG[ARC-28 ShipmentEvent logs]
+    end
+
+    B -->|Register + fund escrow| UI
+    UI --> API
+    API -->|register_shipment fund_shipment| SC
+    SC --> BOX
+    SC --> LOG
+
+    UI -->|Request Settlement Review| API
+    API --> AI
+    AI -->|record_verdict + notes| SC
+    API --> TG
+    API --> BOT
+
+    API -->|settle_shipment| SC
+    SC -->|Pay supplier + mint cert| S
+
+    O -.->|signs all oracle txs| API
 ```
-Weather Sentinel   → Live Open-Meteo data for destination city
-       ↓
-Compliance Auditor → Reads Algorand box storage
-       ↓
-Fraud Detector     → Supplier history + anomaly signals
-       ↓
-Chief Arbiter      → Final binding verdict (weighted score)
-       ↓
-SHA-256 Hash       → Canonical hash; witness note + verdict note on-chain
-       ↓
-record_verdict()   → Oracle ABI call writes verdict + note
+
+### Shipment lifecycle (on-chain)
+
+```mermaid
+stateDiagram-v2
+    [*] --> In_Transit: register_shipment\nARC-28 REGISTERED
+    In_Transit --> In_Transit: fund_shipment\nARC-28 FUNDED
+    In_Transit --> Disputed: record_verdict\nrisk high\nARC-28 VERDICT
+    In_Transit --> In_Transit: record_verdict\ncleared
+    Disputed --> In_Transit: new verdict
+    In_Transit --> Settled: settle_shipment\nARC-28 SETTLED
+    In_Transit --> VOID: void_shipment\nARC-28 VOID
+    Disputed --> VOID: void_shipment
+    Settled --> [*]
+    VOID --> [*]
+```
+
+### AI jury pipeline
+
+```mermaid
+flowchart LR
+    W[Weather Sentinel\nOpen-Meteo] --> C[Compliance Auditor\nreads boxes]
+    C --> F[Fraud Detector\nsupplier history]
+    F --> A[Chief Arbiter\nSETTLE / HOLD / DISPUTE]
+    A --> H[SHA-256 jury hash]
+    H --> N[Algorand txn note\n+ record_verdict]
 ```
 
 ---
 
-## Verifiable Jury Hash
+## Why Lora shows the name **NaviTrust**
 
-Every verdict includes a SHA-256 hash of canonical inputs and outputs. Compare with on-chain notes via:
+The **product** is **Pramanik**. The **on-chain application label** in Lora and ARC-56 metadata is still **NaviTrust** because that is the compiled Puya contract class name (`class NaviTrust` in `smart_contracts/navi_trust/contract.py`). Algorand explorers read that ABI name—it does not affect escrow logic or certificates (**PRAMANIK-CERT** / **PCERT** on settle).
 
-```bash
-curl -X POST https://navi-trust-api.onrender.com/verify-hash \
-  -H "Content-Type: application/json" \
-  -d "{\"shipment_id\": \"PRM-EX-MUM-RDM-001\"}"
-```
+| What you see | Name |
+|--------------|------|
+| Website, Telegram, UI | **Pramanik** |
+| Lora application title | **NaviTrust** (contract class) |
+| Settlement NFT | **PRAMANIK-CERT** |
 
----
+To rename the Lora app to “Pramanik” you would redeploy with a renamed contract class and update `APP_ID` everywhere—a planned v2, not required for demos.
 
-## Smart Contract
-
-**App ID:** set via `APP_ID` in `.env` / hosting (must match your deployed NaviTrust). **Network:** Algorand Testnet (or match `ALGO_NETWORK`).  
-**Language:** Puya (AlgoKit) | **ABI:** ARC-56
-
-| Method | What it does |
-|---|---|
-| `register_shipment` | Oracle registers shipment, writes box storage |
-| `fund_shipment` | Buyer locks ALGO via atomic payment + app call |
-| `record_verdict` | Oracle writes verdict to boxes + transaction note |
-| `settle_shipment` | Atomic: pay supplier + mint PRAMANIK-CERT NFT |
-| `pause_oracle` / `unpause_oracle` | Oracle pauses or resumes write paths that honor `is_paused` |
-| `get_required_mbr` | Read-only: conservative MBR estimate for registration |
-| `get_global_stats` | Read-only: totals, dispute count, pause flag |
-
-Box prefixes: `st_` status · `fn_` funds · `vd_` verdict · `ce_` certificate · `rp_` reputation
+**Open logs:** [lora.algokit.io/testnet/application/759052600](https://lora.algokit.io/testnet/application/759052600) → **Logs** tab → `ShipmentEvent` (REGISTERED, FUNDED, VERDICT, SETTLED, VOID).
 
 ---
 
-## Public API
+## What to fund (TestNet)
 
-No authentication required for read endpoints:
+| Account | Who | How much | Why |
+|---------|-----|----------|-----|
+| **Oracle** (`ORACLE_MNEMONIC`) | You, via faucet | **≥ 5 ALGO** recommended | Registers lanes, runs jury, settles, pays fees |
+| **Buyer wallet** | Demo stakeholder (Pera) | **≥ 1 ALGO** per fund click | Locks escrow into contract (`fund_shipment`) |
+| **Contract app** | Auto on deploy | **~0.5 ALGO** | Box MBR + opcode budget (`full_deploy.py` funds this) |
 
+**Faucet:** https://bank.testnet.algorand.network/  
+Paste the address from API startup: `Oracle: GUZQQLW…`
+
+Copy `.env.example` → `.env` and set:
+
+```env
+ORACLE_MNEMONIC=your 25 words
+APP_ID=759052600
+GEMINI_API_KEY=...
+SEED_MIN_ORACLE_MICRO=2000000
 ```
-GET  /verify/{shipment_id}         — Full on-chain proof for any shipment
-GET  /dispute-feed                 — Active disputes + recent jury rows
-GET  /price                        — Live ALGO/USD (CoinGecko)
-POST /verify-hash                  — Verify jury hash vs on-chain witness
-GET  /witnesses/{shipment_id}      — On-chain witnesses for a shipment
-GET  /supplier/{addr}/reputation   — Supplier reputation score
-```
 
-These routes are intended as reusable building blocks for supply chain, trade finance, or insurance integrations on Algorand.
+Frontend: `cp frontend/.env.example frontend/.env` — set `VITE_APP_ID` to the same `APP_ID`.
 
 ---
 
-## Run Locally
+## Quick start
 
-```bash
-cp .env.example .env   # set GEMINI_API_KEY, ORACLE_MNEMONIC, APP_ID
+```powershell
+# 1. Config
+copy .env.example .env
+# edit .env — ORACLE_MNEMONIC, GEMINI_API_KEY, APP_ID
+
+copy frontend\.env.example frontend\.env
+
+# 2. Backend
 pip install -r requirements.txt
-python -m uvicorn app:app --host 127.0.0.1 --port 8000
+python -m uvicorn app:app --reload
 
-python seed_blockchain.py   # optional: on-chain demo lanes (requires funded oracle)
-
+# 3. Frontend (new terminal)
 cd frontend
 npm install
 npm run dev
 ```
 
----
+Open **http://127.0.0.1:5173** · API docs **http://127.0.0.1:8000/docs**
 
-## Demo Shipments (TestNet)
+### Optional: fresh deploy + seed
 
-| Shipment | Route | Role in demo |
-|---|---|---|
-| PRM-EX-MUM-RDM-001 | Mumbai → Rotterdam | In transit — run AI jury |
-| PRM-EX-CHN-SGP-002 | Chennai → Singapore | Disputed — escrow frozen |
-| PRM-EX-DEL-DXB-003 | Delhi → Dubai | Settled — certificate |
+```powershell
+# Needs ≥ 2 ALGO on oracle
+python scripts/full_deploy.py
 
-IDs are listed in `config.json` under `demo_shipments` (returned by `GET /config`) and used by `seed_blockchain.py`.
+# Or seed existing APP_ID (needs ≥ SEED_MIN_ORACLE_MICRO on oracle)
+python seed_blockchain.py
+```
 
-See [LORA_PROOF.md](./LORA_PROOF.md) for explorer links after seeding.
+### Smoke tests
 
----
-
-## Tech Stack
-
-- **Blockchain:** Algorand Testnet, AlgoKit, Puya, ARC-56, ARC-69
-- **AI:** Google Gemini (via `google-genai`, multi-model fallback chain)
-- **Backend:** FastAPI, py-algorand-sdk, algokit-utils
-- **Frontend:** React 18, TypeScript, Vite, TanStack Query, Pera Wallet
-- **Data:** Open-Meteo (weather), CoinGecko (ALGO spot)
+```powershell
+python scripts/test_telegram.py
+python scripts/test_elevenlabs.py
+pytest tests/unit -q
+```
 
 ---
 
-*Built for AlgoBharat Hackathon Round 2.*
+## Architecture (layers)
+
+```mermaid
+flowchart TB
+    subgraph Client
+        FE[React + Vite + Pera]
+    end
+    subgraph Server
+        APP[app.py]
+        CFG[config.json + pramanik_config]
+        SVC[services: telegram cron_log labels]
+        DB[(SQLite shipments)]
+    end
+    subgraph Chain
+        ALGO[Algorand TestNet]
+        NT[NaviTrust app boxes + ARC-28]
+    end
+    FE -->|REST WS| APP
+    APP --> CFG
+    APP --> SVC
+    APP --> DB
+    APP -->|algokit-utils| ALGO
+    ALGO --> NT
+```
+
+| Layer | Key files |
+|-------|-----------|
+| Contract | `smart_contracts/navi_trust/contract.py` |
+| Chain client | `algorand_client.py` |
+| API | `app.py` |
+| Config | `config.json`, `pramanik_config.py` |
+| UI | `frontend/src/App.tsx` |
+| Deploy | `scripts/full_deploy.py`, `deploy.sh` |
+
+Deeper builder narrative: **[BUILDERS.md](./BUILDERS.md)** · On-chain proof checklist: **[LORA_PROOF.md](./LORA_PROOF.md)**
+
+---
+
+## Features map
+
+| Feature | Endpoint / route |
+|---------|------------------|
+| Public verify | `GET /verify/{shipment_id}` |
+| Run jury | `POST /run-jury` |
+| Register | `POST /register-shipment` |
+| Void (oracle) | `POST /void/{shipment_id}` |
+| Export CSV | `GET /export/shipments.csv` |
+| Live feed | WebSocket `/ws/live` |
+| Auto-jury log | `GET /cron-log` |
+| Pramanik Bot | `/pramanik-bot` + `POST /navibot` |
+| ElevenLabs | `GET /elevenlabs/config` |
+| Telegram test | `POST /admin/test-telegram` |
+
+---
+
+## Demo lanes (`config.json`)
+
+| ID | Human label |
+|----|-------------|
+| PRM-EX-MUM-RDM-001 | Mumbai → Rotterdam \| Cotton Fabric |
+| PRM-EX-CHN-SGP-002 | Chennai → Singapore \| Spices |
+| PRM-EX-DEL-DXB-003 | Delhi → Dubai \| Electronics |
+
+---
+
+## Deploy frontend (Vercel)
+
+- Root or `frontend/` — set **`VITE_API_URL`** to your FastAPI host (no trailing slash).
+- **`VITE_APP_ID`** = same as backend `APP_ID`.
+- Add Vercel origin to **`CORS_EXTRA_ORIGINS`** on the API.
+
+---
+
+## Tech stack
+
+- **Algorand:** TestNet, AlgoKit, Puya, ARC-56, ARC-28 events, ARC-69 certificates  
+- **AI:** Google Gemini (`google-genai`)  
+- **Backend:** FastAPI, SQLite, APScheduler (auto-jury)  
+- **Frontend:** React 18, TypeScript, Vite, TanStack Query, Pera Wallet  
+- **Integrations:** Telegram, ElevenLabs ConvAI, Open-Meteo, CoinGecko  
+
+---
+
+## Repo hygiene
+
+Do **not** commit: `.env`, `frontend/.env`, `*.db`, `cron_log.json`, `__pycache__/`, `frontend/dist/`.  
+Templates: `.env.example`, `frontend/.env.example`.
+
+---
+
+*Built for AlgoBharat — Pramanik product, NaviTrust on-chain contract name.*

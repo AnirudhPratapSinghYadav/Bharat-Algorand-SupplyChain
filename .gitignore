@@ -34,3 +34,11 @@ build/
 tmp_reenc.bin
 tmp_reenc_b64.txt
 shipment_register_log.json
+cron_log.json
+fraud_scores.json
+.pytest_cache/
+frontend/.env
+*.db-journal
+
+# Build artifacts (regenerate with algokit / npm)
+frontend/dist/
