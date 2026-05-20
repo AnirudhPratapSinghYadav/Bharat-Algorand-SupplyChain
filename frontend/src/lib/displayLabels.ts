@@ -170,7 +170,7 @@ export const GLOBAL_DESTINATIONS = [
   'London',
 ] as const;
 
-export const COMMODITY_TYPES = ['Textiles', 'Spices', 'Electronics', 'Handicrafts', 'Other'] as const;
+export const COMMODITY_TYPES = ['Cotton Fabric', 'Spices', 'Electronics', 'Handicrafts'] as const;
 
 export function buildShipmentId(origin: string, destination: string, commodity: string): string {
   const o = origin.replace(/\s+/g, '').slice(0, 3).toUpperCase();

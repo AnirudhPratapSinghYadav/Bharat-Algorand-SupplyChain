@@ -467,7 +467,7 @@ def _background_auto_seed_demo() -> None:
         return
     try:
         oracle_micro = int(chain.algorand.client.algod.account_info(oracle_addr).get("amount", 0))
-        min_oracle_micro = int(os.environ.get("SEED_MIN_ORACLE_MICRO", "2000000"))
+        min_oracle_micro = pcfg.min_oracle_balance_micro()
         if oracle_micro < min_oracle_micro:
             logger.warning(
                 "AUTO_SEED: skipped — oracle balance %s microAlgo < %s (fund testnet oracle or lower SEED_MIN_ORACLE_MICRO)",
@@ -2822,7 +2822,7 @@ async def run_jury(body: RunJuryRequest):
 
 
 @app.get("/cron-log")
-def get_cron_log(limit: int = 20):
+def get_cron_log(limit: int = 50):
     """Last autonomous auto-jury runs (cron_log.json)."""
     from services.cron_log import list_cron_entries
 
@@ -4425,6 +4425,10 @@ async def get_config():
         "oracle_address_full": oaddr if oaddr else None,
         "auto_jury_enabled": pcfg.auto_jury_enabled(),
         "auto_jury_interval_minutes": pcfg.auto_jury_interval_minutes(),
+        "commodity_types": pcfg.get_commodity_types(),
+        "product_title": pcfg.get_product_title(),
+        "min_oracle_balance_micro": pcfg.min_oracle_balance_micro(),
+        "lora_base_url": pcfg.get_lora_base_url(),
     }
 
 

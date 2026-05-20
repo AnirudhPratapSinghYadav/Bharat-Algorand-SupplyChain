@@ -224,6 +224,29 @@ def coingecko_simple_price_url() -> str:
     ).strip()
 
 
+def get(key: str, default: Any = None) -> Any:
+    """Generic config accessor (config.json + env overrides via load_config)."""
+    return load_config().get(key, default)
+
+
+def min_oracle_balance_micro() -> int:
+    env = _env_int("SEED_MIN_ORACLE_MICRO", 0)
+    if env > 0:
+        return env
+    return int(load_config().get("min_oracle_balance_micro") or 2_000_000)
+
+
+def get_commodity_types() -> list[str]:
+    raw = load_config().get("commodity_types")
+    if isinstance(raw, list) and raw:
+        return [str(x) for x in raw]
+    return ["Cotton Fabric", "Spices", "Electronics", "Handicrafts"]
+
+
+def get_product_title() -> str:
+    return str(load_config().get("product_title") or "Pramanik — Dispute Oracle for Indian Exporters")
+
+
 def websocket_poll_seconds() -> int:
     env = _env_int("WEBSOCKET_POLL_SECONDS", 0)
     if env > 0:

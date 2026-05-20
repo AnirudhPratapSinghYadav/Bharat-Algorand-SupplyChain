@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 from pathlib import Path
 
 import algokit_utils
@@ -16,6 +17,12 @@ logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
 NAVI_DIR = Path(__file__).resolve().parent
+
+import sys
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+import pramanik_config as pcfg  # noqa: E402
 
 
 def _quote_env_value(v: str) -> str:
@@ -105,15 +112,17 @@ def deploy() -> tuple[int, str, str | None]:
     app_id = int(app_client.app_id)
     app_addr = str(app_client.app_address)
 
-    updates = {"APP_ID": str(app_id)}
+    updates = {"APP_ID": str(app_id), "ALGO_NETWORK": net}
     root_env = ROOT / ".env"
     if root_env.is_file() or os.environ.get("WRITE_ROOT_ENV", "1") == "1":
         merge_env_file(root_env, updates)
     fe = ROOT / "frontend" / ".env"
-    if fe.is_file():
-        merge_env_file(fe, {"VITE_APP_ID": str(app_id)})
+    fe_example = ROOT / "frontend" / ".env.example"
+    if not fe.is_file() and fe_example.is_file():
+        shutil.copy2(fe_example, fe)
+    merge_env_file(fe, {"VITE_APP_ID": str(app_id), "VITE_ALGORAND_NETWORK": net})
 
-    lora_base = (os.environ.get("LORA_BASE_URL") or "https://lora.algokit.io/testnet").rstrip("/")
+    lora_base = pcfg.get_lora_base_url() or (os.environ.get("LORA_BASE_URL") or "https://lora.algokit.io/testnet").rstrip("/")
     print(f"[DEPLOY] APP_ID: {app_id}")
     print(f"[DEPLOY] App address: {app_addr}")
     print(f"PRAMANIK_APP_ID={app_id}")

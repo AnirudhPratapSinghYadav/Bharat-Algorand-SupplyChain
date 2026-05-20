@@ -89,8 +89,13 @@ def main() -> int:
 
     app_id, app_addr, fund_tx = deploy()
     os.chdir(ROOT)
+    env["APP_ID"] = str(app_id)
+    os.environ["APP_ID"] = str(app_id)
 
-    lora_base = (os.environ.get("LORA_BASE_URL") or "https://lora.algokit.io/testnet").rstrip("/")
+    sys.path.insert(0, str(ROOT))
+    import pramanik_config as pcfg
+
+    lora_base = pcfg.get_lora_base_url() or (os.environ.get("LORA_BASE_URL") or "https://lora.algokit.io/testnet").rstrip("/")
     print()
     print("✅ Pramanik deployed successfully")
     print(f"   New APP_ID: {app_id}")
@@ -102,7 +107,8 @@ def main() -> int:
 
     if not args.no_seed:
         print("==> Seeding demo shipments...")
-        seed = subprocess.run([sys.executable, str(ROOT / "seed_blockchain.py")], cwd=str(ROOT), env=env)
+        seed_env = {**env, "APP_ID": str(app_id), "SEED_MIN_ORACLE_MICRO": str(pcfg.min_oracle_balance_micro())}
+        seed = subprocess.run([sys.executable, str(ROOT / "seed_blockchain.py")], cwd=str(ROOT), env=seed_env)
         if seed.returncode != 0:
             print("Seed failed (deploy OK). Run: python seed_blockchain.py", file=sys.stderr)
             return 5

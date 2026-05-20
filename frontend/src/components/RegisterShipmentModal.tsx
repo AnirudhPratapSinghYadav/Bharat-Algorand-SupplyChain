@@ -35,7 +35,7 @@ export function RegisterShipmentModal({ open, onClose, busy, accountAddress, onS
     origin: 'Mumbai',
     destination: 'Rotterdam',
     supplier: '',
-    commodity: 'Textiles',
+    commodity: 'Cotton Fabric',
     escrow_algo: '2',
     expected_delivery: '',
   });
@@ -45,6 +45,7 @@ export function RegisterShipmentModal({ open, onClose, busy, accountAddress, onS
     score?: number;
     warning_message?: string | null;
   } | null>(null);
+  const [commodityOptions, setCommodityOptions] = useState<string[]>([...COMMODITY_TYPES]);
 
   useEffect(() => {
     if (!open) return;
@@ -68,8 +69,13 @@ export function RegisterShipmentModal({ open, onClose, busy, accountAddress, onS
     let cancel = false;
     const load = async () => {
       try {
-        const r = await axios.get(`${BACKEND_URL}/price`, { timeout: API_TIMEOUT });
-        if (!cancel && r.data) setPrice(r.data);
+        const [priceRes, cfgRes] = await Promise.all([
+          axios.get(`${BACKEND_URL}/price`, { timeout: API_TIMEOUT }),
+          axios.get(`${BACKEND_URL}/config`, { timeout: API_TIMEOUT }),
+        ]);
+        if (!cancel && priceRes.data) setPrice(priceRes.data);
+        const types = cfgRes.data?.commodity_types;
+        if (!cancel && Array.isArray(types) && types.length) setCommodityOptions(types.map(String));
       } catch {
         /* ignore */
       }
@@ -210,7 +216,7 @@ export function RegisterShipmentModal({ open, onClose, busy, accountAddress, onS
           onChange={(e) => setForm((f) => ({ ...f, commodity: e.target.value }))}
           style={{ ...fieldStyle, marginBottom: 12 }}
         >
-          {COMMODITY_TYPES.map((c) => (
+          {commodityOptions.map((c) => (
             <option key={c} value={c}>
               {c}
             </option>

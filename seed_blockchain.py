@@ -454,7 +454,9 @@ def main() -> None:
 
     oracle_micro = int(algorand.client.algod.account_info(oracle_addr).get("amount", 0))
     # Default ~2 ALGO covers MBR top-up + fees for the 3-lane demo (override via SEED_MIN_ORACLE_MICRO).
-    min_oracle_micro = int(os.getenv("SEED_MIN_ORACLE_MICRO", "2000000"))
+    import pramanik_config as pcfg
+
+    min_oracle_micro = pcfg.min_oracle_balance_micro()
     if oracle_micro < min_oracle_micro:
         logger.error(
             "Oracle balance is %s microAlgo — need at least %s microAlgo (~%.1f ALGO) before seeding. "

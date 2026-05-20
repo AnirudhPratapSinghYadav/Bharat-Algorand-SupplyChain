@@ -75,5 +75,8 @@
   "auto_jury_interval_minutes": 60,
   "elevenlabs_default_voice_id": "EXAVITQu4vr4xnSDxMaL",
   "auto_jury_min_hours_since_last": 6,
-  "event_poll_interval_seconds": 10
+  "event_poll_interval_seconds": 10,
+  "min_oracle_balance_micro": 2000000,
+  "commodity_types": ["Cotton Fabric", "Spices", "Electronics", "Handicrafts"],
+  "product_title": "Pramanik — Dispute Oracle for Indian Exporters"
 }

@@ -2945,8 +2945,43 @@ function MainApp() {
                                 </div>
                             </>
                         ) : (
-                            <p style={{ color: '#9ca3af' }}>No settlement data yet. Authorize an Agentic Settlement first.</p>
+                            <p style={{ color: '#9ca3af' }}>No settlement review yet. Use Request Settlement Review on the shipment card.</p>
                         )}
+                        {selectedShipment.logistics_events?.length ? (
+                            <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+                                <h4 style={{ margin: '0 0 8px', fontSize: '0.85rem', color: '#64748b' }}>Logistics timeline</h4>
+                                <ul style={{ margin: 0, paddingLeft: 18, fontSize: '0.8rem', color: '#374151', lineHeight: 1.6 }}>
+                                    {selectedShipment.logistics_events.slice(0, 8).map((ev, i) => (
+                                        <li key={i}>{typeof ev === 'string' ? ev : JSON.stringify(ev)}</li>
+                                    ))}
+                                </ul>
+                            </div>
+                        ) : null}
+                        {role === 'stakeholder' && selectedShipment.stage !== 'Settled' && selectedShipment.stage !== 'VOID' ? (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 16 }}>
+                                <button
+                                    type="button"
+                                    className="primary-btn"
+                                    style={{ fontSize: '0.78rem' }}
+                                    onClick={() => {
+                                        setSelectedShipment(null);
+                                        setJuryTerminalShipmentId(selectedShipment.shipment_id);
+                                    }}
+                                >
+                                    <Play size={13} /> Request Settlement Review
+                                </button>
+                                {selectedShipment.stage === 'In_Transit' && selectedShipment.last_jury?.on_chain_tx_id ? (
+                                    <button
+                                        type="button"
+                                        className="primary-btn"
+                                        style={{ fontSize: '0.78rem', background: '#059669' }}
+                                        onClick={() => void handleSettleShipment(selectedShipment.shipment_id)}
+                                    >
+                                        <CheckCircle size={13} /> Release Payment
+                                    </button>
+                                ) : null}
+                            </div>
+                        ) : null}
                         <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
                             {selectedShipment.last_jury && (
                                 <button
