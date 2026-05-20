@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react';
 import { formatEscrowUserFacing } from '../lib/displayLabels';
+import { AlgoEscrowHint } from './AlgoEscrowHint';
 
 type Props = {
   algo: number;
@@ -11,8 +12,9 @@ type Props = {
 export function EscrowDisplay({ algo, inr, usd, style }: Props) {
   const text = formatEscrowUserFacing(algo, inr, usd);
   return (
-    <span style={style} title="Digital currency held in escrow until the oracle releases payment. Rates from live market data.">
-      {text}
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', ...style }}>
+      <span>{text}</span>
+      <AlgoEscrowHint />
     </span>
   );
 }

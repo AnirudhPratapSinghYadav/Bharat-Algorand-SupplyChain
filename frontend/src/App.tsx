@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Link, Route, Routes } from 'react-router-dom';
+import { Link, Navigate, Route, Routes } from 'react-router-dom';
 import algosdk from "algosdk";
 import axios from 'axios';
 import {
@@ -19,7 +19,9 @@ import {
     AGENT_DISPLAY,
     shortAddress,
     verdictUserLabel,
+    DASHBOARD_PRODUCT_TITLE,
 } from './lib/displayLabels';
+import { AlgoEscrowHint } from './components/AlgoEscrowHint';
 import { EscrowDisplay } from './components/EscrowDisplay';
 import { AddressCopy } from './components/AddressCopy';
 import { RegisterShipmentModal, type RegisterFormState } from './components/RegisterShipmentModal';
@@ -255,6 +257,10 @@ function MainApp() {
     }, []);
 
     const { payload: liveWsPayload, connected: liveWsConnected } = useLiveTransactions(true);
+
+    useEffect(() => {
+        document.title = DASHBOARD_PRODUCT_TITLE;
+    }, []);
 
     useEffect(() => {
         const rows = liveWsPayload?.transactions;
@@ -699,7 +705,7 @@ function MainApp() {
                 setAuditTrail({
                     shipment_id: ship.shipment_id,
                     app_id: appId ?? FALLBACK_APP_ID,
-                    network: 'TestNet',
+                    network: 'Algorand',
                     on_chain_status: ship.stage || 'Unknown',
                     total_scans: ship.last_jury ? 1 : 0,
                     indexer_notes: [],
@@ -880,7 +886,7 @@ function MainApp() {
 <style>@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');</style></head>
 <body style="font-family:'Inter',system-ui,-apple-system,sans-serif;margin:0;padding:0;background:#f8fafc;">
 <div style="background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);color:#fff;padding:28px 40px;box-shadow:0 4px 6px rgba(0,0,0,0.1);">
-  <div style="font-size:0.75rem;font-weight:600;letter-spacing:0.12em;opacity:0.8;margin-bottom:4px;">NAVI-TRUST</div>
+  <div style="font-size:0.75rem;font-weight:600;letter-spacing:0.12em;opacity:0.8;margin-bottom:4px;">PRAMANIK</div>
   <h1 style="margin:0;font-size:1.5rem;font-weight:700;">Supply Chain Audit Report</h1>
   <div style="font-size:0.85rem;opacity:0.9;margin-top:8px;">${ship.shipment_id} · Generated ${new Date().toLocaleString()}</div>
 </div>
@@ -978,7 +984,7 @@ function MainApp() {
                             type="button"
                             onClick={() => switchRole('stakeholder')}
                             className={`dash-role-btn${role === 'stakeholder' ? ' dash-role-btn--stakeholder-active' : ''}`}
-                            title="Buyer / escrow: fund shipments, run jury, settle — your wallet signs fund transactions."
+                            title="Buyer / escrow: fund shipments, request settlement review, release payment — your wallet signs fund transactions."
                         >
                             <Eye size={13} style={{ marginRight: 4, verticalAlign: 'middle' }} />
                             {role === 'stakeholder' ? '● ' : ''}Stakeholder
@@ -1031,7 +1037,7 @@ function MainApp() {
             <nav className="dash-nav">
                 <Link to="/verify">🔍 Verify</Link>
                 <Link to="/protocol">Protocol</Link>
-                <Link to="/navibot">NaviBot</Link>
+                <Link to="/pramanik-bot">Pramanik Bot</Link>
             </nav>
 
             {!chainHealth ? (
@@ -1285,12 +1291,12 @@ function MainApp() {
                         </div>
                         <p style={{ fontSize: '0.72rem', color: '#64748b', margin: '0 0 12px', lineHeight: 1.5 }}>
                             <strong style={{ color: '#94a3b8' }}>Shipments</strong> are registered by the <strong style={{ color: '#e2e8f0' }}>oracle</strong> (not your wallet).
-                            This button mints a separate <strong style={{ color: '#e2e8f0' }}>reputation NFT</strong> (NAVI-PASS) so buyers can verify your supplier profile on Lora — like a digital business card on Algorand.
+                            This button mints a separate <strong style={{ color: '#e2e8f0' }}>Exporter Passport</strong> (reputation ASA) so buyers can verify your supplier profile on Lora — like a digital business card on Algorand.
                         </p>
                         {passportAsa ? (
                             <div>
                                 <p style={{ fontSize: '0.82rem', color: '#e2e8f0', margin: '0 0 8px', lineHeight: 1.45 }}>
-                                    NAVI-PASS · ASA <strong style={{ fontFamily: 'ui-monospace, monospace' }}>{passportAsa}</strong>
+                                    Exporter Passport · ASA <strong style={{ fontFamily: 'ui-monospace, monospace' }}>{passportAsa}</strong>
                                 </p>
                                 <a
                                     href={loraAssetUrl(passportAsa)}
@@ -1337,7 +1343,7 @@ function MainApp() {
                                             }
                                         } catch (err: unknown) {
                                             const detail = axios.isAxiosError(err) ? err.response?.data : undefined;
-                                            let msg = 'Mint failed (API needs ORACLE_MNEMONIC and gas on TestNet).';
+                                            let msg = 'Mint failed (API needs ORACLE_MNEMONIC and oracle gas).';
                                             if (detail && typeof detail === 'object' && 'detail' in detail) {
                                                 const d = (detail as { detail?: unknown }).detail;
                                                 if (typeof d === 'string') msg = d;
@@ -1350,7 +1356,7 @@ function MainApp() {
                                         }
                                     }}
                                 >
-                                    {passportMinting ? 'Minting…' : 'Mint NAVI-PASS on TestNet'}
+                                    {passportMinting ? 'Minting…' : 'Mint Exporter Passport'}
                                 </button>
                             </div>
                         )}
@@ -1386,7 +1392,7 @@ function MainApp() {
                                     <CheckCircle size={22} color="#34d399" style={{ flexShrink: 0, marginTop: 2 }} />
                                     <div>
                                         <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                                            Confirmed on TestNet
+                                            Confirmed on-chain
                                         </div>
                                         <div style={{ fontWeight: 700, color: '#f8fafc', marginTop: 4, fontSize: '0.95rem' }}>{lastConfirmedTx.label}</div>
                                         {lastConfirmedTx.amountMicro != null ? (
@@ -1499,7 +1505,9 @@ function MainApp() {
                         >
                             {stats.escrow_total_algo != null ? `${Number(stats.escrow_total_algo).toFixed(4)}` : '—'}
                         </div>
-                        <p style={{ fontSize: '0.68rem', color: 'var(--muted)', margin: '8px 0 0' }}>ALGO (app account)</p>
+                        <p style={{ fontSize: '0.68rem', color: 'var(--muted)', margin: '8px 0 0', display: 'flex', alignItems: 'center' }}>
+                            ALGO (crypto) <AlgoEscrowHint size={12} />
+                        </p>
                     </div>
                     <div className="card" style={{ padding: '14px 18px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
@@ -1610,7 +1618,8 @@ function MainApp() {
                 >
                     <Coins size={15} color="#38bdf8" style={{ flexShrink: 0 }} />
                     <span>
-                        Contract holds <strong style={{ color: '#f1f5f9' }}>{stats.escrow_total_algo.toFixed(4)} ALGO</strong>
+                        Contract holds <strong style={{ color: '#f1f5f9' }}>{stats.escrow_total_algo.toFixed(4)} ALGO (crypto)</strong>
+                        <AlgoEscrowHint size={12} />
                     </span>
                     {(stats.lora_contract_url || stats.lora_contract_account_url) && (
                         <a
@@ -1705,7 +1714,8 @@ function MainApp() {
                             <Truck size={16} color="#38bdf8" /> Escrow (Pramanik)
                         </div>
                             <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: 4 }}>
-                            Shipment <span style={{ color: '#e2e8f0', fontFamily: 'ui-monospace, monospace' }}>{focusVaultShip.shipment_id}</span> — escrow balance from the chain. Minimum deposit 0.5 ALGO per fund.
+                            <strong style={{ color: '#e2e8f0' }}>{shipmentDisplayTitle(focusVaultShip)}</strong> — escrow balance from the chain. Minimum deposit 0.5 ALGO (crypto) per fund.
+                            <AlgoEscrowHint size={12} />
                         </div>
                     </div>
                     <div
@@ -1796,7 +1806,7 @@ function MainApp() {
                                     onClick={() => handleFundEscrow(focusVaultShip.shipment_id)}
                                     style={{ flex: '1 1 140px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
                                 >
-                                    <Lock size={14} /> {isPaying === focusVaultShip.shipment_id ? 'Signing…' : 'Deposit 0.5 ALGO'}
+                                    <Lock size={14} /> {isPaying === focusVaultShip.shipment_id ? 'Signing…' : 'Deposit 0.5 ALGO (crypto)'}
                                 </button>
                             </div>
                         </div>
@@ -1922,8 +1932,26 @@ function MainApp() {
                                             {shipmentDisplayTitle(ship)}
                                         </span>
                                     </div>
-                                    <div style={{ fontSize: '0.72rem', fontFamily: 'ui-monospace, monospace', color: '#64748b', marginTop: 4 }}>
-                                        {ship.shipment_id}
+                                    <div style={{ fontSize: '0.68rem', color: '#64748b', marginTop: 4 }}>
+                                        <button
+                                            type="button"
+                                            onClick={() => void navigator.clipboard.writeText(ship.shipment_id)}
+                                            style={{
+                                                background: 'none',
+                                                border: 'none',
+                                                padding: 0,
+                                                cursor: 'pointer',
+                                                color: 'var(--accent)',
+                                                fontSize: '0.68rem',
+                                                fontWeight: 600,
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                gap: 4,
+                                            }}
+                                            title={ship.shipment_id}
+                                        >
+                                            <ClipboardCopy size={12} /> Copy reference
+                                        </button>
                                     </div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, fontSize: '0.875rem', color: '#374151' }}>
                                         {(ship.origin && ship.origin !== 'N/A' && ship.destination && ship.destination !== 'N/A') ? null : (
@@ -1963,7 +1991,8 @@ function MainApp() {
                                         {role === 'supplier' ? '⚠ PAYMENT FROZEN' : '⚠ ESCROW FROZEN'}
                                     </div>
                                     <div style={{ fontSize: '0.8rem', color: '#e2e8f0', lineHeight: 1.55, marginBottom: 6 }}>
-                                        <span style={{ fontWeight: 800, color: '#F59E0B' }}>{(fundsMicro / 1e6).toFixed(4)} ALGO</span>
+                                        <span style={{ fontWeight: 800, color: '#F59E0B' }}>{(fundsMicro / 1e6).toFixed(4)} ALGO (crypto)</span>
+                                        <AlgoEscrowHint size={12} />
                                         {escrowUsdText(ship) ? (
                                             <span style={{ fontWeight: 800, color: '#86efac', marginLeft: 8 }}>
                                                 (~{escrowUsdText(ship)})
@@ -2531,7 +2560,7 @@ function MainApp() {
                                                 }}
                                                 onClick={() => void handleFundEscrow(ship.shipment_id, 0.5)}
                                             >
-                                                <Coins size={12} /> {isPaying === ship.shipment_id ? 'Signing…' : 'Lock 0.5 ALGO'}
+                                                <Coins size={12} /> {isPaying === ship.shipment_id ? 'Signing…' : 'Lock 0.5 ALGO (crypto)'}
                                             </button>
                                         )}
                                     </>
@@ -2874,7 +2903,7 @@ function MainApp() {
                     <div className="card" style={{ maxWidth: 600, width: '90%', textAlign: 'left' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                             <div>
-                                <h2 style={{ margin: 0, fontSize: '1.1rem' }}>{selectedShipment.shipment_id}</h2>
+                                <h2 style={{ margin: 0, fontSize: '1.1rem' }}>{shipmentDisplayTitle(selectedShipment)}</h2>
                                 <span style={{ fontSize: '0.8rem', color: '#6b7280' }}>{selectedShipment.origin} &rarr; {selectedShipment.destination}</span>
                             </div>
                             <button onClick={() => setSelectedShipment(null)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>
@@ -2939,7 +2968,7 @@ function MainApp() {
                 <nav className="dash-footer-nav" aria-label="Footer">
                     <Link to="/verify">🔍 Verify</Link>
                     <Link to="/protocol">Protocol</Link>
-                    <Link to="/navibot">NaviBot</Link>
+                    <Link to="/pramanik-bot">Pramanik Bot</Link>
                 </nav>
             </footer>
 
@@ -2964,7 +2993,8 @@ export default function App() {
                 <Route path="/verify/:shipmentId" element={<VerifyPage />} />
                 <Route path="/verify" element={<VerifyPage />} />
                 <Route path="/protocol" element={<ProtocolPage />} />
-                <Route path="/navibot" element={<NaviBotPage />} />
+                <Route path="/pramanik-bot" element={<NaviBotPage />} />
+                <Route path="/navibot" element={<Navigate to="/pramanik-bot" replace />} />
                 <Route path="/" element={<MainApp />} />
             </Routes>
         </WalletProvider>

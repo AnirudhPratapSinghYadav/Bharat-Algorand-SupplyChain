@@ -16,7 +16,7 @@ const AGENTS = [
         title: AGENT_DISPLAY.auditor.label,
         icon: ShieldCheck,
         accent: '#a78bfa',
-        body: 'Reads your Navi-Trust box on Algorand: status, escrow, supplier address, and cross-checks against SQLite so off-chain metadata cannot drift from chain truth.',
+        body: 'Reads your Pramanik escrow box on Algorand: status, locked ALGO, supplier address, and cross-checks against SQLite so logistics notes cannot drift from chain truth.',
     },
     {
         key: 'fraud',
@@ -143,7 +143,7 @@ export function TrustFlowSection() {
                 End-to-end trust flow on Pramanik
             </h2>
             <p style={{ margin: '0 0 16px', fontSize: '0.8rem', color: '#94a3b8', lineHeight: 1.5 }}>
-                Navi-Trust ties logistics risk, escrow, and proofs together. Use the links below to go deeper.
+                Pramanik ties logistics risk, escrow, and settlement proofs together. Use the links below to go deeper.
             </p>
             <ol style={{ margin: 0, padding: 0, listStyle: 'none', display: 'grid', gap: 12 }}>
                 {FLOW.map((f, idx) => {
@@ -197,8 +197,8 @@ export function TrustFlowSection() {
                     Protocol state →
                 </Link>
                 <span style={{ color: '#475569' }}>|</span>
-                <Link to="/navibot" style={{ fontSize: '0.8rem', fontWeight: 600, color: '#7dd3fc' }}>
-                    NaviBot Q&amp;A →
+                <Link to="/pramanik-bot" style={{ fontSize: '0.8rem', fontWeight: 600, color: '#7dd3fc' }}>
+                    Pramanik Bot Q&amp;A →
                 </Link>
             </div>
         </section>

@@ -2,7 +2,6 @@
 """Verify ElevenLabs agent config endpoint."""
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -11,16 +10,16 @@ sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
 
-load_dotenv(ROOT / ".env")
+load_dotenv(ROOT / ".env", override=True)
 
 
 def main() -> int:
-    import requests
+    import pramanik_config as pcfg
 
-    key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
-    agent = (os.environ.get("ELEVENLABS_AGENT_ID") or os.environ.get("NEXT_PUBLIC_ELEVENLABS_AGENT_ID") or "").strip()
-    print(f"API key set: {bool(key)}")
-    print(f"Agent id: {agent[:20]}…" if agent else "Agent id: (missing)")
+    key = pcfg.get_elevenlabs_api_key()
+    agent = pcfg.get_elevenlabs_agent_id()
+    print(f"API key set: {bool(key)} (len={len(key)})")
+    print(f"Agent id: {agent[:24]}…" if agent else "Agent id: (missing)")
 
     from fastapi.testclient import TestClient
 
@@ -28,8 +27,11 @@ def main() -> int:
 
     client = TestClient(application.app)
     r = client.get("/elevenlabs/config")
-    print("GET /elevenlabs/config", r.status_code, r.json())
-    ok = r.status_code == 200 and r.json().get("enabled")
+    body = r.json()
+    print("GET /elevenlabs/config", r.status_code, body)
+    ok = r.status_code == 200 and body.get("enabled")
+    if key and not body.get("tts_configured"):
+        print("Note: API key in .env but tts_configured false — restart shell after editing .env")
     return 0 if ok else 1
 
 

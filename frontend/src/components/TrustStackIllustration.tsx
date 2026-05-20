@@ -23,7 +23,7 @@ export function TrustStackIllustration() {
                 </defs>
                 <rect x="8" y="24" width="504" height="152" rx="16" fill="url(#ts-grad)" stroke="rgba(56,189,248,0.25)" strokeWidth="1" />
                 <text x="260" y="48" textAnchor="middle" fill="#94a3b8" fontSize="11" fontFamily="system-ui,sans-serif" fontWeight="600">
-                    Trust stack — all layers verifiable on TestNet
+                    Trust stack — all layers verifiable on Algorand
                 </text>
                 <g filter="url(#ts-glow)">
                     <rect x="32" y="72" width="88" height="88" rx="12" fill="rgba(15,23,42,0.85)" stroke="#22d3ee" strokeWidth="1.5" />

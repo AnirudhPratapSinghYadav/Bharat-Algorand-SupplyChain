@@ -9,8 +9,8 @@ export function DemoStory() {
         See it in action
       </h2>
       <p className="nt-section-lead nt-demo-section-lead">
-        Register a shipment, run the AI jury, settle to mint a NAVI-CERT on Lora, and verify proofs from the app dashboard on
-        Algorand Testnet.
+        Register a shipment, run the AI jury, settle to mint a Settlement Certificate on Lora, and verify proofs from the app dashboard on
+        Algorand.
       </p>
     </section>
   );

@@ -10,7 +10,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env", override=False)
 CONFIG_PATH = ROOT / "config.json"
 
 
@@ -110,6 +113,10 @@ def get_demo_labels() -> dict[str, str]:
     if isinstance(raw, dict):
         return {str(k): str(v) for k, v in raw.items()}
     return {}
+
+
+def get_elevenlabs_api_key() -> str:
+    return (os.environ.get("ELEVENLABS_API_KEY") or "").strip().strip('"').strip("'")
 
 
 def get_elevenlabs_agent_id() -> str:

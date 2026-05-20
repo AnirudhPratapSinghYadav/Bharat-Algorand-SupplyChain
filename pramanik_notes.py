@@ -124,7 +124,12 @@ def build_pramanik_note(
     """Backward-compatible helper: lowercase aliases map to VALID_TYPES."""
     key = (event_type or "").strip().lower()
     et = _TYPE_ALIASES.get(key, (event_type or "").strip().upper())
-    return build_note(et, shipment_id, **(extra or {}))
+    fields = dict(extra or {})
+    # ARC-28 lifecycle labels must not collide with build_note(event_type=...) parameter.
+    arc28 = fields.pop("event_type", None)
+    if arc28 is not None:
+        fields["arc28_event"] = arc28
+    return build_note(et, shipment_id, **fields)
 
 
 def merge_pramanik_note(legacy: dict[str, Any], event_type: str, shipment_id: str) -> bytes:

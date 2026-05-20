@@ -47,7 +47,7 @@ export function LoraVerificationGuide({ variant = 'full' }: Props) {
             </div>
             <p style={{ margin: '0 0 10px', color: '#cbd5e1' }}>
                 <strong style={{ color: '#e2e8f0' }}>Lora</strong> is Algorand’s explorer UI. Every important Pramanik action has a transaction or asset on{' '}
-                <strong style={{ color: '#e2e8f0' }}>TestNet</strong>. Open the link → use the <strong style={{ color: '#e2e8f0' }}>Note</strong> or{' '}
+                <strong style={{ color: '#e2e8f0' }}>Lora</strong>. Open the link → use the <strong style={{ color: '#e2e8f0' }}>Note</strong> or{' '}
                 <strong style={{ color: '#e2e8f0' }}>ARC-69 metadata</strong> tab — that is your machine-readable proof.
             </p>
 
@@ -89,7 +89,7 @@ export function LoraVerificationGuide({ variant = 'full' }: Props) {
 
             <details style={{ marginBottom: 8 }}>
                 <summary style={{ cursor: 'pointer', fontWeight: 700, color: '#bae6fd', listStylePosition: 'outside' }}>
-                    Supplier Passport / NAVI-CERT (ASA) — ARC-69 metadata on Lora
+                    Exporter Passport / Settlement Certificate (ASA) — ARC-69 metadata on Lora
                 </summary>
                 <p style={{ margin: '8px 0 6px' }}>
                     Certificates and the <strong style={{ color: '#e2e8f0' }}>Supplier Passport</strong> are Algorand Standard Assets. On Lora, open the{' '}

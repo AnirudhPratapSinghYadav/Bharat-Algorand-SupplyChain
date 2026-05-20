@@ -868,7 +868,7 @@ export function LiveVerdictTerminal({
                                 This verdict is now permanent on Algorand.
                             </p>
                             <p style={{ margin: '0 0 16px', color: '#94a3b8', fontSize: '0.82rem' }}>
-                                No one can change it. Open Lora and read the Note tab (NAVI_VERDICT JSON).
+                                No one can change it. Open Lora and read the Note tab (settlement verdict JSON).
                             </p>
                             {loraVerdictUrl ? (
                                 <button

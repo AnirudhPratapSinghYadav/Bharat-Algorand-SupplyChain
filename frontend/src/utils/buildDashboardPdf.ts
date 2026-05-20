@@ -137,7 +137,7 @@ export async function downloadDashboardPdf(opts: {
     y += 10;
     doc.setFontSize(10);
     doc.setTextColor(100, 116, 139);
-    doc.text(`Generated: ${new Date().toLocaleString()} · Algorand TestNet`, margin, y);
+    doc.text(`Generated: ${new Date().toLocaleString()} · Pramanik Oracle`, margin, y);
     y += 6;
     doc.text(`Wallet: ${opts.wallet.slice(0, 10)}…${opts.wallet.slice(-8)}`, margin, y);
     y += 6;
@@ -214,7 +214,7 @@ export async function downloadDashboardPdf(opts: {
     doc.setFontSize(9);
     doc.setTextColor(148, 163, 184);
     doc.text(
-        'Proof: open any verdict on Lora → Note tab contains NAVI_VERDICT JSON. Passport/certs → ARC-69 metadata.',
+        'Proof: open any verdict on Lora → Note tab contains the settlement verdict JSON. Exporter Passport and Settlement Certificate → ARC-69 metadata.',
         margin,
         y,
         { maxWidth: pageW - margin * 2 },

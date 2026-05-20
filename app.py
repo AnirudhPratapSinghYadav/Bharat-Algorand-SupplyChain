@@ -3,10 +3,12 @@ from __future__ import annotations
 import os, time
 
 from dotenv import load_dotenv
+from pathlib import Path
 
-# Shell-exported vars (e.g. ORACLE_MNEMONIC in the same session) must win over .env
-# placeholders — use default override=False. See .env.example for PowerShell one-liners.
-load_dotenv()
+_REPO_ROOT = Path(__file__).resolve().parent
+# Shell-exported vars (e.g. ORACLE_MNEMONIC) win over .env unless empty — load repo .env first.
+load_dotenv(_REPO_ROOT / ".env", override=False)
+load_dotenv(override=False)
 
 import json
 import base64
@@ -465,7 +467,7 @@ def _background_auto_seed_demo() -> None:
         return
     try:
         oracle_micro = int(chain.algorand.client.algod.account_info(oracle_addr).get("amount", 0))
-        min_oracle_micro = int(os.environ.get("SEED_MIN_ORACLE_MICRO", "7000000"))
+        min_oracle_micro = int(os.environ.get("SEED_MIN_ORACLE_MICRO", "2000000"))
         if oracle_micro < min_oracle_micro:
             logger.warning(
                 "AUTO_SEED: skipped — oracle balance %s microAlgo < %s (fund testnet oracle or lower SEED_MIN_ORACLE_MICRO)",
@@ -838,6 +840,7 @@ async def _run_auto_jury_cycle() -> None:
                         "shipment_label": shipment_label,
                         "verdict": verdict,
                         "verdict_label": verdict_label_for_cron(verdict),
+                        "escrow_line": format_escrow_line(micro / 1e6, fi, fu),
                         "auto_settled": auto_settled,
                         "tx_id": tx_id,
                         "confidence": conf,
@@ -2819,7 +2822,7 @@ async def run_jury(body: RunJuryRequest):
 
 
 @app.get("/cron-log")
-def get_cron_log(limit: int = 50):
+def get_cron_log(limit: int = 20):
     """Last autonomous auto-jury runs (cron_log.json)."""
     from services.cron_log import list_cron_entries
 
@@ -3977,7 +3980,7 @@ def _navibot_risk_fallback_text(facts: dict) -> str:
 
 
 def _elevenlabs_tts(text: str) -> Optional[str]:
-    key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip().strip('"').strip("'")
+    key = pcfg.get_elevenlabs_api_key()
     voice = pcfg.get_elevenlabs_default_voice_id() or "EXAVITQu4vr4xnSDxMaL"
     if not key or not (text or "").strip():
         return None
@@ -4033,14 +4036,14 @@ async def _get_navibot_context() -> str:
         return _navibot_context_cache
     try:
         stats = await asyncio.to_thread(chain.global_stats_navitrust)
-        ctx = f"""You are NaviBot for Pramanik supply chain dispute oracle.
+        ctx = f"""You are Pramanik Bot — the settlement oracle assistant for Indian export disputes on Algorand.
 
 LIVE ALGORAND TESTNET STATE (App #{APP_ID}):
 Total shipments on-chain: {int(stats.get('total_shipments') or 0)}
 Settled: {int(stats.get('total_settled') or 0)} | Disputed: {int(stats.get('total_disputed') or 0)}
 ALGO in smart contract escrow: {stats.get('escrow_total_algo', 'unknown')} ALGO
 
-HOW NAVI-TRUST WORKS:
+HOW PRAMANIK ESCROW WORKS:
 1. Buyer locks ALGO in smart contract (code holds it, not us)
 2. 4-agent AI jury: Weather Sentinel + Compliance Auditor + Fraud Detector + Chief Arbiter
 3. Verdict written permanently to Algorand transaction note
@@ -4056,7 +4059,7 @@ ANSWER RULES:
         _navibot_context_ts = time.time()
         return ctx
     except Exception:
-        return "NaviBot for Pramanik supply chain oracle on Algorand."
+        return "Pramanik Bot — settlement oracle assistant on Algorand."
 
 
 def _navibot_live_disputed_blurb() -> str:
@@ -4089,7 +4092,7 @@ def _navibot_rule_match(query: str) -> Optional[dict]:
         w in q for w in ("mumbai", "chennai", "delhi", "all", "each", "every")
     ):
         return _navibot_pack(
-            "Demo lanes are Mumbai→Dubai, Chennai→Rotterdam, and Delhi→Singapore — use the dashboard or GET /shipments for live on-chain status; Verify any SHIP_* id without logging in.",
+            "Registered export lanes (e.g. Mumbai→Dubai, Chennai→Rotterdam) — open the dashboard or GET /shipments for live escrow status; verify any shipment reference on the public Verify page.",
             None,
             None,
             True,
@@ -4429,7 +4432,7 @@ async def get_config():
 def elevenlabs_config():
     """Public agent id + optional signed URL for private ConvAI agents."""
     agent_id = pcfg.get_elevenlabs_agent_id()
-    key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip().strip('"').strip("'")
+    key = pcfg.get_elevenlabs_api_key()
     signed_url: str | None = None
     if key and agent_id:
         try:

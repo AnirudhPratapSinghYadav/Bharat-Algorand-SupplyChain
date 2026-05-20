@@ -13,7 +13,7 @@ export type NavibotApiResponse = {
 };
 
 /**
- * NaviBot chat — always expects 200 JSON; callers should handle errors with a soft message.
+ * Pramanik Bot chat — always expects 200 JSON; callers should handle errors with a soft message.
  */
 export async function askNavibot(params: {
   query: string;

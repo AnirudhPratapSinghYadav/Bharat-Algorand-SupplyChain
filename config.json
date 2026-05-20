@@ -44,7 +44,7 @@
   "demo_labels": {
     "PRM-EX-MUM-RDM-001": "Mumbai → Rotterdam | Cotton Fabric | Oct 2025",
     "PRM-EX-CHN-SGP-002": "Chennai → Singapore | Spices | Nov 2025",
-    "PRM-EX-DEL-DXB-003": "Delhi → Dubai | Handicrafts | Dec 2025"
+    "PRM-EX-DEL-DXB-003": "Delhi → Dubai | Electronics | Dec 2025"
   },
   "mbr_per_box_formula": "2500 + 400 * (key_bytes + value_bytes)",
   "recommended_contract_fund_algo": 0.5,

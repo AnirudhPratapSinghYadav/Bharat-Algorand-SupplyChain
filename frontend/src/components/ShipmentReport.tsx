@@ -38,7 +38,7 @@ export function ShipmentReportActions({ shipment, appId, verifyBaseUrl = DEFAULT
         const doc = new jsPDF();
         doc.setFontSize(20);
         doc.setTextColor(0, 194, 255);
-        doc.text('NAVI-TRUST', 20, 20);
+        doc.text('PRAMANIK', 20, 20);
         doc.setFontSize(12);
         doc.setTextColor(100, 100, 100);
         doc.text('Supply Chain Verification Report', 20, 30);
@@ -63,7 +63,7 @@ export function ShipmentReportActions({ shipment, appId, verifyBaseUrl = DEFAULT
         doc.text('Blockchain Proof', 20, 120);
         doc.setFontSize(11);
         doc.text(`App ID: ${appId ?? 'N/A'}`, 20, 132);
-        doc.text('Network: Algorand Testnet', 20, 142);
+        doc.text('Network: Algorand', 20, 142);
         doc.text('Source: Algorand box storage', 20, 152);
         if (verdictJson) {
             doc.setFontSize(14);
@@ -81,7 +81,7 @@ export function ShipmentReportActions({ shipment, appId, verifyBaseUrl = DEFAULT
         doc.setFontSize(9);
         doc.setTextColor(150, 150, 150);
         doc.text(
-            `Lora: open verdict tx → Note tab (NAVI_VERDICT JSON) · Generated ${new Date().toISOString()}`,
+            `Lora: open verdict tx → Note tab (settlement verdict JSON) · Generated ${new Date().toISOString()}`,
             20,
             275,
             { maxWidth: 170 },

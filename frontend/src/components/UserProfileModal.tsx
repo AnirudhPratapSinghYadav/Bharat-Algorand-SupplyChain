@@ -54,7 +54,7 @@ export function UserProfileModal({ open, onClose, address, role, appId }: Props)
                                 Your profile
                             </h3>
                             <p style={{ margin: '4px 0 0', fontSize: '0.78rem', color: '#94a3b8' }}>
-                                Connected with Pera · Algorand TestNet
+                                Connected with Pera · Algorand
                             </p>
                         </div>
                     </div>
@@ -138,7 +138,7 @@ export function UserProfileModal({ open, onClose, address, role, appId }: Props)
                             background: 'rgba(56, 189, 248, 0.08)',
                         }}
                     >
-                        <ExternalLink size={14} /> TestNet explorer
+                        <ExternalLink size={14} /> Account explorer
                     </a>
                 </div>
 
@@ -198,7 +198,7 @@ export function UserProfileModal({ open, onClose, address, role, appId }: Props)
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.78rem', color: '#94a3b8' }}>
                         <Hash size={14} />
                         <span>
-                            Navi-Trust app ID:{' '}
+                            Pramanik oracle app ID:{' '}
                             <strong style={{ color: '#e2e8f0', fontFamily: 'ui-monospace, monospace' }}>{appId}</strong>
                         </span>
                     </div>

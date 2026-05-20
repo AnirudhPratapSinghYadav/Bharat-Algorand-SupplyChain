@@ -12,7 +12,7 @@ const STEPS = [
   {
     n: '02',
     title: 'Auto settlement',
-    desc: 'Verdict on-chain, escrow released or held, and a NAVI-CERT digital goods certificate (ASA) you can open on Lora.',
+    desc: 'Verdict on-chain, escrow released or held, and a Settlement Certificate (ASA) you can open on Lora.',
     img: LANDING_IMAGES.steps.delivery,
     alt: 'Delivery and settlement',
   },

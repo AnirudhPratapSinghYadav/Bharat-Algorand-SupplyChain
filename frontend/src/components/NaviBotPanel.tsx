@@ -1,6 +1,7 @@
 /**
- * NaviBot — text chat; POST /navibot. Instant role-aware greeting; last 10 messages.
+ * Pramanik Bot — text chat; POST /navibot. Instant role-aware greeting; last 10 messages.
  */
+import { PRAMANIK_BOT_NAME } from '../constants/branding';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -44,7 +45,7 @@ function buildGreeting(
   if (role === 'supplier') {
     return `Your on-chain reputation drives settlement release.\nActive lanes: ${corridor}.\nAsk about escrow status or open Verify for a public proof link.`;
   }
-  return `Live corridors: ${corridor}.\nOpen an in-transit shipment and tap Request Settlement Review for a recorded verdict with a Lora proof link.\nFor voice, open Oracle assistant (ElevenLabs).`;
+  return `Live corridors: ${corridor}.\nOpen an in-transit shipment and tap Request Settlement Review for a recorded verdict with a Lora proof link.\nFor voice, open ${PRAMANIK_BOT_NAME} (ElevenLabs).`;
 }
 
 const QUICK_PILLS = [
@@ -167,7 +168,7 @@ export function NaviBotPanel({
 
   if (!open && variant === 'fixed') {
     return (
-      <button type="button" aria-label="Open NaviBot" onClick={() => setOpen(true)} className="navibot-fab">
+      <button type="button" aria-label={`Open ${PRAMANIK_BOT_NAME}`} onClick={() => setOpen(true)} className="navibot-fab">
         <Bot size={26} />
       </button>
     );
@@ -179,16 +180,16 @@ export function NaviBotPanel({
   return (
     <aside
       className={fixed ? 'navibot-panel navibot-panel--fixed' : 'navibot-panel navibot-panel--inline'}
-      aria-label="NaviBot chat"
+      aria-label={`${PRAMANIK_BOT_NAME} chat`}
     >
       <header className="navibot-panel__head">
         <div className="navibot-panel__title">
           <Bot size={20} className="navibot-panel__icon" />
           <div>
-            <div className="navibot-panel__name">NaviBot</div>
+            <div className="navibot-panel__name">{PRAMANIK_BOT_NAME}</div>
             <div className="navibot-panel__sub">
               Text Q&amp;A ·{' '}
-              <Link to="/navibot" style={{ color: 'var(--accent)', fontWeight: 600 }}>
+              <Link to="/pramanik-bot" style={{ color: 'var(--accent)', fontWeight: 600 }}>
                 <Mic size={12} style={{ verticalAlign: 'middle' }} /> Voice agent
               </Link>
             </div>
@@ -229,7 +230,8 @@ export function NaviBotPanel({
         <div className="navibot-panel__suggest">
           {suggest.action === 'run_jury' ? (
             <button type="button" className="navibot-btn navibot-btn--primary" onClick={onJury}>
-              <Play size={14} /> Open Run jury — {suggest.shipmentId}
+              <Play size={14} /> Request Settlement Review —{' '}
+              {configQ.data?.demo_labels?.[suggest.shipmentId] || suggest.shipmentId}
             </button>
           ) : null}
           {suggest.action === 'verify' ? (

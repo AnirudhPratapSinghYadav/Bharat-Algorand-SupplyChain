@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
 import { Bot, Mic, MessageSquare } from 'lucide-react';
+import { PRAMANIK_BOT_NAME } from '../constants/branding';
 import { NaviBotPanel } from '../components/NaviBotPanel';
 import { ElevenLabsConvaiWidget } from '../components/ElevenLabsConvaiWidget';
 import { useRole } from '../context/RoleContext';
@@ -37,7 +38,7 @@ export default function NaviBotPage() {
       </Link>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
         <Bot size={26} color="var(--accent)" />
-        <h1 style={{ margin: 0, fontSize: '1.25rem' }}>Oracle assistant</h1>
+        <h1 style={{ margin: 0, fontSize: '1.25rem' }}>{PRAMANIK_BOT_NAME}</h1>
       </div>
       <p style={{ color: 'var(--muted)', fontSize: '0.85rem', marginBottom: 16, maxWidth: 640, lineHeight: 1.5 }}>
         Text chat uses live chain stats and jury context. Voice uses your ElevenLabs agent with optional shipment
@@ -104,7 +105,7 @@ export default function NaviBotPage() {
               : { display: 'inline-flex', alignItems: 'center', gap: 6 }
           }
         >
-          <MessageSquare size={14} /> Text (NaviBot)
+          <MessageSquare size={14} /> Text ({PRAMANIK_BOT_NAME})
         </button>
       </div>
 

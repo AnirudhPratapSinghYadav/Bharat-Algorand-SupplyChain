@@ -200,7 +200,7 @@ export default function VerifyPage() {
 
       {demoIds.length > 0 ? (
         <>
-          <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginBottom: 10 }}>Sample corridors:</p>
+          <p style={{ fontSize: '0.8rem', color: 'var(--muted)', marginBottom: 10 }}>Example export lanes:</p>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 20 }}>
             {demoIds.map((demoId) => (
               <button

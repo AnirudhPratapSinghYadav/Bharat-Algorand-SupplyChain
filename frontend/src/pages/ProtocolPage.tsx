@@ -134,7 +134,7 @@ export default function ProtocolPage() {
         </p>
         <div style={{ display: 'grid', gap: 12 }}>
           {[
-            { path: '/verify/SHIP_EXAMPLE', method: 'GET' as const, label: 'GET /verify/{shipment_id}', desc: 'Public shipment verification + hash hints' },
+            { path: '/verify/PRM-EX-MUM-RDM-001', method: 'GET' as const, label: 'GET /verify/{shipment_id}', desc: 'Public shipment verification + hash hints' },
             { path: '/dispute-feed', method: 'GET' as const, label: 'GET /dispute-feed', desc: 'Live dispute + jury feed (JSON)' },
             { path: '/verify-hash', method: 'POST' as const, label: 'POST /verify-hash', desc: 'Verify jury hash against on-chain witness (JSON body)' },
             {
@@ -196,7 +196,7 @@ export default function ProtocolPage() {
             <strong>Creator (oracle):</strong> <span style={{ fontFamily: 'var(--mono, monospace)', fontSize: '0.82rem' }}>{oracle}</span>
           </div>
           <div>
-            <strong>Network:</strong> {healthQ.data?.network || 'Algorand Testnet'}
+            <strong>Network:</strong> {healthQ.data?.network || 'Algorand'}
           </div>
           <div style={{ marginTop: 10, color: 'var(--muted)', fontSize: '0.82rem' }}>
             ARC-56 methods: register_shipment, fund_shipment, record_verdict, settle_shipment, pause_oracle, unpause_oracle, update_oracle, get_required_mbr, get_global_stats

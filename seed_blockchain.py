@@ -112,8 +112,8 @@ def _demo_shipment_rows() -> list[dict]:
             "lon": 77.209023,
             "dlat": 25.204849,
             "dlon": 55.270783,
-            "route": "Delhi → Dubai | Handicrafts",
-            "commodity": "Handicrafts",
+            "route": "Delhi → Dubai | Electronics",
+            "commodity": "Electronics",
             "fund_micro": 3_000_000,
             "verdict_json": None,
             "risk": 0,
@@ -453,8 +453,8 @@ def main() -> None:
     logger.info("Lora app: %s/%s", LORA_APP, app_id)
 
     oracle_micro = int(algorand.client.algod.account_info(oracle_addr).get("amount", 0))
-    # ~7 ALGO covers MBR top-up + fees for the 3-lane demo after prior attempts (override via SEED_MIN_ORACLE_MICRO).
-    min_oracle_micro = int(os.getenv("SEED_MIN_ORACLE_MICRO", "7000000"))
+    # Default ~2 ALGO covers MBR top-up + fees for the 3-lane demo (override via SEED_MIN_ORACLE_MICRO).
+    min_oracle_micro = int(os.getenv("SEED_MIN_ORACLE_MICRO", "2000000"))
     if oracle_micro < min_oracle_micro:
         logger.error(
             "Oracle balance is %s microAlgo — need at least %s microAlgo (~%.1f ALGO) before seeding. "
