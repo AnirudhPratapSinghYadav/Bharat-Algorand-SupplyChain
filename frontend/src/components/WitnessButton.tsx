@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 import algosdk from 'algosdk';
 import { ExternalLink } from 'lucide-react';
-import { ALGOD_URL, BACKEND_URL } from '../constants/api';
+import { ALGOD_URL, BACKEND_URL, loraTransactionUrl } from '../constants/api';
 import { buildWitnessTransaction } from '../algorand/buildWitnessTransaction';
 import { peraWallet } from '../wallet/pera';
 
@@ -93,7 +93,7 @@ export function WitnessButton({
     }
   };
 
-  const loraTx = txId ? `https://lora.algokit.io/testnet/transaction/${txId}` : '';
+  const loraTx = txId ? loraTransactionUrl(txId) : '';
 
   return (
     <div style={{ marginTop: 14 }}>

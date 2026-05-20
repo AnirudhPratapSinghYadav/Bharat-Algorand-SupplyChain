@@ -1,123 +1,169 @@
-"""Pydantic models for Navi-Trust API."""
+# models.py
+# All Pydantic models for request/response validation.
+# Keep these lean — no business logic here.
 
-from typing import List, Optional
+from __future__ import annotations
 
-from algosdk import encoding as algo_encoding
+from typing import Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from pramanik_validate import validate_algorand_address, validate_lat_lon, validate_route
 
 
 class WeatherData(BaseModel):
-    temperature: float
-    precipitation: float
+    city: str
+    temperature_c: float
+    precipitation_mm: float
+    wind_kmh: float
     weather_code: int
+    description: str
+    source: str = "open-meteo"
+    fetched_at: Optional[str] = None
 
 
 class RiskPrediction(BaseModel):
-    risk_score: int
-    predicted_delay_probability: int
-    anomaly_detected: bool
-    reasoning_narrative: str
+    model_config = {"protected_namespaces": ()}
+
+    risk_score: int = Field(ge=0, le=100)
+    reasoning: str = ""
+    fallback_used: bool = False
+    model_used: Optional[str] = None
+    # Legacy agent pipeline fields (optional)
+    predicted_delay_probability: int = 0
+    anomaly_detected: bool = False
+    reasoning_narrative: str = ""
     mitigation: str = ""
+
+    @model_validator(mode="after")
+    def sync_reasoning_fields(self) -> "RiskPrediction":
+        if not self.reasoning and self.reasoning_narrative:
+            self.reasoning = self.reasoning_narrative
+        if not self.reasoning_narrative and self.reasoning:
+            self.reasoning_narrative = self.reasoning
+        return self
 
 
 class BlockchainState(BaseModel):
-    blockchain_status: str
+    shipment_id: str
+    status: str
+    funds_microalgo: int
+    risk_score: int
+    rep_score: int
+    route: str
+    verdict_json: Optional[str] = None
+    verdict_hash: Optional[str] = None
+    certificate_asa: Optional[int] = None
+    registered: bool
     audit_report: str
+    lora_app_url: Optional[str] = None
+    lora_cert_url: Optional[str] = None
 
 
 class RunJuryRequest(BaseModel):
     shipment_id: str
-    destination_city: str
 
-
-class SubmitMitigationRequest(BaseModel):
-    shipment_id: str
-    wallet: str
-    resolution_text: str
-
-
-class RegisterShipmentBody(BaseModel):
-    shipment_id: str
-    supplier_address: str
-    origin: str
-    destination: str
-
-
-class RegisterShipmentBuildBody(RegisterShipmentBody):
-    """Wallet-signed registration: sender must match connected account."""
-
-    sender_address: str = ""
-    buyer_address: str = ""
-
-    @model_validator(mode="after")
-    def _sender_ok(self):
-        addr = (self.sender_address or self.buyer_address).strip()
-        if not addr:
-            raise ValueError("sender_address or buyer_address is required")
-        if not algo_encoding.is_valid_address(addr):
-            raise ValueError("sender_address must be a valid Algorand address")
-        return self
-
-    def resolved_sender(self) -> str:
-        return (self.sender_address or self.buyer_address).strip()
-
-
-class RegisterShipmentConfirmBody(RegisterShipmentBody):
-    tx_id: str
-
-
-class RunJuryBody(BaseModel):
-    shipment_id: str
-    origin_lat: float = 0.0
-    origin_lon: float = 0.0
-    dest_lat: float = 0.0
-    dest_lon: float = 0.0
+    @field_validator("shipment_id")
+    @classmethod
+    def shipment_id_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("shipment_id must not be empty")
+        return v.strip()
 
 
 class SettleBody(BaseModel):
     shipment_id: str
 
 
+class NavibotRequest(BaseModel):
+    message: str
+    shipment_id: Optional[str] = None
+
+
 class FundShipmentBuildBody(BaseModel):
-    """Build unsigned pay + fund_shipment group. Prefer buyer_address + amount_algo (ALGO)."""
-
     shipment_id: str
-    buyer_address: str = ""
-    payer_address: str = ""
-    amount_algo: float | None = Field(default=None, gt=0, le=20.0)
-    micro_algo: int | None = Field(default=None, ge=500_000, le=20_000_000)
-
-    @model_validator(mode="after")
-    def _wallet_present(self):
-        addr = (self.buyer_address or self.payer_address).strip()
-        if not addr:
-            raise ValueError("buyer_address or payer_address is required")
-        if not algo_encoding.is_valid_address(addr):
-            raise ValueError("buyer_address / payer_address must be a valid Algorand address")
-        return self
-
-    def resolved_payer(self) -> str:
-        return (self.buyer_address or self.payer_address).strip()
+    amount_algo: float = Field(gt=0, le=1000)
+    buyer_address: str
 
     def resolved_micro(self) -> int:
-        if self.micro_algo is not None:
-            return int(self.micro_algo)
-        algo = self.amount_algo if self.amount_algo is not None else 0.5
-        return max(500_000, int(round(float(algo) * 1_000_000)))
+        return int(round(self.amount_algo * 1_000_000))
 
 
-class NavibotRequest(BaseModel):
-    """Accept `query` (legacy) or `message` (alias) — at least one should be non-empty for best results."""
+class RegisterShipmentBody(BaseModel):
+    shipment_id: str
+    supplier_address: str
+    route: str = ""
+    origin: str
+    destination: str
+    origin_lat: float
+    origin_lon: float
+    dest_lat: Optional[float] = None
+    dest_lon: Optional[float] = None
 
-    query: str = ""
-    message: str = ""
-    history: List[dict] = Field(default_factory=list)
-    shipment_id: Optional[str] = None
-    wallet_address: Optional[str] = None
-    role: Optional[str] = None  # stakeholder | supplier (UI hint only)
+    @field_validator("shipment_id")
+    @classmethod
+    def shipment_id_nonempty(cls, v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            raise ValueError("shipment_id required")
+        return s
 
-    def effective_text(self) -> str:
-        q = (self.query or "").strip()
-        m = (self.message or "").strip()
-        return q if q else m
+    @field_validator("supplier_address")
+    @classmethod
+    def supplier_valid(cls, v: str) -> str:
+        return validate_algorand_address(v)
+
+    @field_validator("route")
+    @classmethod
+    def route_valid(cls, v: str) -> str:
+        if not (v or "").strip():
+            return ""
+        return validate_route(v)
+
+    @model_validator(mode="after")
+    def coords_valid(self) -> "RegisterShipmentBody":
+        validate_lat_lon(self.origin_lat, self.origin_lon)
+        if self.dest_lat is not None and self.dest_lon is not None:
+            validate_lat_lon(self.dest_lat, self.dest_lon)
+        return self
+
+
+class SimulateEventBody(BaseModel):
+    shipment_id: str
+    event: str
+    severity: str = "medium"
+
+    @field_validator("severity")
+    @classmethod
+    def valid_severity(cls, v: str) -> str:
+        allowed = {"low", "medium", "high", "critical"}
+        s = (v or "medium").lower().strip()
+        if s not in allowed:
+            raise ValueError(f"severity must be one of {allowed}")
+        return s
+
+
+class VerifyHashBody(BaseModel):
+    shipment_id: str
+    weather: dict
+    sentinel: dict
+    auditor: dict
+    fraud_detector: dict
+    arbiter: dict
+
+
+class SubmitSignedTxnBody(BaseModel):
+    """Pera Wallet (or any signer) submits already-signed transaction bytes."""
+
+    signed_txn_b64: Optional[str] = None
+    signed_txns_b64: Optional[list[str]] = None
+
+    @model_validator(mode="after")
+    def require_one_form(self) -> "SubmitSignedTxnBody":
+        single = (self.signed_txn_b64 or "").strip()
+        group = [b for b in (self.signed_txns_b64 or []) if b and str(b).strip()]
+        if not single and not group:
+            raise ValueError("Provide signed_txn_b64 or signed_txns_b64 (atomic group)")
+        if single and group:
+            raise ValueError("Provide only one of signed_txn_b64 or signed_txns_b64")
+        return self

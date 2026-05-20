@@ -10,7 +10,18 @@ import {
     User, LogOut, Download, ClipboardCopy,
 } from 'lucide-react';
 
-import { BACKEND_URL, FALLBACK_APP_ID, API_TIMEOUT } from './constants/api';
+import { BACKEND_URL, FALLBACK_APP_ID, API_TIMEOUT, LORA_APP, loraAssetUrl, loraTransactionUrl } from './constants/api';
+import {
+    shipmentCardTitle,
+    stageBadgeColors,
+    stageUserLabel,
+    formatEscrowTriple,
+    juryButtonState,
+    AGENT_DISPLAY,
+    shortAddress,
+} from './lib/displayLabels';
+import { RegisterShipmentModal, type RegisterFormState } from './components/RegisterShipmentModal';
+import { CertificateQr } from './components/CertificateQr';
 import VerifyPage from './pages/VerifyPage';
 import ProtocolPage from './pages/ProtocolPage';
 import NaviBotPage from './pages/NaviBotPage';
@@ -31,8 +42,7 @@ import { DashboardPdfReport } from './components/DashboardPdfReport';
 import { LoraVerificationGuide } from './components/LoraVerificationGuide';
 import { peraWallet } from './wallet/pera';
 import { buildNavitrustFundShipmentTransactions } from './algorand/buildNavitrustFundShipment';
-
-const CITIES = ['Mumbai', 'Chennai', 'Delhi', 'Singapore', 'Dubai', 'Rotterdam'] as const;
+import { useLiveTransactions } from './hooks/useWebSocket';
 
 type DashboardTxn = {
     tx_id?: string;
@@ -75,8 +85,9 @@ function sortShipmentsStable<T extends { shipment_id: string; stage?: string }>(
     const pri = (s: string) => {
         if (s === 'Disputed' || s === 'Delayed_Disaster') return 0;
         if (s === 'In_Transit' || s === 'Not_Registered') return 1;
-        if (s === 'Settled') return 2;
-        return 3;
+        if (s === 'VOID') return 2;
+        if (s === 'Settled') return 3;
+        return 4;
     };
     return [...arr].sort((a, b) => {
         const pa = pri(a.stage ?? '');
@@ -113,6 +124,7 @@ interface Shipment {
     dest_lat?: number | null;
     dest_lon?: number | null;
     stage: string;
+    created_at?: string | null;
     weather: any;
     logistics_events: any[];
     last_jury: any;
@@ -185,13 +197,8 @@ function MainApp() {
     const [recentTxns, setRecentTxns] = useState<DashboardTxn[]>([]);
     const [profileModalOpen, setProfileModalOpen] = useState(false);
     const [registerModal, setRegisterModal] = useState(false);
-    const [regForm, setRegForm] = useState({
-        shipment_id: '',
-        origin: 'Mumbai',
-        destination: 'Dubai',
-        supplier: '',
-    });
     const [registerBusy, setRegisterBusy] = useState(false);
+    const [voidBusy, setVoidBusy] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [paymentReceipt, setPaymentReceipt] = useState<any>(null);
     const [isPaying, setIsPaying] = useState<string | null>(null);
@@ -234,15 +241,38 @@ function MainApp() {
     const refreshRecentTxns = useCallback(() => {
         axios
             .get(`${BACKEND_URL}/transactions`, { params: { limit: 5 }, timeout: 8000 })
-            .then((r) => setRecentTxns(Array.isArray(r.data?.transactions) ? r.data.transactions : []))
+            .then((r) => {
+                const d = r.data as unknown;
+                const arr = Array.isArray(d) ? d : Array.isArray((d as { transactions?: unknown })?.transactions) ? (d as { transactions: DashboardTxn[] }).transactions : [];
+                setRecentTxns(arr);
+            })
             .catch(() => setRecentTxns([]));
     }, []);
 
+    const { payload: liveWsPayload, connected: liveWsConnected } = useLiveTransactions(true);
+
     useEffect(() => {
-        if (registerModal && accountAddress) {
-            setRegForm((f) => ({ ...f, supplier: f.supplier || accountAddress }));
-        }
-    }, [registerModal, accountAddress]);
+        const rows = liveWsPayload?.transactions;
+        if (!Array.isArray(rows) || rows.length === 0) return;
+        setRecentTxns(
+            rows.slice(0, 15).map((t: Record<string, unknown>) => ({
+                tx_id: String(t.tx_id ?? ''),
+                action: String(t.action ?? ''),
+                lora_url: typeof t.lora_url === 'string' ? t.lora_url : undefined,
+                timestamp: typeof t.timestamp === 'string' ? t.timestamp : undefined,
+                round: typeof t.round === 'number' ? t.round : undefined,
+            })),
+        );
+    }, [liveWsPayload]);
+
+    const activeShipmentCount = useMemo(
+        () => shipments.filter((s) => s.stage === 'In_Transit' || s.stage === 'Disputed' || s.stage === 'Delayed_Disaster').length,
+        [shipments],
+    );
+
+    useEffect(() => {
+        document.title = `Pramanik Oracle | ${activeShipmentCount} Active Shipments`;
+    }, [activeShipmentCount]);
 
     /* ── Backend / algod health (poll every 15s while dashboard mounted) ─ */
     useEffect(() => {
@@ -539,32 +569,33 @@ function MainApp() {
         }
     };
 
-    const handleRegisterShipment = async () => {
-        if (!regForm.shipment_id.trim() || !regForm.supplier.trim()) {
-            setToast('Shipment ID and supplier address are required.');
+    const handleRegisterShipment = async (form: RegisterFormState) => {
+        if (!form.shipment_id.trim() || !form.supplier.trim()) {
+            setToast('Shipment reference and supplier address are required.');
             return;
         }
         setRegisterBusy(true);
         try {
             setToast('Registering on-chain (oracle signs on the server)…');
+            const route = `${form.origin} → ${form.destination} | ${form.commodity}`;
             const regRes = await axios.post(
                 `${BACKEND_URL}/register-shipment`,
                 {
-                    shipment_id: regForm.shipment_id.trim(),
-                    origin: regForm.origin,
-                    destination: regForm.destination,
-                    supplier_address: regForm.supplier.trim(),
+                    shipment_id: form.shipment_id.trim(),
+                    origin: form.origin,
+                    destination: form.destination,
+                    route,
+                    supplier_address: form.supplier.trim(),
                 },
                 {
                     headers: { 'Content-Type': 'application/json' },
                     timeout: 120_000,
                 },
             );
-            const rid = regForm.shipment_id.trim();
+            const rid = form.shipment_id.trim();
             const rtx = typeof regRes.data?.tx_id === 'string' ? regRes.data.tx_id : '';
             const rlora = typeof regRes.data?.lora_tx_url === 'string' ? regRes.data.lora_tx_url : '';
             setRegisterModal(false);
-            setRegForm((f) => ({ ...f, shipment_id: '' }));
             setToast(
                 rtx
                     ? `✓ ${rid} registered on Algorand · TX ${rtx.slice(0, 10)}…${rlora ? ' (open Lora from Recent activity)' : ''}`
@@ -595,6 +626,27 @@ function MainApp() {
             setToast(msg);
         } finally {
             setRegisterBusy(false);
+        }
+    };
+
+    const handleVoidShipment = async (shipmentId: string) => {
+        if (!window.confirm('Void this shipment? Escrow is refunded (buyer or oracle); supplier reputation drops on-chain.')) {
+            return;
+        }
+        setVoidBusy(shipmentId);
+        try {
+            const r = await axios.post(`${BACKEND_URL}/void/${encodeURIComponent(shipmentId)}`, null, { timeout: 120_000 });
+            const tx = typeof r.data?.tx_id === 'string' ? r.data.tx_id : '';
+            setToast(tx ? `Shipment voided · TX ${tx.slice(0, 10)}…` : 'Shipment voided.');
+            const fresh = await axios.get(`${BACKEND_URL}/shipments`);
+            setShipments(sortShipmentsStable(Array.isArray(fresh.data) ? fresh.data : []));
+            void queryClient.invalidateQueries({ queryKey: ['stats'] });
+            refreshRecentTxns();
+        } catch (e: unknown) {
+            const err = e as { response?: { data?: { detail?: string } } };
+            setToast(err.response?.data?.detail || 'Void failed — is the wallet the oracle and is the contract upgraded?');
+        } finally {
+            setVoidBusy(null);
         }
     };
 
@@ -862,6 +914,7 @@ function MainApp() {
         if (stage === 'In_Transit') return { bg: '#eff6ff', color: '#2563eb', border: '#bfdbfe' };
         if (stage === 'Delayed_Disaster' || stage === 'Disputed') return { bg: '#fef2f2', color: '#dc2626', border: '#fecaca' };
         if (stage === 'Settled') return { bg: '#f0fdf4', color: '#15803d', border: '#bbf7d0' };
+        if (stage === 'VOID') return { bg: '#f4f4f5', color: '#71717a', border: '#d4d4d8' };
         if (stage === 'Not_Registered') return { bg: '#fffbeb', color: '#b45309', border: '#fde68a' };
         return { bg: '#f3f4f6', color: '#6b7280', border: '#e5e7eb' };
     };
@@ -870,6 +923,7 @@ function MainApp() {
         if (stage === 'Disputed' || stage === 'Delayed_Disaster') return '3px solid var(--danger)';
         if (stage === 'Settled') return '3px solid var(--success)';
         if (stage === 'In_Transit') return '3px solid var(--accent)';
+        if (stage === 'VOID') return '3px solid #a1a1aa';
         return undefined;
     };
 
@@ -893,14 +947,20 @@ function MainApp() {
                         <Shield size={20} color="#7dd3fc" strokeWidth={2} />
                     </div>
                     <div>
-                        <h1 className="dash-title">Pramanik</h1>
+                        <h1 className="dash-title">Pramanik — Dispute Oracle for Indian Exporters</h1>
                     </div>
                 </div>
 
-                <div style={{ flex: 1, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+                <div style={{ flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                     <span style={{ fontSize: '0.8rem', fontWeight: 600, color: chainHealth ? '#34d399' : '#f87171' }}>
-                        {chainHealth ? '● Algorand Testnet' : '● Offline'}
+                        {chainHealth ? '● Network connected' : '● Offline'}
                     </span>
+                    {healthSnapshot?.oracle_address && healthSnapshot.oracle_matches_app !== false ? (
+                        <span style={{ fontSize: '0.78rem', fontWeight: 600, color: '#86efac', fontFamily: 'var(--mono)' }}>
+                            <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#22c55e', marginRight: 6 }} />
+                            Oracle: {shortAddress(healthSnapshot.oracle_address)} ✓
+                        </span>
+                    ) : null}
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -1110,7 +1170,7 @@ function MainApp() {
                 </h2>
                 <p style={{ margin: '6px 0 0', fontSize: '0.82rem', color: '#94a3b8' }}>
                     {role === 'stakeholder'
-                        ? 'ALGO you have locked in Pramanik smart contracts'
+                        ? 'Funds you have locked in escrow for active shipments'
                         : 'Track incoming payments and your on-chain reputation'}
                 </p>
             </div>
@@ -1225,7 +1285,7 @@ function MainApp() {
                                     NAVI-PASS · ASA <strong style={{ fontFamily: 'ui-monospace, monospace' }}>{passportAsa}</strong>
                                 </p>
                                 <a
-                                    href={`https://lora.algokit.io/testnet/asset/${passportAsa}`}
+                                    href={loraAssetUrl(passportAsa)}
                                     target="_blank"
                                     rel="noreferrer"
                                     style={{ color: 'var(--accent)', fontWeight: 600, fontSize: '0.82rem' }}
@@ -1331,7 +1391,7 @@ function MainApp() {
                                 </div>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
                                     <a
-                                        href={`https://lora.algokit.io/testnet/transaction/${lastConfirmedTx.txId}`}
+                                        href={loraTransactionUrl(lastConfirmedTx.txId)}
                                         target="_blank"
                                         rel="noreferrer"
                                         style={{
@@ -1454,10 +1514,10 @@ function MainApp() {
                             <Wifi size={15} color="#4ade80" />
                             <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Contract</span>
                         </div>
-                        <div style={{ fontSize: '1.05rem', fontWeight: 700, color: chainHealth ? '#34d399' : '#f87171' }}>Testnet Online</div>
+                        <div style={{ fontSize: '1.05rem', fontWeight: 700, color: chainHealth ? '#34d399' : '#f87171' }}>Network Online</div>
                         {appId ? (
                             <a
-                                href={`https://lora.algokit.io/testnet/application/${appId}`}
+                                href={LORA_APP(Number(appId))}
                                 target="_blank"
                                 rel="noreferrer"
                                 style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 8 }}
@@ -1558,7 +1618,28 @@ function MainApp() {
             ) : null}
 
             <section className="card" style={{ marginTop: 16, padding: '16px 18px' }} aria-label="Recent activity">
-                <div style={{ fontWeight: 700, fontSize: '0.9rem', marginBottom: 12 }}>Recent activity</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                    <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>Transaction feed</div>
+                    {liveWsConnected ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: '0.68rem', fontWeight: 700, color: '#4ade80' }}>
+                            <span
+                                style={{
+                                    width: 8,
+                                    height: 8,
+                                    borderRadius: '50%',
+                                    background: '#22c55e',
+                                    animation: 'pulse 1.5s ease-in-out infinite',
+                                }}
+                            />
+                            LIVE
+                        </span>
+                    ) : (
+                        <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Polling every 30s</span>
+                    )}
+                </div>
+                <div style={{ fontSize: '0.72rem', color: '#64748b', marginBottom: 12 }}>
+                    Real-time contract activity. Open proof links in Lora for any row.
+                </div>
                 {isLoading ? (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: '0.85rem', color: '#94a3b8' }}>
                         <div
@@ -1591,8 +1672,15 @@ function MainApp() {
                                 }}
                             >
                                 <span>{t.action || t.action_plain || t.method_name || 'Transaction'}</span>
-                                <span style={{ color: '#64748b' }}>
-                                    {t.timestamp ? timeAgo(t.timestamp) : t.round != null ? `Round ${t.round}` : '—'}
+                                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    {t.lora_url && t.tx_id ? (
+                                        <a href={t.lora_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', fontSize: '0.75rem', fontWeight: 600 }}>
+                                            Lora ↗
+                                        </a>
+                                    ) : null}
+                                    <span style={{ color: '#64748b' }}>
+                                        {t.timestamp ? timeAgo(t.timestamp) : t.round != null ? `Round ${t.round}` : '—'}
+                                    </span>
                                 </span>
                             </li>
                         ))}
@@ -1822,16 +1910,15 @@ function MainApp() {
                                 <div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                         <Package size={15} color="#2563eb" />
-                                        <span style={{ fontSize: '0.8rem', fontFamily: 'ui-monospace, monospace' }}>{ship.shipment_id}</span>
+                                        <span style={{ fontSize: '0.95rem', fontWeight: 700, color: '#f1f5f9' }}>
+                                            {shipmentCardTitle(ship.origin, ship.destination, ship.created_at)}
+                                        </span>
+                                    </div>
+                                    <div style={{ fontSize: '0.72rem', fontFamily: 'ui-monospace, monospace', color: '#64748b', marginTop: 4 }}>
+                                        {ship.shipment_id}
                                     </div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, fontSize: '0.875rem', color: '#374151' }}>
-                                        {(ship.origin && ship.origin !== 'N/A' && ship.destination && ship.destination !== 'N/A') ? (
-                                            <>
-                                                <span>{ship.origin}</span>
-                                                <ArrowRight size={13} color="#9ca3af" />
-                                                <span>{ship.destination}</span>
-                                            </>
-                                        ) : (
+                                        {(ship.origin && ship.origin !== 'N/A' && ship.destination && ship.destination !== 'N/A') ? null : (
                                             <span style={{
                                                 display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 6,
                                                 background: '#fef3c7', color: '#92400e', fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.03em',
@@ -1844,9 +1931,12 @@ function MainApp() {
                                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
                                     <div style={{
                                         padding: '3px 10px', borderRadius: 20, fontSize: '0.7rem', fontWeight: 600,
-                                        background: sc.bg, color: sc.color, border: `1px solid ${sc.border}`, whiteSpace: 'nowrap',
+                                        background: stageBadgeColors(ship.stage).bg,
+                                        color: stageBadgeColors(ship.stage).color,
+                                        border: `1px solid ${stageBadgeColors(ship.stage).border}`,
+                                        whiteSpace: 'nowrap',
                                     }}>
-                                        {ship.stage.replace('_', ' ')}
+                                        {stageUserLabel(ship.stage)}
                                     </div>
                                 </div>
                             </div>
@@ -2004,7 +2094,7 @@ function MainApp() {
                                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                                                 {settleTxId ? (
                                                     <a
-                                                        href={`https://lora.algokit.io/testnet/transaction/${settleTxId}`}
+                                                        href={loraTransactionUrl(settleTxId)}
                                                         target="_blank"
                                                         rel="noreferrer"
                                                         style={{ fontWeight: 700, fontSize: '0.78rem', color: '#15803d' }}
@@ -2014,7 +2104,7 @@ function MainApp() {
                                                 ) : null}
                                                 {certAsa > 0 ? (
                                                     <a
-                                                        href={`https://lora.algokit.io/testnet/asset/${certAsa}`}
+                                                        href={loraAssetUrl(certAsa)}
                                                         target="_blank"
                                                         rel="noreferrer"
                                                         style={{ fontWeight: 700, fontSize: '0.78rem', color: '#15803d' }}
@@ -2065,7 +2155,7 @@ function MainApp() {
                                             </div>
                                             {settleTxId ? (
                                                 <a
-                                                    href={`https://lora.algokit.io/testnet/transaction/${settleTxId}`}
+                                                    href={loraTransactionUrl(settleTxId)}
                                                     target="_blank"
                                                     rel="noreferrer"
                                                     style={{
@@ -2093,17 +2183,19 @@ function MainApp() {
                                             )}
                                         </div>
                                         <div style={{ borderTop: '1px solid rgba(22,101,52,0.2)', paddingTop: 12 }}>
-                                            <div style={{ fontSize: '0.84rem', color: '#166534', fontWeight: 700, marginBottom: 8 }}>
-                                                ✓ Digital goods certificate (NFT): NAVI-CERT <strong>#{certAsa}</strong>
+                                            <div style={{ fontSize: '0.84rem', color: '#166534', fontWeight: 700, marginBottom: 4 }}>
+                                                ✓ Settlement certificate <strong>#{certAsa}</strong>
                                             </div>
                                             <div style={{ fontSize: '0.72rem', color: '#166534', marginBottom: 10, lineHeight: 1.45 }}>
-                                                Pure non-fungible ASA on Algorand TestNet — unit <code>NCERT</code>, decimals 0. Metadata URL points to the public{' '}
-                                                <code>/verify</code> flow so anyone can trace settlement back to this shipment.
+                                                This is your permanent settlement proof — scan or open on Lora.
+                                            </div>
+                                            <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+                                                <CertificateQr url={loraAssetUrl(certAsa)} size={88} />
                                             </div>
                                             <a
-                                                href={`https://lora.algokit.io/testnet/asset/${certAsa}`}
+                                                href={loraAssetUrl(certAsa)}
                                                 target="_blank"
-                                                rel="noreferrer"
+                                                rel="noopener noreferrer"
                                                 style={{
                                                     display: 'inline-flex',
                                                     alignItems: 'center',
@@ -2133,12 +2225,11 @@ function MainApp() {
                             ) : null}
 
                             {role === 'stakeholder' && fundsMicro > 0 && (
-                                <div style={{ marginBottom: 10, fontSize: '0.8rem', color: '#64748b' }}>
-                                    Funds locked:{' '}
-                                    <span style={{ fontWeight: 600, color: '#0f172a' }}>{(fundsMicro / 1e6).toFixed(2)} ALGO</span>
-                                    {escrowUsdText(ship) ? (
-                                        <span style={{ fontWeight: 600, color: '#059669', marginLeft: 8 }}>{escrowUsdText(ship)}</span>
-                                    ) : null}
+                                <div style={{ marginBottom: 10, fontSize: '0.8rem', color: '#94a3b8' }}>
+                                    Escrow locked:{' '}
+                                    <span style={{ fontWeight: 600, color: '#e2e8f0' }}>
+                                        {formatEscrowTriple(fundsMicro / 1e6, ship.funds_inr, ship.funds_usd)}
+                                    </span>
                                 </div>
                             )}
 
@@ -2225,13 +2316,13 @@ function MainApp() {
                                             </span>
                                         )}
                                     </div>
-                                    <div style={{ fontSize: '0.8rem', color: '#475569', lineHeight: 1.55, marginBottom: 8 }}>
-                                        <span style={{ marginRight: 6 }} aria-hidden>🛰</span>
-                                        <strong>Sentry:</strong> {jury.sentinel?.reasoning_narrative || jury.sentinel?.reasoning || '—'}
+                                    <div style={{ fontSize: '0.8rem', color: '#475569', lineHeight: 1.55, marginBottom: 8, wordBreak: 'break-word' }}>
+                                        <span style={{ marginRight: 6 }} aria-hidden>{AGENT_DISPLAY.sentinel.icon}</span>
+                                        <strong>{AGENT_DISPLAY.sentinel.label}:</strong> {jury.sentinel?.reasoning_narrative || jury.sentinel?.reasoning || '—'}
                                     </div>
-                                    <div style={{ fontSize: '0.8rem', color: '#475569', lineHeight: 1.55, marginBottom: 8 }}>
-                                        <span style={{ marginRight: 6 }} aria-hidden>📋</span>
-                                        <strong>Auditor:</strong> {jury.auditor?.audit_report || jury.auditor?.blockchain_status || '—'}
+                                    <div style={{ fontSize: '0.8rem', color: '#475569', lineHeight: 1.55, marginBottom: 8, wordBreak: 'break-word' }}>
+                                        <span style={{ marginRight: 6 }} aria-hidden>{AGENT_DISPLAY.auditor.icon}</span>
+                                        <strong>{AGENT_DISPLAY.auditor.label}:</strong> {jury.auditor?.audit_report || jury.auditor?.blockchain_status || '—'}
                                         {fundsMicro > 0 ? (
                                             <span style={{ display: 'block', marginTop: 4, color: '#64748b' }}>
                                                 Funds locked: {(fundsMicro / 1e6).toFixed(2)} ALGO
@@ -2343,11 +2434,13 @@ function MainApp() {
                                                 <AlertTriangle size={13} /> View dispute
                                             </button>
                                         ) : null}
-                                        {ship.stage === 'In_Transit' && !hasVerdictTx ? (
+                                        {ship.stage === 'In_Transit' && !hasVerdictTx ? (() => {
+                                            const jb = juryButtonState(ship.stage, fundsMicro, awaitingOffChainSync);
+                                            return (
                                             <button
                                                 type="button"
                                                 className="primary-btn"
-                                                disabled={awaitingOffChainSync}
+                                                disabled={jb.disabled}
                                                 style={{
                                                     flex: 1,
                                                     display: 'flex',
@@ -2356,14 +2449,15 @@ function MainApp() {
                                                     gap: 6,
                                                     minWidth: 120,
                                                     fontSize: '0.8rem',
-                                                    ...(awaitingOffChainSync ? { background: '#9ca3af', cursor: 'not-allowed' } : {}),
+                                                    ...(jb.disabled ? { background: '#9ca3af', cursor: 'not-allowed' } : {}),
                                                 }}
-                                                onClick={() => setJuryTerminalShipmentId(ship.shipment_id)}
-                                                title={awaitingOffChainSync ? 'Syncing shipment metadata' : undefined}
+                                                onClick={() => !jb.disabled && setJuryTerminalShipmentId(ship.shipment_id)}
+                                                title={jb.disabled ? jb.label : undefined}
                                             >
-                                                <Play size={13} /> Run AI jury
+                                                <Play size={13} /> {jb.label}
                                             </button>
-                                        ) : null}
+                                            );
+                                        })() : null}
                                         {ship.stage === 'In_Transit' && hasVerdictTx && !verdictFlagged ? (
                                             <button
                                                 type="button"
@@ -2381,6 +2475,35 @@ function MainApp() {
                                                 onClick={() => void handleSettleShipment(ship.shipment_id)}
                                             >
                                                 <CheckCircle size={13} /> Settle shipment
+                                            </button>
+                                        ) : null}
+                                        {healthSnapshot?.oracle_address &&
+                                        accountAddress &&
+                                        accountAddress === healthSnapshot.oracle_address &&
+                                        ship.stage !== 'Settled' &&
+                                        ship.stage !== 'VOID' &&
+                                        ship.stage !== 'Not_Registered' ? (
+                                            <button
+                                                type="button"
+                                                disabled={voidBusy === ship.shipment_id}
+                                                style={{
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    gap: 6,
+                                                    fontSize: '0.75rem',
+                                                    padding: '6px 12px',
+                                                    borderRadius: 6,
+                                                    background: 'rgba(248,113,113,0.15)',
+                                                    color: '#fecaca',
+                                                    border: '1px solid rgba(248,113,113,0.4)',
+                                                    cursor: voidBusy === ship.shipment_id ? 'wait' : 'pointer',
+                                                    fontWeight: 600,
+                                                }}
+                                                title="Oracle only — void on-chain (refund + rep penalty)"
+                                                onClick={() => void handleVoidShipment(ship.shipment_id)}
+                                            >
+                                                {voidBusy === ship.shipment_id ? 'Voiding…' : 'Void shipment'}
                                             </button>
                                         ) : null}
                                         {ship.stage !== 'Not_Registered' &&
@@ -2492,7 +2615,7 @@ function MainApp() {
                             </div>
                             {(jr.explorer_url || jr.on_chain_tx_id) ? (
                                 <a
-                                    href={jr.explorer_url || `https://lora.algokit.io/testnet/transaction/${jr.on_chain_tx_id}`}
+                                    href={jr.explorer_url || loraTransactionUrl(jr.on_chain_tx_id)}
                                     target="_blank"
                                     rel="noreferrer"
                                     style={{ fontSize: '0.78rem', fontWeight: 600, color: '#2563eb', textDecoration: 'none' }}
@@ -2517,7 +2640,7 @@ function MainApp() {
                                 <span style={{ fontSize: '0.75rem', color: '#9ca3af' }}>
                                     APP_ID:{' '}
                                     <a
-                                        href={`https://lora.algokit.io/testnet/application/${auditTrail.app_id ?? appId ?? FALLBACK_APP_ID}`}
+                                        href={LORA_APP(Number(auditTrail.app_id ?? appId ?? FALLBACK_APP_ID) || 0)}
                                         target="_blank"
                                         rel="noreferrer"
                                         style={{ color: '#2563eb', textDecoration: 'none', fontWeight: 600 }}
@@ -2549,7 +2672,7 @@ function MainApp() {
                                 Verified via Algorand ARC-4 Box Storage (Stateless &amp; Immutable)
                             </div>
                             <a
-                                href={`https://lora.algokit.io/testnet/application/${auditTrail.app_id}`}
+                                href={LORA_APP(Number(auditTrail.app_id) || 0)}
                                 target="_blank"
                                 rel="noreferrer"
                                 style={{
@@ -2571,7 +2694,7 @@ function MainApp() {
                                         <div style={{ fontSize: '0.8rem', color: '#111827', lineHeight: 1.5 }}>{n.reasoning}</div>
                                         {n.round && <div style={{ fontSize: '0.65rem', color: '#059669', marginTop: 4 }}>Block #{n.round}</div>}
                                         {n.tx_id && (
-                                            <a href={`https://lora.algokit.io/testnet/transaction/${n.tx_id}`} target="_blank" rel="noreferrer"
+                                            <a href={loraTransactionUrl(n.tx_id)} target="_blank" rel="noreferrer"
                                                style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 4, fontSize: '0.7rem', color: '#2563eb', textDecoration: 'none' }}>
                                                 <ExternalLink size={10} /> TX: {n.tx_id.substring(0, 12)}...
                                             </a>
@@ -2613,7 +2736,7 @@ function MainApp() {
                                         )}
                                         {v.tx_id && (
                                             <a
-                                                href={`https://lora.algokit.io/testnet/transaction/${v.tx_id}`}
+                                                href={loraTransactionUrl(v.tx_id)}
                                                 target="_blank"
                                                 rel="noreferrer"
                                                 style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 4, fontSize: '0.7rem', color: '#2563eb', textDecoration: 'none', fontWeight: 500 }}
@@ -2642,77 +2765,13 @@ function MainApp() {
             />
 
             {/* ── Register shipment modal ─────────────────────── */}
-            {registerModal && (
-                <div className="modal-backdrop">
-                    <div className="card" style={{ maxWidth: 440, width: '95%', textAlign: 'left' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                            <h3 style={{ margin: 0, fontSize: '1rem' }}>Register shipment</h3>
-                            <button type="button" onClick={() => setRegisterModal(false)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>
-                                <X size={18} color="#9ca3af" />
-                            </button>
-                        </div>
-                        <p style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: 12, lineHeight: 1.45 }}>
-                            The smart contract only accepts <strong>register_shipment</strong> from the oracle account. This form calls your backend; the server signs with{' '}
-                            <code style={{ fontSize: '0.72rem' }}>ORACLE_MNEMONIC</code> — <strong>no Pera prompt</strong>. Use a <strong>new</strong> ID (e.g. SHIP_TEST_001) — demo IDs may already exist.
-                        </p>
-                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: 4 }}>Shipment ID</label>
-                        <input
-                            value={regForm.shipment_id}
-                            onChange={(e) => setRegForm((f) => ({ ...f, shipment_id: e.target.value }))}
-                            placeholder="e.g. SHIP_MUMBAI_001"
-                            style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #e5e7eb', marginBottom: 12, fontSize: '0.9rem' }}
-                        />
-                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: 4 }}>Origin</label>
-                        <select
-                            value={regForm.origin}
-                            onChange={(e) => setRegForm((f) => ({ ...f, origin: e.target.value }))}
-                            style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #e5e7eb', marginBottom: 12, fontSize: '0.9rem' }}
-                        >
-                            {CITIES.map((c) => (
-                                <option key={c} value={c}>{c}</option>
-                            ))}
-                        </select>
-                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: 4 }}>Destination</label>
-                        <select
-                            value={regForm.destination}
-                            onChange={(e) => setRegForm((f) => ({ ...f, destination: e.target.value }))}
-                            style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #e5e7eb', marginBottom: 12, fontSize: '0.9rem' }}
-                        >
-                            {CITIES.map((c) => (
-                                <option key={c} value={c}>{c}</option>
-                            ))}
-                        </select>
-                        <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: '#64748b', marginBottom: 4 }}>Supplier address</label>
-                        <input
-                            value={regForm.supplier}
-                            onChange={(e) => setRegForm((f) => ({ ...f, supplier: e.target.value }))}
-                            placeholder="Algorand address"
-                            style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #e5e7eb', marginBottom: 16, fontSize: '0.85rem', fontFamily: 'ui-monospace, monospace' }}
-                        />
-                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                            <button
-                                type="button"
-                                onClick={() => setRegisterModal(false)}
-                                style={{
-                                    padding: '10px 16px',
-                                    borderRadius: 8,
-                                    cursor: 'pointer',
-                                    background: 'rgba(148, 163, 184, 0.12)',
-                                    border: '1px solid #475569',
-                                    color: '#e2e8f0',
-                                    fontWeight: 600,
-                                    fontSize: '0.875rem',
-                                }}
-                            >
-                                Cancel
-                            </button>
-                            <button type="button" className="primary-btn" disabled={registerBusy} onClick={() => void handleRegisterShipment()}>
-                                {registerBusy ? 'Registering…' : 'Register on-chain'}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
+            <RegisterShipmentModal
+                open={registerModal}
+                onClose={() => setRegisterModal(false)}
+                busy={registerBusy}
+                accountAddress={accountAddress}
+                onSubmit={(form) => void handleRegisterShipment(form)}
+            />
 
             {/* ── Submit Mitigation Modal (Supplier) ─────────── */}
             {mitigateModal && (
@@ -2784,7 +2843,7 @@ function MainApp() {
 
                         {paymentReceipt.tx_id ? (
                             <a
-                                href={`https://lora.algokit.io/testnet/transaction/${paymentReceipt.tx_id}`}
+                                href={loraTransactionUrl(paymentReceipt.tx_id)}
                                 target="_blank"
                                 rel="noreferrer"
                                 style={{ display: 'inline-block', fontWeight: 600, color: '#2563eb', fontSize: '0.8rem', marginBottom: 12 }}
@@ -2831,7 +2890,7 @@ function MainApp() {
                                     )}
                                     {selectedShipment.last_jury.on_chain_tx_id && (
                                         <a
-                                            href={`https://lora.algokit.io/testnet/transaction/${selectedShipment.last_jury.on_chain_tx_id}`}
+                                            href={loraTransactionUrl(selectedShipment.last_jury.on_chain_tx_id)}
                                             target="_blank"
                                             rel="noreferrer"
                                             style={{

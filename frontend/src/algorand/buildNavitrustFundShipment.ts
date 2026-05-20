@@ -36,12 +36,23 @@ export async function buildNavitrustFundShipmentTransactions(params: {
   const algorand = AlgorandClient.fromClients({ algod });
   const appAddr = algosdk.getApplicationAddress(Number(appId));
 
+  const fundNote = new TextEncoder().encode(
+    JSON.stringify({
+      standard: 'pramanik/v1',
+      type: 'fund',
+      shipment_id: shipmentId,
+      amount_microalgo: microAlgosAmt,
+      event_type: 'FUNDED',
+    }),
+  );
+
   const payTxn = await algorand.createTransaction.payment({
     sender: buyerAddress,
     receiver: appAddr,
     amount: microAlgos(microAlgosAmt),
     staticFee: microAlgos(2000),
     validityWindow: VALIDITY_WINDOW,
+    note: fundNote,
   });
 
   const paymentArg: algosdk.TransactionWithSigner = {

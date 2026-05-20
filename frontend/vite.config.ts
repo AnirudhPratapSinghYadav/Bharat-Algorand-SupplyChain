@@ -39,6 +39,7 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           changeOrigin: true,
           secure: false,
+          ws: true,
           rewrite: (path) => {
             const stripped = path.replace(/^\/api/, '')
             return stripped.length > 0 ? stripped : '/'

@@ -6,7 +6,7 @@
 
 **Live Demo:** https://pramanik.vercel.app
 **API:** https://navi-trust-api.onrender.com  
-**Contract on Lora:** https://lora.algokit.io/testnet/application/759018740  
+**Contract on Lora:** set `APP_ID` / `VITE_APP_ID` after deploy, then open `{lora_base_url}/application/{APP_ID}` (see `config.json` `lora_base_url`, often `https://lora.algokit.io/testnet`).  
 **On-chain proof:** [LORA_PROOF.md](./LORA_PROOF.md)
 
 ### Deploy frontend (Vercel)
@@ -71,14 +71,14 @@ Every verdict includes a SHA-256 hash of canonical inputs and outputs. Compare w
 ```bash
 curl -X POST https://navi-trust-api.onrender.com/verify-hash \
   -H "Content-Type: application/json" \
-  -d "{\"shipment_id\": \"SHIP_MUMBAI_001\"}"
+  -d "{\"shipment_id\": \"PRM-EX-MUM-RDM-001\"}"
 ```
 
 ---
 
 ## Smart Contract
 
-**App ID:** 759018740 | **Network:** Algorand Testnet  
+**App ID:** set via `APP_ID` in `.env` / hosting (must match your deployed NaviTrust). **Network:** Algorand Testnet (or match `ALGO_NETWORK`).  
 **Language:** Puya (AlgoKit) | **ABI:** ARC-56
 
 | Method | What it does |
@@ -132,9 +132,11 @@ npm run dev
 
 | Shipment | Route | Role in demo |
 |---|---|---|
-| SHIP_MUMBAI_001 | Mumbai → Dubai | In transit — run AI jury |
-| SHIP_CHEN_002 | Chennai → Rotterdam | Disputed — escrow frozen |
-| SHIP_DELHI_003 | Delhi → Singapore | Settled — certificate |
+| PRM-EX-MUM-RDM-001 | Mumbai → Rotterdam | In transit — run AI jury |
+| PRM-EX-CHN-SGP-002 | Chennai → Singapore | Disputed — escrow frozen |
+| PRM-EX-DEL-DXB-003 | Delhi → Dubai | Settled — certificate |
+
+IDs are listed in `config.json` under `demo_shipments` (returned by `GET /config`) and used by `seed_blockchain.py`.
 
 See [LORA_PROOF.md](./LORA_PROOF.md) for explorer links after seeding.
 

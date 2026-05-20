@@ -1,41 +1,43 @@
 import { Link } from 'react-router-dom';
 import { Cloud, ShieldCheck, ScanSearch, Gavel, Lock, Cpu, FileCheck } from 'lucide-react';
 
+import { AGENT_DISPLAY, JURY_BUTTON_LABEL } from '../lib/displayLabels';
+
 const AGENTS = [
     {
         key: 'sentinel',
-        title: 'Weather Sentinel',
+        title: AGENT_DISPLAY.sentinel.label,
         icon: Cloud,
         accent: '#38bdf8',
         body: 'Pulls live Open-Meteo forecasts for the route and scores weather risk (storms, heat, precipitation) that could disrupt cold chain or delivery windows.',
     },
     {
         key: 'auditor',
-        title: 'Compliance Auditor',
+        title: AGENT_DISPLAY.auditor.label,
         icon: ShieldCheck,
         accent: '#a78bfa',
         body: 'Reads your Navi-Trust box on Algorand: status, escrow, supplier address, and cross-checks against SQLite so off-chain metadata cannot drift from chain truth.',
     },
     {
         key: 'fraud',
-        title: 'Fraud Detector',
+        title: AGENT_DISPLAY.fraud.label,
         icon: ScanSearch,
         accent: '#f472b6',
         body: 'Scores supplier history and inconsistency signals (e.g. route vs claims) before any payout logic runs — reducing duplicate or inflated disaster claims.',
     },
     {
         key: 'arbiter',
-        title: 'Chief Arbiter',
+        title: AGENT_DISPLAY.arbiter.label,
         icon: Gavel,
         accent: '#fbbf24',
-        body: 'Combines all agent outputs into a binding verdict (HOLD / DISPUTE / SETTLE-style) and drives the oracle-signed record_verdict transaction and audit trail.',
+        body: 'Combines all agent outputs into a binding outcome (under review, dispute, or payment released) and records the signed verdict on-chain.',
     },
 ] as const;
 
 const FLOW = [
     { step: 1, title: 'Register shipment', detail: 'Oracle signs register_shipment — not your wallet. Escrow rules are written into chain state.', icon: FileCheck },
     { step: 2, title: 'Lock escrow', detail: 'You fund the shipment from Pera; ALGO is held in the app until settlement or dispute.', icon: Lock },
-    { step: 3, title: 'Run AI Jury', detail: 'The four agents run in sequence; results are hashed and recorded on-chain with a verifiable note.', icon: Cpu },
+    { step: 3, title: JURY_BUTTON_LABEL, detail: 'Four checks run in sequence; results are hashed and recorded with a verifiable proof link.', icon: Cpu },
     { step: 4, title: 'Verify & settle', detail: 'Use Verify for public proof, Audit trail for history, then settle to mint certificate flows.', icon: ShieldCheck },
 ] as const;
 

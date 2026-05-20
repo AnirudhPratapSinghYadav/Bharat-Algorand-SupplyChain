@@ -7,7 +7,8 @@ services:
     envVars:
       - key: SKIP_ORACLE_VERIFY
         value: "0"
+      # Set to your deployed NaviTrust application id (same as backend APP_ID).
       - key: APP_ID
-        value: "758734899"
+        value: "0"
       - key: ALGO_NETWORK
         value: testnet

@@ -46,5 +46,7 @@ def deploy() -> None:
         app_client.app_address,
         result.operation_performed,
     )
+    print("ARC-28: ShipmentEvent on REGISTERED, FUNDED, VERDICT, SETTLED, VOID — verify Logs tab on Lora.", flush=True)
     # Machine-readable line for scripts/bootstrap_testnet_oracle.py
     print(f"PRAMANIK_APP_ID={app_client.app_id}", flush=True)
+    print(f"Set APP_ID={app_client.app_id} in repo-root .env and Vercel/Render.", flush=True)

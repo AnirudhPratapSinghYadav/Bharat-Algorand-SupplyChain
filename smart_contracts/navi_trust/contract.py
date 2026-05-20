@@ -1,309 +1,333 @@
-# smart_contracts/navi_trust/contract.py
-# Puya (algopy) — compiles to TEAL v11 via AlgoKit
-# DO NOT add dead code. Every method is intentional.
+"""Pramanik (प्रमाणिक) — supply chain dispute oracle (Algorand / Puya)."""
 
 from algopy import (
-    ARC4Contract, String, UInt64, Account, BoxMap,
-    arc4, Txn, Global, itxn, subroutine,
-    op, log
+    ARC4Contract,
+    Account,
+    BoxMap,
+    Bytes,
+    Global,
+    GlobalState,
+    String,
+    UInt64,
+    arc4,
+    gtxn,
+    itxn,
+    Txn,
 )
+
+from algopy.arc4 import UInt64 as arc4_UInt64
+
+
+class ShipmentEvent(arc4.Struct):
+    """ARC-28 structured log for indexer filters (shipment lifecycle)."""
+
+    shipment_id: arc4.String
+    event_type: arc4.String
+    value: arc4.UInt64
+
 
 class NaviTrust(ARC4Contract):
     """
-    NaviTrust: Trustless supply-chain escrow + dispute oracle.
-    Oracle-only write pattern: only the registered oracle address
-    may update status, verdict, risk, and reputation.
-    Buyer funds escrow. Supplier receives settlement.
-    Anyone can read any box.
+    Pramanik (प्रमाणिक) — Supply Chain Dispute Oracle on Algorand.
+
+    "Pramanik" means verified and authentic in Hindi.
+    Buyer locks ALGO. 4-Agent AI jury examines evidence.
+    Verdict is immutable on-chain. Settlement is atomic.
+
+    Box prefix scheme (all keys are prefix + shipment_id bytes):
+      st_ = status          (String: In_Transit / Disputed / Settled)
+      sp_ = supplier        (Account)
+      by_ = buyer           (Account)
+      fn_ = funds           (UInt64 microALGO)
+      rs_ = risk_score      (UInt64 0-100)
+      vd_ = verdict_json    (Bytes)
+      rt_ = route           (Bytes)
+      ce_ = certificate ASA (UInt64)
+      rp_ = supplier rep    (UInt64, key = supplier)
+
+    ARC-28: ShipmentEvent emitted on register / fund / verdict / settle / void.
     """
 
     def __init__(self) -> None:
-        # State boxes — key prefix is critical, must match backend constants
-        self.status    = BoxMap(String, String,  key_prefix="st_")
-        self.supplier  = BoxMap(String, Account, key_prefix="sp_")
-        self.funds     = BoxMap(String, UInt64,  key_prefix="fn_")
-        self.verdict   = BoxMap(String, String,  key_prefix="vd_")
-        self.risk      = BoxMap(String, UInt64,  key_prefix="rk_")
-        self.rep       = BoxMap(String, UInt64,  key_prefix="rp_")
-        self.v_hash    = BoxMap(String, String,  key_prefix="vh_")
-        self.route     = BoxMap(String, String,  key_prefix="rt_")
-        # Oracle address — only this address may call privileged methods
-        self.oracle    = Global.creator_address  # set at deploy; override via update_oracle
+        self.total_shipments = GlobalState(UInt64)
+        self.total_settled = GlobalState(UInt64)
+        self.total_disputed = GlobalState(UInt64)
+        self.oracle_address = GlobalState(Account)
+        self.is_paused = GlobalState(UInt64)
 
-    # ── CREATE ──────────────────────────────────────────────────────────────
+        self.shipment_status = BoxMap(Bytes, String, key_prefix=b"st_")
+        self.shipment_supplier = BoxMap(Bytes, Account, key_prefix=b"sp_")
+        self.shipment_buyer = BoxMap(Bytes, Account, key_prefix=b"by_")
+        self.shipment_funds = BoxMap(Bytes, UInt64, key_prefix=b"fn_")
+        self.shipment_risk = BoxMap(Bytes, UInt64, key_prefix=b"rs_")
+        self.shipment_verdict = BoxMap(Bytes, Bytes, key_prefix=b"vd_")
+        self.shipment_route = BoxMap(Bytes, Bytes, key_prefix=b"rt_")
+        self.shipment_cert = BoxMap(Bytes, UInt64, key_prefix=b"ce_")
+        self.supplier_rep = BoxMap(Account, UInt64, key_prefix=b"rp_")
 
     @arc4.baremethod(create="require")
     def create_app(self) -> None:
-        """Deploy the contract. Called once by AlgoKit deploy."""
-        pass  # No-op — all state is in boxes
-
-    # ── ORACLE MANAGEMENT ───────────────────────────────────────────────────
-
-    @arc4.abimethod
-    def update_oracle(self, new_oracle: Account) -> None:
-        """
-        Transfer oracle rights to a new address.
-        Only current oracle can call this.
-        Use case: key rotation, multi-sig upgrade.
-        """
-        assert Txn.sender == Global.creator_address, "Only creator can update oracle"
-        self.oracle = new_oracle
-
-    # ── SHIPMENT LIFECYCLE ──────────────────────────────────────────────────
+        self.total_shipments.value = UInt64(0)
+        self.total_settled.value = UInt64(0)
+        self.total_disputed.value = UInt64(0)
+        self.oracle_address.value = Global.creator_address
+        self.is_paused.value = UInt64(0)
 
     @arc4.abimethod
     def register_shipment(
         self,
-        shipment_id: String,
-        supplier_addr: Account,
-        route: String,
+        shipment_id: arc4.String,
+        supplier: Account,
+        route: arc4.String,
     ) -> None:
-        """
-        Oracle registers a new shipment. Sets initial state.
-        Caller MUST fund MBR for all 8 boxes via preceding payment.
-        MBR formula per box: 2500 + 400 * (key_bytes + value_bytes)
-        Recommended: send 0.1 ALGO per shipment to cover all boxes.
-        """
-        assert Txn.sender == Global.creator_address, "Oracle only"
-        assert shipment_id not in self.status, "Shipment already registered"
-        assert len(shipment_id.bytes) >= 4, "Shipment ID too short"
-        assert len(shipment_id.bytes) <= 64, "Shipment ID too long"
-
-        self.status[shipment_id]   = String("CREATED")
-        self.supplier[shipment_id] = supplier_addr
-        self.funds[shipment_id]    = UInt64(0)
-        self.verdict[shipment_id]  = String("")
-        self.risk[shipment_id]     = UInt64(0)
-        self.rep[shipment_id]      = UInt64(75)  # Default reputation: 75/100
-        self.v_hash[shipment_id]   = String("")
-        self.route[shipment_id]    = route
-
-        log(b"REGISTERED:" + shipment_id.bytes)
+        """Register a new shipment. Oracle only. Cannot re-register."""
+        assert Txn.sender == self.oracle_address.value, "Oracle only"
+        assert self.is_paused.value == UInt64(0), "Oracle is paused"
+        sid = shipment_id.native.bytes
+        assert sid not in self.shipment_status, "Shipment already registered"
+        self.shipment_status[sid] = String("In_Transit")
+        self.shipment_supplier[sid] = supplier
+        self.shipment_funds[sid] = UInt64(0)
+        self.shipment_risk[sid] = UInt64(0)
+        self.shipment_route[sid] = route.native.bytes
+        self.total_shipments.value = self.total_shipments.value + UInt64(1)
+        arc4.emit(
+            ShipmentEvent(
+                shipment_id=shipment_id,
+                event_type=arc4.String("REGISTERED"),
+                value=arc4_UInt64(UInt64(0)),
+            )
+        )
 
     @arc4.abimethod
-    def activate_shipment(self, shipment_id: String) -> None:
-        """
-        Oracle marks shipment as IN_TRANSIT after physical handover.
-        Can only move from CREATED → IN_TRANSIT.
-        """
-        assert Txn.sender == Global.creator_address, "Oracle only"
-        assert shipment_id in self.status, "Shipment not found"
-        assert self.status[shipment_id] == String("CREATED"), "Must be CREATED to activate"
-
-        self.status[shipment_id] = String("IN_TRANSIT")
-        log(b"ACTIVATED:" + shipment_id.bytes)
-
-    # ── ESCROW ──────────────────────────────────────────────────────────────
-
-    @arc4.abimethod
-    def fund_escrow(
+    def fund_shipment(
         self,
-        shipment_id: String,
+        shipment_id: arc4.String,
         payment: gtxn.PaymentTransaction,
     ) -> None:
-        """
-        Buyer locks ALGO into escrow. Can only fund when IN_TRANSIT.
-        Payment transaction must be in the same atomic group.
-        Receiver must be this contract's application address.
-        Calling a second time accumulates (allows top-up).
-        """
-        assert shipment_id in self.status, "Shipment not found"
-        assert self.status[shipment_id] == String("IN_TRANSIT"), "Can only fund IN_TRANSIT shipments"
-        assert payment.receiver == Global.current_application_address, "Wrong payment receiver"
-        assert payment.amount > UInt64(0), "Payment must be > 0"
-
-        current_funds = self.funds[shipment_id]
-        self.funds[shipment_id] = current_funds + payment.amount
-
-        log(b"FUNDED:" + shipment_id.bytes)
-
-    # ── VERDICT / ORACLE WRITES ─────────────────────────────────────────────
+        """Buyer locks ALGO into escrow. Minimum 0.1 ALGO."""
+        assert payment.receiver == Global.current_application_address
+        assert payment.amount >= UInt64(100_000), "Minimum 0.1 ALGO"
+        sid = shipment_id.native.bytes
+        assert sid in self.shipment_status, "Shipment not registered"
+        assert self.shipment_status[sid] != String("Settled"), "Cannot fund settled shipment"
+        assert self.shipment_status[sid] != String("VOID"), "Cannot fund voided shipment"
+        self.shipment_buyer[sid] = payment.sender
+        has_funds, current = self.shipment_funds.maybe(sid)
+        self.shipment_funds[sid] = (
+            current + payment.amount if has_funds else payment.amount
+        )
+        arc4.emit(
+            ShipmentEvent(
+                shipment_id=shipment_id,
+                event_type=arc4.String("FUNDED"),
+                value=arc4_UInt64(payment.amount),
+            )
+        )
 
     @arc4.abimethod
     def record_verdict(
         self,
-        shipment_id: String,
-        verdict_json: String,    # Arbiter verdict JSON, max 1024 bytes
-        risk_score: UInt64,      # 0–100
-        input_hash: String,      # SHA-256 hex of canonical jury inputs
+        shipment_id: arc4.String,
+        verdict_json: arc4.String,
+        risk_score: arc4_UInt64,
     ) -> None:
-        """
-        Oracle writes AI jury verdict on-chain. This is the permanent proof.
-        Does NOT change status or release funds — those require separate calls.
-        verdict_json is written as transaction note by backend AND stored in box.
-        input_hash is the SHA-256 of canonical inputs for auditability.
-        """
-        assert Txn.sender == Global.creator_address, "Oracle only"
-        assert shipment_id in self.status, "Shipment not found"
-        current_status = self.status[shipment_id]
-        assert current_status != String("SETTLED"), "Cannot record verdict on settled shipment"
-        assert current_status != String("VOID"), "Cannot record verdict on void shipment"
-        assert risk_score <= UInt64(100), "Risk score must be 0–100"
-        assert len(verdict_json.bytes) <= 1024, "Verdict too long — max 1024 bytes"
-        assert len(input_hash.bytes) == 64, "input_hash must be 64-char SHA-256 hex"
-
-        self.verdict[shipment_id] = verdict_json
-        self.risk[shipment_id]    = risk_score
-        self.v_hash[shipment_id]  = input_hash
-
-        log(b"VERDICT:" + shipment_id.bytes)
-
-    @arc4.abimethod
-    def mark_disputed(self, shipment_id: String) -> None:
-        """
-        Oracle escalates shipment to DISPUTED.
-        Triggered when arbiter returns verdict == "DISPUTE".
-        Can only move from IN_TRANSIT → DISPUTED.
-        """
-        assert Txn.sender == Global.creator_address, "Oracle only"
-        assert shipment_id in self.status, "Shipment not found"
-        assert self.status[shipment_id] == String("IN_TRANSIT"), "Must be IN_TRANSIT to dispute"
-
-        self.status[shipment_id] = String("DISPUTED")
-        log(b"DISPUTED:" + shipment_id.bytes)
-
-    # ── SETTLEMENT ──────────────────────────────────────────────────────────
-
-    @arc4.abimethod
-    def settle_shipment(self, shipment_id: String) -> UInt64:
-        """
-        Oracle executes atomic settlement:
-        1. Releases escrowed ALGO to supplier via inner transaction
-        2. Mints ARC-69 certificate NFT to supplier (asset creation inner txn)
-        3. Sets status to SETTLED
-        4. Updates supplier reputation score
-
-        Returns: ASA ID of the certificate NFT (0 if mint fails gracefully)
-
-        Pre-conditions:
-        - Shipment must be IN_TRANSIT or DISPUTED (not SETTLED or VOID)
-        - A verdict must exist (risk score > 0 OR verdict_json not empty)
-        - Oracle must call this (NEVER automated — always oracle-signed)
-
-        Fee requirement: Set fee to 4000 microAlgo to cover inner txn fees.
-        """
-        assert Txn.sender == Global.creator_address, "Oracle only"
-        assert shipment_id in self.status, "Shipment not found"
-        current_status = self.status[shipment_id]
-        assert current_status == String("IN_TRANSIT") or current_status == String("DISPUTED"), \
-            "Can only settle IN_TRANSIT or DISPUTED shipments"
-
-        escrow_amount = self.funds[shipment_id]
-        supplier_addr = self.supplier[shipment_id]
-
-        # Inner txn 1: Release escrow to supplier
-        if escrow_amount > UInt64(0):
-            itxn.Payment(
-                receiver=supplier_addr,
-                amount=escrow_amount,
-                fee=UInt64(0),  # Covered by outer txn fee
-                note=b"pramanik:settlement:" + shipment_id.bytes,
-            ).submit()
-
-        # Inner txn 2: Mint ARC-69 certificate NFT
-        # ARC-69 metadata is in transaction note of asset config txn
-        cert_note = (
-            b'{"standard":"arc69","description":"Pramanik Settlement Certificate",'
-            b'"shipment":"' + shipment_id.bytes + b'"}'
+        """Oracle writes 4-agent jury verdict on-chain. Immutable."""
+        assert Txn.sender == self.oracle_address.value, "Oracle only"
+        assert self.is_paused.value == UInt64(0), "Oracle is paused"
+        sid = shipment_id.native.bytes
+        assert sid in self.shipment_status, "Shipment not registered"
+        assert self.shipment_status[sid] != String("Settled"), "Cannot record verdict on settled shipment"
+        assert self.shipment_status[sid] != String("VOID"), "Cannot record verdict on voided shipment"
+        rs = risk_score.native
+        old_r = UInt64(0)
+        if sid in self.shipment_risk:
+            old_r = self.shipment_risk[sid]
+        old_status = self.shipment_status[sid]
+        self.shipment_verdict[sid] = verdict_json.native.bytes
+        self.shipment_risk[sid] = rs
+        if rs > UInt64(65):
+            self.shipment_status[sid] = String("Disputed")
+            if old_r <= UInt64(65) and old_status != String("Disputed"):
+                self.total_disputed.value = self.total_disputed.value + UInt64(1)
+        else:
+            if old_status == String("Disputed"):
+                if self.total_disputed.value > UInt64(0):
+                    self.total_disputed.value = self.total_disputed.value - UInt64(1)
+            self.shipment_status[sid] = String("In_Transit")
+        arc4.emit(
+            ShipmentEvent(
+                shipment_id=shipment_id,
+                event_type=arc4.String("VERDICT"),
+                value=arc4_UInt64(rs),
+            )
         )
-        create_cert = itxn.AssetConfig(
+
+    @arc4.abimethod
+    def settle_shipment(self, shipment_id: arc4.String) -> arc4_UInt64:
+        """
+        Atomic settlement:
+          1. Pay supplier locked ALGO
+          2. Mint ARC-69 settlement certificate NFT (PRAMANIK-CERT)
+          3. Update supplier reputation
+        Returns certificate ASA ID.
+        """
+        assert Txn.sender == self.oracle_address.value, "Oracle only"
+        sid = shipment_id.native.bytes
+        assert sid in self.shipment_status, "Shipment not registered"
+        assert self.shipment_status[sid] != String("Settled"), "Shipment already settled"
+        assert self.shipment_status[sid] != String(
+            "Disputed"
+        ), "Cannot settle disputed shipment directly — record cleared verdict first"
+        assert self.shipment_status[sid] != String("VOID"), "Cannot settle voided shipment"
+        assert sid in self.shipment_verdict, "No verdict recorded — run jury first"
+        if sid in self.shipment_cert:
+            assert self.shipment_cert[sid] == UInt64(0), "Certificate already minted"
+
+        funds_u = self.shipment_funds[sid]
+        assert funds_u > UInt64(0), "No funds locked in escrow"
+
+        supplier = self.shipment_supplier[sid]
+
+        itxn.Payment(
+            receiver=supplier,
+            amount=funds_u,
+            note=Bytes(b"Pramanik: escrow released on verified settlement"),
+            fee=UInt64(0),
+        ).submit()
+
+        cert = itxn.AssetConfig(
             total=UInt64(1),
             decimals=UInt64(0),
             default_frozen=False,
-            unit_name=b"PRMNK",
-            asset_name=b"Pramanik Cert " + shipment_id.bytes[:12],
-            manager=Global.current_application_address,
-            reserve=Global.current_application_address,
+            asset_name=Bytes(b"PRAMANIK-CERT"),
+            unit_name=Bytes(b"PCERT"),
+            url=Bytes(b"https://pramanik.vercel.app/verify/"),
+            manager=Global.creator_address,
+            reserve=Global.creator_address,
+            freeze=Global.zero_address,
+            clawback=Global.zero_address,
             fee=UInt64(0),
-            note=cert_note,
         ).submit()
 
-        cert_asa_id = create_cert.created_asset.id
+        cert_id = cert.created_asset.id
 
-        # Update state atomically
-        self.status[shipment_id] = String("SETTLED")
-        self.funds[shipment_id]  = UInt64(0)  # Clear escrow
+        self.shipment_funds[sid] = UInt64(0)
+        self.shipment_status[sid] = String("Settled")
+        self.shipment_cert[sid] = cert_id
+        self.total_settled.value = self.total_settled.value + UInt64(1)
 
-        # Adjust reputation: +5 for clean settlement (max 100)
-        current_rep = self.rep[shipment_id]
-        new_rep = current_rep + UInt64(5)
+        if supplier in self.supplier_rep:
+            acc = self.supplier_rep[supplier]
+        else:
+            acc = UInt64(50)
+        new_rep = acc + UInt64(5)
         if new_rep > UInt64(100):
-            new_rep = UInt64(100)
-        self.rep[shipment_id] = new_rep
+            self.supplier_rep[supplier] = UInt64(100)
+        else:
+            self.supplier_rep[supplier] = new_rep
 
-        log(b"SETTLED:" + shipment_id.bytes)
-        return cert_asa_id
+        arc4.emit(
+            ShipmentEvent(
+                shipment_id=shipment_id,
+                event_type=arc4.String("SETTLED"),
+                value=arc4_UInt64(cert_id),
+            )
+        )
+        return arc4_UInt64(cert_id)
 
     @arc4.abimethod
-    def void_shipment(self, shipment_id: String) -> None:
+    def void_shipment(self, shipment_id: arc4.String) -> None:
         """
-        Oracle voids a shipment (refunds escrow to supplier, marks VOID).
-        Use case: shipment cancelled, fraudulent claim confirmed.
-        Only oracle can call. Reduces supplier reputation by 20.
+        Oracle voids a shipment: refund escrow to buyer (if known) else oracle,
+        set status VOID, penalize supplier reputation (−20, floor 0).
         """
-        assert Txn.sender == Global.creator_address, "Oracle only"
-        assert shipment_id in self.status, "Shipment not found"
-        current_status = self.status[shipment_id]
-        assert current_status != String("SETTLED"), "Cannot void a settled shipment"
-        assert current_status != String("VOID"), "Already void"
+        assert Txn.sender == self.oracle_address.value, "Oracle only"
+        assert self.is_paused.value == UInt64(0), "Oracle is paused"
+        sid = shipment_id.native.bytes
+        assert sid in self.shipment_status, "Shipment not registered"
+        st = self.shipment_status[sid]
+        assert st != String("Settled"), "Cannot void settled shipment"
+        assert st != String("VOID"), "Already voided"
 
-        escrow_amount = self.funds[shipment_id]
-        supplier_addr = self.supplier[shipment_id]
+        funds_u = UInt64(0)
+        if sid in self.shipment_funds:
+            funds_u = self.shipment_funds[sid]
 
-        # Refund escrow on void
-        if escrow_amount > UInt64(0):
+        if funds_u > UInt64(0):
+            if sid in self.shipment_buyer:
+                receiver = self.shipment_buyer[sid]
+            else:
+                receiver = self.oracle_address.value
             itxn.Payment(
-                receiver=supplier_addr,
-                amount=escrow_amount,
+                receiver=receiver,
+                amount=funds_u,
+                note=Bytes(b"Pramanik: escrow refunded on void"),
                 fee=UInt64(0),
-                note=b"pramanik:void:" + shipment_id.bytes,
             ).submit()
 
-        self.status[shipment_id] = String("VOID")
-        self.funds[shipment_id]  = UInt64(0)
+        if st == String("Disputed"):
+            if self.total_disputed.value > UInt64(0):
+                self.total_disputed.value = self.total_disputed.value - UInt64(1)
 
-        # Penalty: reduce reputation by 20 (min 0)
-        current_rep = self.rep[shipment_id]
-        if current_rep >= UInt64(20):
-            self.rep[shipment_id] = current_rep - UInt64(20)
+        self.shipment_funds[sid] = UInt64(0)
+        self.shipment_status[sid] = String("VOID")
+
+        supplier = self.shipment_supplier[sid]
+        if supplier in self.supplier_rep:
+            acc = self.supplier_rep[supplier]
         else:
-            self.rep[shipment_id] = UInt64(0)
+            acc = UInt64(50)
+        penalty = UInt64(20)
+        if acc >= penalty:
+            self.supplier_rep[supplier] = acc - penalty
+        else:
+            self.supplier_rep[supplier] = UInt64(0)
 
-        log(b"VOIDED:" + shipment_id.bytes)
+        arc4.emit(
+            ShipmentEvent(
+                shipment_id=shipment_id,
+                event_type=arc4.String("VOID"),
+                value=arc4_UInt64(funds_u),
+            )
+        )
 
-    # ── READ METHODS (no state change) ──────────────────────────────────────
+    @arc4.abimethod
+    def pause_oracle(self) -> None:
+        """Pause oracle write paths that check is_paused. Oracle only."""
+        assert Txn.sender == self.oracle_address.value, "Oracle only"
+        self.is_paused.value = UInt64(1)
+
+    @arc4.abimethod
+    def unpause_oracle(self) -> None:
+        """Resume oracle operations. Oracle only."""
+        assert Txn.sender == self.oracle_address.value, "Oracle only"
+        self.is_paused.value = UInt64(0)
+
+    @arc4.abimethod
+    def update_oracle(self, new_oracle: Account) -> None:
+        """Transfer oracle role. Creator only."""
+        assert Txn.sender == Global.creator_address, "Creator only"
+        self.oracle_address.value = new_oracle
 
     @arc4.abimethod(readonly=True)
-    def get_status(self, shipment_id: String) -> String:
-        """Read shipment status. Returns 'UNREGISTERED' if not found."""
-        if shipment_id not in self.status:
-            return String("UNREGISTERED")
-        return self.status[shipment_id]
+    def get_required_mbr(self) -> arc4_UInt64:
+        """
+        Minimum balance required to register one shipment (~9 boxes).
+        Conservative estimate: 0.5 ALGO = 500_000 microALGO.
+        """
+        return arc4_UInt64(UInt64(500_000))
 
     @arc4.abimethod(readonly=True)
-    def get_full_state(self, shipment_id: String) -> arc4.Tuple[
-        String,   # status
-        UInt64,   # funds_microalgo
-        UInt64,   # risk_score
-        UInt64,   # rep_score
-        String,   # route
-    ]:
-        """
-        Returns full shipment state in one call.
-        Reduces round-trips from frontend/backend.
-        """
-        if shipment_id not in self.status:
-            return arc4.Tuple((
-                String("UNREGISTERED"),
-                UInt64(0),
-                UInt64(0),
-                UInt64(0),
-                String(""),
-            ))
-        return arc4.Tuple((
-            self.status[shipment_id],
-            self.funds[shipment_id],
-            self.risk[shipment_id],
-            self.rep[shipment_id],
-            self.route[shipment_id],
-        ))
+    def get_global_stats(
+        self,
+    ) -> arc4.Tuple[arc4_UInt64, arc4_UInt64, arc4_UInt64, arc4_UInt64]:
+        """Returns (total_shipments, total_settled, total_disputed, is_paused)."""
+        return arc4.Tuple(
+            (
+                arc4_UInt64(self.total_shipments.value),
+                arc4_UInt64(self.total_settled.value),
+                arc4_UInt64(self.total_disputed.value),
+                arc4_UInt64(self.is_paused.value),
+            )
+        )

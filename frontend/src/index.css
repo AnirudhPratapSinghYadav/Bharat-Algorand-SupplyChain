@@ -4,10 +4,12 @@
   --bg-card: #111827;
   --bg-raised: #1c2a3a;
   --border: #1e3a5f;
+  --primary: #0b4f6c;
   --accent: #00c2ff;
-  --success: #22c55e;
-  --warning: #f59e0b;
-  --danger: #ef4444;
+  --accent-warm: #f4a261;
+  --success: #2a9d8f;
+  --warning: #f4a261;
+  --danger: #e76f51;
   --text: #f1f5f9;
   --muted: #94a3b8;
   --dim: #475569;
@@ -75,6 +77,11 @@ body {
 }
 .card:hover {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
 }
 
 @keyframes pulse-red {
@@ -746,4 +753,25 @@ code {
   .ticker-content {
     animation: none !important;
   }
+}
+
+.lora-link {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+.lora-link:hover {
+  text-decoration: underline;
+}
+
+.verify-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.verify-table th,
+.verify-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
 }

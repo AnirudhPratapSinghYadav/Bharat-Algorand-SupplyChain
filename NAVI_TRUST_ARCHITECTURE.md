@@ -28,7 +28,7 @@ For historical context, `ARCHITECTURE.md` retains an older **Agri-Jury** write-u
 | Verify | `GET /verify/{shipment_id}` — public status + certificate links |
 | Witness | `POST /witness-shipment/build`, `GET /witnesses/{shipment_id}` |
 
-**Optional env:** `N8N_WEBHOOK_URL`, ElevenLabs, OpenAI fallback. **Gemini:** override model order with `GEMINI_MODEL_CHAIN` (comma-separated, tried in order).
+**Optional env:** ElevenLabs, OpenAI fallback. **Gemini:** override model order with `GEMINI_MODEL_CHAIN` (comma-separated, tried in order).
 
 ---
 

@@ -6,8 +6,8 @@
 const NAVI_VERDICT_EXAMPLE = `{
   "type": "NAVI_VERDICT",
   "v": "3",
-  "app": 123456789,
-  "sid": "SHIP_MUMBAI_001",
+  "app": 0,
+  "sid": "PRM-EX-MUM-RDM-001",
   "score": 72,
   "verdict": "HOLD",
   "reason": "…",

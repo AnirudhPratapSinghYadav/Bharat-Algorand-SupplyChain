@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, Optional
 
 import requests
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -36,6 +36,8 @@ from algosdk import encoding as algo_encoding
 from algosdk.logic import get_application_address
 
 import algorand_client as chain
+import pramanik_config as pcfg
+from hash_utils import compute_jury_hash
 from models import (
     WeatherData,
     RiskPrediction,
@@ -45,6 +47,9 @@ from models import (
     NavibotRequest,
     FundShipmentBuildBody,
     RegisterShipmentBody,
+    SimulateEventBody,
+    VerifyHashBody,
+    SubmitSignedTxnBody,
 )
 
 # ── Dynamic Gemini discovery + fallback (Phase 0) ────────────────────────────
@@ -198,14 +203,36 @@ async def lifespan(app: FastAPI):
     load_logistics_events()
     load_verdict_history()
     threading.Thread(target=_background_auto_seed_demo, daemon=True, name="pramanik-auto-seed").start()
-    bg_task = asyncio.create_task(_live_feed_background_task())
+    chain._sync_env_globals()
+    scheduler = None
+    if pcfg.auto_jury_enabled():
+        try:
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+            scheduler = AsyncIOScheduler()
+            scheduler.add_job(
+                _run_auto_jury_cycle,
+                "interval",
+                minutes=pcfg.auto_jury_interval_minutes(),
+                id="pramanik_auto_jury",
+                max_instances=1,
+                coalesce=True,
+            )
+            scheduler.start()
+            logger.info("APScheduler auto-jury every %s minutes", pcfg.auto_jury_interval_minutes())
+        except Exception as e:
+            logger.warning("APScheduler auto-jury not started: %s", e)
+    bg_tasks = [asyncio.create_task(_live_feed_background_task())]
     try:
         yield
     finally:
-        bg_task.cancel()
-        for t in (bg_task,):
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
+        for bg_task in bg_tasks:
+            bg_task.cancel()
+        for bg_task in bg_tasks:
             try:
-                await t
+                await bg_task
             except asyncio.CancelledError:
                 pass
 
@@ -345,12 +372,15 @@ def init_db():
         conn.execute(
             f"""
             CREATE TABLE IF NOT EXISTS shipments (
-                id          TEXT PRIMARY KEY,
-                origin      TEXT NOT NULL,
-                destination TEXT NOT NULL,
-                current_lat REAL NOT NULL,
-                current_lon REAL NOT NULL,
-                status      TEXT NOT NULL DEFAULT '{STATUS_IN_TRANSIT}'
+                id              TEXT PRIMARY KEY,
+                origin          TEXT NOT NULL,
+                destination     TEXT NOT NULL,
+                current_lat     REAL NOT NULL,
+                current_lon     REAL NOT NULL,
+                dest_lat        REAL,
+                dest_lon        REAL,
+                supplier_address TEXT,
+                created_at      TEXT
             )
             """
         )
@@ -721,8 +751,101 @@ async def _live_feed_background_task():
     """Inject new logistics events and telemetry every 3s."""
     while True:
         await asyncio.sleep(3)
-        # Global Event Engine logic could go here
         generate_random_logistics_event()
+
+
+def _hours_since_last_jury(shipment_id: str) -> Optional[float]:
+    entries = AUDIT_TRAIL.get(shipment_id) or []
+    latest_ts: Optional[datetime] = None
+    for e in reversed(entries):
+        if not isinstance(e, dict) or not e.get("tx_id"):
+            continue
+        raw = e.get("timestamp")
+        if not raw:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            latest_ts = ts
+            break
+        except Exception:
+            continue
+    if not latest_ts:
+        return None
+    return (datetime.now(timezone.utc) - latest_ts).total_seconds() / 3600.0
+
+
+async def _run_auto_jury_cycle() -> None:
+    """Single APScheduler tick: jury In_Transit shipments (AUTO_JURY_ENABLED=1). AUTO_SETTLE=0 by default."""
+    from services.cron_log import append_cron_entry
+    from services.telegram_service import fire_async, format_escrow_line, format_route_label, notify_auto_jury_summary, notify_verdict
+
+    if not pcfg.auto_jury_enabled() or not chain.APP_ID or not chain.ORACLE_MNEMONIC:
+        return
+    min_hours = pcfg.auto_jury_min_hours_since_last()
+    reviewed = settled_n = hold_n = 0
+    try:
+        with get_db() as conn:
+            rows = conn.execute("SELECT id, origin, destination FROM shipments").fetchall()
+        for row in rows:
+            sid = str(row["id"])
+            st = chain.read_shipment_status(sid)
+            if st in ("VOID", "Settled") or st not in ("In_Transit", "Disputed"):
+                continue
+            hours = _hours_since_last_jury(sid)
+            if hours is not None and hours < min_hours:
+                continue
+            try:
+                payload = await run_jury(RunJuryRequest(shipment_id=sid))
+                reviewed += 1
+                verdict = str(payload.get("verdict") or payload.get("chief_justice", {}).get("judgment") or "HOLD").upper()
+                conf = payload.get("chief_justice", {}).get("final_risk_score") or payload.get("final_risk_score")
+                tx_id = payload.get("tx_id") or payload.get("on_chain_tx_id")
+                auto_settled = False
+                if verdict == "SETTLE" and os.environ.get("AUTO_SETTLE", "0").strip().lower() in ("1", "true", "yes"):
+                    stl = await asyncio.to_thread(chain.settle_shipment_chain, sid)
+                    if stl and stl.get("tx_id"):
+                        auto_settled = True
+                        tx_id = stl.get("tx_id")
+                if verdict == "SETTLE":
+                    settled_n += 1
+                else:
+                    hold_n += 1
+                logger.info("[AUTO-JURY] %s → %s (confidence: %s)", sid, verdict, conf)
+                append_cron_entry(
+                    {
+                        "shipment_id": sid,
+                        "verdict": verdict,
+                        "auto_settled": auto_settled,
+                        "tx_id": tx_id,
+                        "confidence": conf,
+                    }
+                )
+                origin = str(row["origin"] or "")
+                full = chain.read_shipment_full(sid) if APP_ID else {}
+                micro = int(full.get("funds_microalgo") or 0)
+                px = get_algo_usd_price()
+                fu, fi = _escrow_fiat_from_micro(micro, px)
+                route = format_route_label(origin, str(row["destination"] or ""))
+                if verdict != "HOLD":
+                    fire_async(
+                        notify_verdict(
+                            route_label=route,
+                            verdict=verdict,
+                            confidence_pct=float(conf) if conf is not None else None,
+                            escrow_line=format_escrow_line(micro / 1e6, fi, fu),
+                            lora_tx_url=chain.lora_tx_url(str(tx_id)) if tx_id else "",
+                        )
+                    )
+            except HTTPException as he:
+                logger.warning("Auto-jury skipped %s: %s", sid, he.detail)
+            except Exception as e:
+                logger.warning("Auto-jury skipped %s: %s", sid, e)
+        if reviewed > 0:
+            fire_async(notify_auto_jury_summary(reviewed, settled_n, hold_n))
+    except Exception as e:
+        logger.warning("Auto-jury cycle failed: %s", e)
 
 
 REGISTER_LOG_PATH = "shipment_register_log.json"
@@ -789,7 +912,7 @@ def get_shipment_from_chain(shipment_id: str) -> dict:
         "certificate_asa": int(cid) if cid else None,
         "certificate_asa_id": cid or None,
         "lora_cert_url": oc.get("lora_cert_url") if isinstance(oc, dict) and oc.get("lora_cert_url") else (
-            f"https://lora.algokit.io/testnet/asset/{cid}" if cid else None
+            chain.lora_asset_url(cid) if cid else None
         ),
     }
 
@@ -798,65 +921,21 @@ def _generate_reasoning_hash(text: str) -> str:
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
-def compute_jury_hash(
-    *,
-    shipment_id: str,
-    chain_state: dict,
-    weather: dict,
-    sentinel: dict,
-    auditor: dict,
-    fraud_detector: dict,
-    arbiter: dict,
-) -> str:
-    """
-    Phase 2: Deterministic SHA-256 of canonical jury inputs + outputs.
-    Avoids timestamps and freeform text where possible to keep hash stable.
-    """
-    canonical = {
-        "shipment_id": (shipment_id or "").strip(),
-        "chain": {
-            "status": str(chain_state.get("status") or ""),
-            "funds_microalgo": int(chain_state.get("funds_microalgo") or 0),
-            "supplier_address": str(chain_state.get("supplier_address") or ""),
-            "risk_on_chain": int(chain_state.get("risk_on_chain") or 0),
-            "route": str(chain_state.get("route") or ""),
-        },
-        "weather": {
-            "city": str(weather.get("city") or ""),
-            "precipitation_mm": _safe_float(weather.get("precipitation_mm")),
-            "wind_kmh": _safe_float(weather.get("wind_kmh")),
-            "description": str(weather.get("description") or ""),
-            "weather_code": int(weather.get("weather_code") or 0),
-        },
-        "agents": {
-            "sentinel_risk_score": int(sentinel.get("risk_score") or 0),
-            "auditor_risk_score": int(auditor.get("risk_score") or 0),
-            "fraud_risk_score": int(fraud_detector.get("fraud_risk_score") or 0),
-            "arbiter_final_risk_score": int(arbiter.get("final_risk_score") or 0),
-            "arbiter_verdict": str(arbiter.get("verdict") or ""),
-        },
-    }
-    raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
-
-
 # ─── Runtime Stores ────────────────────────────────────────────────
 AUDIT_TRAIL: dict[str, list] = {}
 JURY_CACHE: dict[str, dict] = {}
 WEATHER_CACHE: dict[str, tuple] = {}
-WEATHER_CACHE_TTL = 300
+WEATHER_CACHE_TTL = pcfg.weather_cache_ttl_seconds()
 VERDICT_HISTORY_PATH = os.path.join(os.path.dirname(__file__) or ".", "audit_trail.json")
 
-# Phase 3: 15s in-memory API cache for /stats and /shipments
-API_CACHE_TTL_SEC = 15.0
+# Phase 3: in-memory API cache for /stats and /shipments
+API_CACHE_TTL_SEC = pcfg.api_cache_ttl_seconds()
 _STATS_CACHE: dict = {"ts": 0.0, "payload": None}
 _SHIPMENTS_CACHE: dict = {"ts": 0.0, "payload": None}
 
 # Phase 1: CoinGecko ALGO/USD (60s TTL)
 _ALGO_PRICE_CACHE: dict = {"ts": 0.0, "payload": None}
 _ALGO_PRICE_TTL_SEC = 60.0
-COINGECKO_SIMPLE_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
-
 
 def _safe_float(v) -> Optional[float]:
     """Best-effort float conversion; returns None for NaN/inf/bad values."""
@@ -938,7 +1017,7 @@ def get_algo_usd_price() -> dict:
         if cg_key:
             hdrs["x-cg-demo-api-key"] = cg_key
         r = requests.get(
-            COINGECKO_SIMPLE_PRICE_URL,
+            pcfg.coingecko_simple_price_url(),
             headers=hdrs,
             params=params,
             timeout=12,
@@ -1032,6 +1111,8 @@ def _transactions_formatted(limit: int = 15) -> list[dict]:
                 "sender_short": short,
                 "amount_algo": round(amt / 1_000_000.0, 6),
                 "time_ago": _time_ago_from_round_time(int(rt) if rt is not None else None),
+                "timestamp": t.get("timestamp") or "",
+                "round": t.get("round"),
                 "note_preview": note_preview,
                 "note_json": note_obj,
                 "lora_url": t.get("lora_url") or (f"{LORA_TESTNET_TX}/{tx_id}" if tx_id else ""),
@@ -1057,25 +1138,6 @@ def save_verdict_history():
         json.dump(AUDIT_TRAIL, f, indent=2)
 
 DEPLOYER_MNEMONIC = chain.DEPLOYER_MNEMONIC or os.environ.get("DEPLOYER_MNEMONIC")
-N8N_WEBHOOK_URL = os.environ.get("N8N_WEBHOOK_URL", "")
-
-print(f"[BOOT] N8N_WEBHOOK_URL: {'YES' if N8N_WEBHOOK_URL else 'not set (webhook skip)'}")
-
-
-def _fire_webhook(event: str, payload: dict):
-    """Fire-and-forget webhook to n8n / external notification loop."""
-    if not N8N_WEBHOOK_URL:
-        return
-    try:
-        requests.post(
-            N8N_WEBHOOK_URL,
-            json={"event": event, **payload},
-            timeout=3,
-        )
-        logger.info(f"Webhook fired: {event}")
-    except Exception as e:
-        logger.warning(f"Webhook failed: {e}")
-
 
 RSS_LOGISTICS_URL = os.environ.get("RSS_LOGISTICS_URL", "https://shippingwatch.com/service/rss")
 
@@ -1089,7 +1151,7 @@ def _navi_verdict_note_bytes(
 ) -> bytes:
     """Structured tx note for record_verdict (max 1000 bytes)."""
     rs = int(prediction.risk_score)
-    if rs > 65:
+    if rs > pcfg.risk_threshold_settle():
         verdict = "DISPUTE"
     elif judgment.get("trigger_contract"):
         verdict = "SETTLE"
@@ -1308,7 +1370,7 @@ class LogisticsSentryAgent:
 
         prompt = LogisticsSentryAgent._PROMPT_TEMPLATE.format(
             shipment_id=shipment_id,
-            temp=weather.temperature,
+            temp=weather.temperature_c,
             precip=weather.precipitation,
             wmo=weather.weather_code,
             live_context=live_block,
@@ -1340,7 +1402,7 @@ class LogisticsSentryAgent:
 
         if not result:
             # Deterministic Fallback for Sentry Predictive Engine
-            alert = weather.weather_code >= 80 or weather.precipitation > 5
+            alert = weather.weather_code >= 80 or weather.precipitation_mm > 5
             base = 85 if alert else 20
             
             reasoning = f"I detect a {base}% risk factors based on telemetry. "
@@ -1591,14 +1653,25 @@ def fetch_weather(lat: float, lon: float) -> Optional[WeatherData]:
         )
         r.raise_for_status()
         cur = r.json().get("current") or {}
+        code = int(cur.get("weather_code", 0))
         return WeatherData(
-            temperature=float(cur.get("temperature_2m", 20.0)),
-            precipitation=float(cur.get("precipitation", 0) or 0),
-            weather_code=int(cur.get("weather_code", 0)),
+            city=f"{lat},{lon}",
+            temperature_c=float(cur.get("temperature_2m", 20.0)),
+            precipitation_mm=float(cur.get("precipitation", 0) or 0),
+            wind_kmh=0.0,
+            weather_code=code,
+            description=f"Code {code}",
         )
     except Exception as e:
         logger.debug("Open-Meteo failed: %s", e)
-        return WeatherData(temperature=22.0, precipitation=0.0, weather_code=0)
+        return WeatherData(
+            city=f"{lat},{lon}",
+            temperature_c=22.0,
+            precipitation_mm=0.0,
+            wind_kmh=0.0,
+            weather_code=0,
+            description="Fallback",
+        )
 
 
 @app.get("/weather/{city}")
@@ -2464,9 +2537,11 @@ def _shipment_stage_rank(stage: str) -> int:
         return 0
     if s in ("In_Transit", "Not_Registered", "Delayed_Disaster"):
         return 1
-    if s == "Settled":
+    if s == "VOID":
         return 2
-    return 3
+    if s == "Settled":
+        return 3
+    return 4
 
 
 @app.get("/shipments")
@@ -2486,22 +2561,29 @@ async def get_shipments():
 async def run_jury(body: RunJuryRequest):
     """
     Four-agent jury: Weather Sentinel → Compliance Auditor → Fraud Detector → Chief Arbiter.
-    Live Open-Meteo + real Algorand boxes; Gemini with OpenAI + deterministic fallbacks for JSON.
+    Live Open-Meteo + real Algorand boxes; Gemini with deterministic fallbacks for JSON.
     """
     shipment_id = body.shipment_id.strip()
-    destination_city = body.destination_city.strip()
     if not shipment_id:
         raise HTTPException(status_code=400, detail="shipment_id required")
-    if not destination_city:
-        raise HTTPException(status_code=400, detail="destination_city required")
 
     with get_db() as conn:
         row = conn.execute("SELECT * FROM shipments WHERE id = ?", (shipment_id,)).fetchone()
-    origin = str(row["origin"]) if row else "—"
-    destination = str(row["destination"]) if row else destination_city
+    if not row:
+        raise HTTPException(status_code=404, detail="Shipment not found in database")
+    origin = str(row["origin"])
+    destination = str(row["destination"])
+    dest_city = destination.split(",")[0].strip() if destination else "Unknown"
+
+    chain_full = chain.get_shipment_full_state(shipment_id) if APP_ID else {}
+    oc_st = str(chain_full.get("on_chain_status") or chain_full.get("status") or "")
+    if oc_st in ("Settled", "SETTLED"):
+        raise HTTPException(status_code=409, detail="Shipment already settled")
+    if not chain_full.get("registered") and oc_st in ("Not_Found", "Unregistered", ""):
+        raise HTTPException(status_code=404, detail="Shipment not registered on chain")
 
     try:
-        jury_result = run_four_agent_jury(shipment_id, destination_city)
+        jury_result = run_four_agent_jury(shipment_id, dest_city)
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"error": str(e), "all_data_real": False}) from e
     except Exception as e:
@@ -2564,6 +2646,8 @@ async def run_jury(body: RunJuryRequest):
         }
     )
 
+    from pramanik_notes import merge_pramanik_note
+
     verdict_note = {
         "type": "NAVI_VERDICT",
         "v": "3",
@@ -2571,6 +2655,7 @@ async def run_jury(body: RunJuryRequest):
         "sid": shipment_id,
         "score": arbiter["final_risk_score"],
         "verdict": arbiter["verdict"],
+        "risk": arbiter["final_risk_score"],
         "reason": (arbiter["reasoning"] or "")[:120],
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "arc69": arc69_meta,
@@ -2581,13 +2666,8 @@ async def run_jury(body: RunJuryRequest):
         verdict_note["escrow_inr"] = round(float(escrow_inr_note), 2)
     if jury_hash:
         verdict_note["jury_hash"] = jury_hash
-    note_bytes = json.dumps(verdict_note, separators=(",", ":")).encode("utf-8")
-    if len(note_bytes) > 1000:
-        # Emergency backup truncation to ensure Algorand txn limit
-        if "arc69" in verdict_note:
-            verdict_note["arc69"]["properties"]["Verdict"] = arbiter["verdict"][:20]
-        verdict_note["reason"] = (arbiter["reasoning"] or "")[:40]
-        note_bytes = json.dumps(verdict_note, separators=(",", ":")).encode("utf-8")
+        verdict_note["hash"] = jury_hash
+    note_bytes = merge_pramanik_note(verdict_note, "verdict", shipment_id)
 
     verdict_json_str = json.dumps(
         {
@@ -2625,7 +2705,7 @@ async def run_jury(body: RunJuryRequest):
         "weather": weather,
         "jury_hash": jury_hash or None,
         "tx_id": tx_id,
-        "lora_tx_url": f"{LORA_TESTNET_TX}/{tx_id}",
+        "lora_tx_url": chain.lora_tx_url(tx_id),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     jury_hash_tx = None
@@ -2642,6 +2722,24 @@ async def run_jury(body: RunJuryRequest):
         save_verdict_history()
     except Exception:
         logger.warning("save_verdict_history failed after jury", exc_info=True)
+
+    chain_writes = {
+        "verdict_tx": chain.lora_tx_url(tx_id),
+        "settle_tx": None,
+        "dispute_tx": None,
+        "certificate_asa": None,
+        "certificate_lora_url": None,
+    }
+    verdict_upper = str(arbiter.get("verdict") or "").upper()
+    if verdict_upper == "DISPUTE":
+        chain_writes["dispute_tx"] = chain_writes["verdict_tx"]
+    if verdict_upper == "SETTLE" and os.environ.get("AUTO_SETTLE", "0").strip() in ("1", "true", "yes"):
+        settle_res = chain.settle_shipment_chain(shipment_id)
+        if settle_res and settle_res.get("tx_id"):
+            chain_writes["settle_tx"] = settle_res.get("lora_url") or chain.lora_tx_url(settle_res["tx_id"])
+            chain_writes["certificate_asa"] = settle_res.get("certificate_asa_id")
+            if chain_writes["certificate_asa"]:
+                chain_writes["certificate_lora_url"] = chain.lora_asset_url(chain_writes["certificate_asa"])
 
     agent_dialogue = [
         {"agent": "Weather Sentinel", "message": json.dumps(sentinel, indent=2)[:1200]},
@@ -2660,11 +2758,13 @@ async def run_jury(body: RunJuryRequest):
         **jury_result,
         "origin": origin,
         "destination": destination,
+        "chain_state": chain_full,
         "tx_id": tx_id,
         "on_chain_tx_id": tx_id,
         "confirmed_round": confirmed_round,
-        "lora_tx_url": f"{LORA_TESTNET_TX}/{tx_id}",
-        "explorer_url": f"{LORA_TESTNET_TX}/{tx_id}",
+        "lora_tx_url": chain.lora_tx_url(tx_id),
+        "explorer_url": chain.lora_tx_url(tx_id),
+        "lora_app_url": f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else LORA_TESTNET_APP,
         "note_bytes": len(note_bytes),
         "verdict_on_chain": True,
         "chief_justice": chief_justice_out,
@@ -2672,12 +2772,39 @@ async def run_jury(body: RunJuryRequest):
         "trigger_contract": arbiter["verdict"] == "DISPUTE",
         "oracle_stake": None,
         "stake_tx_id": None,
-        "jury_hash": {"combined_hash": jury_hash, "hex": jury_hash} if jury_hash else None,
+        "jury_hash": jury_hash,
+        "chain_writes": chain_writes,
+        "verdict": verdict_upper,
     }
     _STATS_CACHE["payload"] = None
     _SHIPMENTS_CACHE["payload"] = None
     JURY_CACHE[shipment_id] = payload
+
+    try:
+        from services.telegram_service import fire_async, format_escrow_line, format_route_label, notify_verdict
+
+        route = format_route_label(origin, destination)
+        fire_async(
+            notify_verdict(
+                route_label=route,
+                verdict=verdict_upper,
+                confidence_pct=float(arbiter.get("final_risk_score") or 0),
+                escrow_line=format_escrow_line(funds_micro_jury / 1e6, escrow_inr_note, escrow_usd_note),
+                lora_tx_url=chain.lora_tx_url(tx_id),
+            )
+        )
+    except Exception as e:
+        logger.warning("Telegram verdict alert skipped: %s", e)
+
     return payload
+
+
+@app.get("/cron-log")
+def get_cron_log(limit: int = 50):
+    """Last autonomous auto-jury runs (cron_log.json)."""
+    from services.cron_log import list_cron_entries
+
+    return {"entries": list_cron_entries(limit=limit)}
 
 
 @app.get("/audit-trail/{shipment_id}")
@@ -2812,7 +2939,7 @@ def _stats_compute() -> dict:
         try:
             app_addr = get_application_address(APP_ID)
             contract_app_address = app_addr
-            lora_contract_account_url = f"https://lora.algokit.io/testnet/account/{app_addr}"
+            lora_contract_account_url = chain.lora_account_url(app_addr)
             bal = algorand.account.get_information(app_addr).amount
             contract_algo = float(bal.algo) if hasattr(bal, "algo") else None
         except Exception as e:
@@ -2943,6 +3070,12 @@ def _register_shipment_core(
     amount_algo: float = 1.0,
     delivery_days: int = 7,
     supplier_reputation: int = 50,
+    *,
+    route: str | None = None,
+    origin_lat: float = 0.0,
+    origin_lon: float = 0.0,
+    dest_lat: float | None = None,
+    dest_lon: float | None = None,
 ) -> dict:
     """
     On-board a new shipment via ATC (DB row + on-chain register_shipment).
@@ -3037,13 +3170,19 @@ def _register_shipment_core(
         row_existed = conn.execute("SELECT 1 FROM shipments WHERE id = ?", (shipment_id,)).fetchone() is not None
         if row_existed:
             conn.execute(
-                "UPDATE shipments SET origin = ?, destination = ?, status = ? WHERE id = ?",
-                (origin, destination, STATUS_IN_TRANSIT, shipment_id),
+                """
+                UPDATE shipments SET origin = ?, destination = ?, current_lat = ?, current_lon = ?,
+                dest_lat = ?, dest_lon = ?, supplier_address = ? WHERE id = ?
+                """,
+                (origin, destination, origin_lat, origin_lon, dest_lat, dest_lon, supplier, shipment_id),
             )
         else:
             conn.execute(
-                "INSERT INTO shipments (id, origin, destination, current_lat, current_lon, status) VALUES (?, ?, ?, ?, ?, ?)",
-                (shipment_id, origin, destination, 0.0, 0.0, STATUS_IN_TRANSIT),
+                """
+                INSERT INTO shipments (id, origin, destination, current_lat, current_lon, dest_lat, dest_lon, supplier_address, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """,
+                (shipment_id, origin, destination, origin_lat, origin_lon, dest_lat, dest_lon, supplier),
             )
         conn.commit()
 
@@ -3056,8 +3195,8 @@ def _register_shipment_core(
 
     try:
         if chain.use_navitrust():
-            route = f"{origin} → {destination}"
-            r = chain.register_navitrust(shipment_id, supplier, route)
+            on_chain_route = (route or "").strip() or f"{origin} → {destination}"
+            r = chain.register_navitrust(shipment_id, supplier, on_chain_route)
         else:
             r = chain.register_legacy(shipment_id, supplier)
         _append_register_log(
@@ -3107,17 +3246,66 @@ def _register_shipment_core(
 @app.post("/register-shipment")
 def register_shipment(body: RegisterShipmentBody):
     """Register a shipment on-chain + SQLite (oracle-signed). JSON body only."""
-    sid = (body.shipment_id or "").strip()
     org = (body.origin or "").strip()
     dst = (body.destination or "").strip()
-    sup = (body.supplier_address or "").strip()
-    if not sid or not org or not dst or not sup:
-        raise HTTPException(status_code=422, detail="shipment_id, origin, destination, and supplier_address are required.")
-    out = _register_shipment_core(sid, org, dst, sup, 30, 1.0, 7, 50)
+    if not org or not dst:
+        raise HTTPException(status_code=422, detail="origin and destination are required.")
+    route = (body.route or "").strip() or f"{org} → {dst}"
+    out = _register_shipment_core(
+        body.shipment_id,
+        org,
+        dst,
+        body.supplier_address,
+        30,
+        1.0,
+        7,
+        50,
+        route=route,
+        origin_lat=body.origin_lat,
+        origin_lon=body.origin_lon,
+        dest_lat=body.dest_lat,
+        dest_lon=body.dest_lon,
+    )
+    out["route"] = route
     # Bust in-memory caches so GET /shipments and /stats reflect the new box immediately (otherwise 15s stale UI).
     _SHIPMENTS_CACHE["payload"] = None
     _STATS_CACHE["payload"] = None
+    try:
+        from services.telegram_service import fire_async, format_route_label, notify_registered
+
+        fire_async(
+            notify_registered(
+                route_label=format_route_label(org, dst),
+                escrow_algo=0.0,
+                inr=None,
+            )
+        )
+    except Exception as e:
+        logger.warning("Telegram register alert skipped: %s", e)
     return out
+
+
+def _webhook_url_valid(url: str | None) -> bool:
+    u = (url or "").strip()
+    if not u:
+        return False
+    placeholders = (
+        "your-n8n-instance.com",
+        "example.com/webhook",
+        "localhost",
+    )
+    return not any(p in u.lower() for p in placeholders)
+
+
+def _fire_webhook(event: str, payload: dict) -> None:
+    """Optional n8n webhook — skipped when URL unset or placeholder."""
+    url = (os.environ.get("N8N_WEBHOOK_URL") or "").strip()
+    if not _webhook_url_valid(url):
+        return
+    try:
+        requests.post(url, json={"event": event, **payload}, timeout=8)
+    except Exception as e:
+        logger.debug("webhook %s failed: %s", event, e)
 
 
 @app.get("/health")
@@ -3170,10 +3358,12 @@ def health():
             on_chain_oracle_address = oaddr
     except Exception:
         pass
+    oracle_ready = bool(oracle_configured and oracle_ready_for_writes)
     return {
         "status": "ok",
         "app_id": aid,
         "network": ALGO_NETWORK,
+        "oracle_ready": oracle_ready,
         "algod_ok": algod_ok,
         "indexer_ok": indexer_ok,
         "last_round": last_round,
@@ -3401,7 +3591,7 @@ def get_supplier_reputation(address: str):
         "score": int(sc),
         "source": src,
         "has_box": has_box,
-        "lora_url": f"https://lora.algokit.io/testnet/account/{addr}",
+        "lora_url": chain.lora_account_url(addr),
         "passport_asa_id": None,
     }
 
@@ -3454,7 +3644,7 @@ def mint_supplier_passport(body: dict = Body(...)):
         "transfer_tx_id": result.get("transfer_tx_id"),
         "transfer_pending": result.get("transfer_pending"),
         "transfer_note": result.get("transfer_note"),
-        "lora_url": f"https://lora.algokit.io/testnet/asset/{aid}" if aid else None,
+        "lora_url": chain.lora_asset_url(aid) if aid else None,
         "lora_mint_url": result.get("lora_mint_url"),
         "message": "Supplier passport minted. Verifiable on any Algorand explorer.",
         "source": "algorand_testnet",
@@ -3473,14 +3663,90 @@ def settle_shipment_api(body: SettleBody):
         )
     cert = int(r.get("certificate_asa_id") or 0)
     tx_id = r.get("tx_id")
-    return {
+    out = {
         "tx_id": tx_id,
         "cert_asa_id": cert,
         "lora_tx_url": chain.lora_tx_url(tx_id),
-        "lora_cert_url": f"https://lora.algokit.io/testnet/asset/{cert}" if cert else None,
+        "lora_cert_url": chain.lora_asset_url(cert) if cert else None,
         "supplier_paid_algo": funds_micro / 1_000_000.0,
         **r,
     }
+    try:
+        from services.telegram_service import fire_async, format_route_label, notify_settlement
+
+        with get_db() as conn:
+            row = conn.execute("SELECT origin, destination FROM shipments WHERE id = ?", (body.shipment_id,)).fetchone()
+        origin = str(row["origin"]) if row else ""
+        dest = str(row["destination"]) if row else ""
+        px = get_algo_usd_price()
+        _, inr = _escrow_fiat_from_micro(funds_micro, px)
+        fire_async(
+            notify_settlement(
+                route_label=format_route_label(origin, dest),
+                supplier_paid_algo=funds_micro / 1_000_000.0,
+                inr=inr,
+                cert_asa_id=cert or None,
+                lora_tx_url=chain.lora_tx_url(tx_id) if tx_id else "",
+                lora_cert_url=chain.lora_asset_url(cert) if cert else "",
+            )
+        )
+    except Exception as e:
+        logger.warning("Telegram settlement alert skipped: %s", e)
+    return out
+
+
+@app.post("/void/{shipment_id}")
+def void_shipment_api(shipment_id: str):
+    """Oracle-only: void shipment on-chain (refund + VOID status + reputation penalty). Requires upgraded contract ABI."""
+    sid = (shipment_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="shipment_id required")
+    if not APP_ID:
+        raise HTTPException(status_code=503, detail="APP_ID not configured")
+    pre = chain.read_shipment_full(sid)
+    st = str(pre.get("status") or "")
+    if st in ("Not_Found", "Unregistered", "Unknown"):
+        raise HTTPException(status_code=404, detail="Shipment not found on chain")
+    if st == "Settled":
+        raise HTTPException(status_code=409, detail="Cannot void a settled shipment")
+    if st == "VOID":
+        raise HTTPException(status_code=409, detail="Shipment already voided")
+    r = chain.void_shipment_chain(sid)
+    if not r or not r.get("tx_id"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "void_shipment failed — ensure oracle mnemonic, sufficient ALGO for fees, "
+                "and that APP_ID points to a contract that includes void_shipment (redeploy after git pull + algokit build)."
+            ),
+        )
+    return {
+        "shipment_id": sid,
+        "status": "VOID",
+        "tx_id": r.get("tx_id"),
+        "lora_tx_url": r.get("lora_url"),
+        **r,
+    }
+
+
+@app.post("/submit-signed-txn")
+def submit_signed_txn(body: SubmitSignedTxnBody):
+    """
+    Submit Pera-signed transaction(s) through the backend algod client.
+    Use when the dashboard cannot POST to algod directly (CORS). Supports atomic groups.
+    """
+    try:
+        if body.signed_txn_b64:
+            b64s = [body.signed_txn_b64.strip()]
+        else:
+            b64s = [str(b).strip() for b in (body.signed_txns_b64 or []) if str(b).strip()]
+        result = chain.submit_signed_txns_b64(b64s)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.error("submit-signed-txn failed: %s", e)
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.post("/fund-shipment/build")
@@ -3659,7 +3925,7 @@ def _navibot_risk_fallback_text(facts: dict) -> str:
 
 def _elevenlabs_tts(text: str) -> Optional[str]:
     key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip().strip('"').strip("'")
-    voice = (os.environ.get("ELEVENLABS_VOICE_ID") or "EXAVITQu4vr4xnSDxMaL").strip().strip('"').strip("'")
+    voice = pcfg.get_elevenlabs_default_voice_id() or "EXAVITQu4vr4xnSDxMaL"
     if not key or not (text or "").strip():
         return None
     snippet = text.strip()[:500]
@@ -3755,7 +4021,7 @@ def _navibot_live_disputed_blurb() -> str:
             )
         return (
             "No disputed shipments on-chain right now. Use GET /shipments or the dashboard for live status "
-            "(after seeding, demo IDs are often SHIP_MUMBAI_001, SHIP_CHEN_002, SHIP_DELHI_003)."
+            "(after running seed_blockchain.py, use the shipment IDs listed under demo_shipments in config.json)."
         )
     except Exception:
         return "Use GET /shipments for live on-chain shipment status."
@@ -4071,7 +4337,7 @@ def list_witness_notes(shipment_id: str):
                 "address": tx.get("sender"),
                 "tx_id": tx.get("id"),
                 "round": tx.get("confirmed-round") or tx.get("confirmed_round"),
-                "lora_url": f"{LORA_TESTNET_TX}/{tx.get('id')}" if tx.get("id") else "",
+                "lora_url": chain.lora_tx_url(tx.get("id")) if tx.get("id") else "",
             }
         )
     return {"shipment_id": shipment_id, "witness_count": len(witnesses), "witnesses": witnesses}
@@ -4089,15 +4355,60 @@ async def get_config():
             ids = [sid for sid, _ in _list_ledger_shipments()]
         except Exception:
             ids = []
+    oaddr = chain.oracle_address_string() or ""
     return {
         "app_id": aid,
         "app_address": app_addr,
         "network": ALGO_NETWORK,
         "lora_app_url": f"{LORA_TESTNET_APP}/{aid}" if aid else LORA_TESTNET_APP,
         "shipments": ids,
+        "demo_shipments": pcfg.get_demo_shipments(),
+        "demo_labels": pcfg.get_demo_labels(),
         "lora_application_url": f"{LORA_TESTNET_APP}/{aid}" if aid else LORA_TESTNET_APP,
-        "oracle_address": chain.oracle_address_string(),
+        "oracle_address": oaddr[:12] if oaddr else None,
+        "oracle_address_full": oaddr if oaddr else None,
+        "auto_jury_enabled": pcfg.auto_jury_enabled(),
+        "auto_jury_interval_minutes": pcfg.auto_jury_interval_minutes(),
     }
+
+
+@app.get("/elevenlabs/config")
+def elevenlabs_config():
+    """Public agent id + optional signed URL for private ConvAI agents."""
+    agent_id = pcfg.get_elevenlabs_agent_id()
+    key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip().strip('"').strip("'")
+    signed_url: str | None = None
+    if key and agent_id:
+        try:
+            r = requests.get(
+                "https://api.elevenlabs.io/v1/convai/conversation/get_signed_url",
+                params={"agent_id": agent_id},
+                headers={"xi-api-key": key},
+                timeout=12,
+            )
+            if r.status_code == 200 and isinstance(r.json(), dict):
+                signed_url = str(r.json().get("signed_url") or "") or None
+        except Exception as e:
+            logger.debug("ElevenLabs signed URL: %s", e)
+    return {
+        "enabled": bool(agent_id or signed_url),
+        "agent_id": agent_id or None,
+        "signed_url": signed_url,
+        "tts_configured": bool(key),
+    }
+
+
+@app.post("/admin/test-telegram")
+async def admin_test_telegram():
+    """Send test ping to TELEGRAM_CHAT_IDS (oracle deployer only in production)."""
+    from services.telegram_service import send_test_ping
+
+    if not chain.ORACLE_MNEMONIC:
+        raise HTTPException(status_code=503, detail="Oracle not configured")
+    out = await send_test_ping()
+    if not out.get("ok"):
+        raise HTTPException(status_code=502, detail=out.get("error") or "Telegram send failed")
+    return out
 
 
 @app.get("/verify/{shipment_id}")
@@ -4153,7 +4464,7 @@ def verify_shipment(shipment_id: str):
         navi_note = chain.fetch_transaction_note_json(str(verdict_tx))
 
     decision = "IN_TRANSIT"
-    if on_chain_risk > 65:
+    if on_chain_risk > pcfg.risk_threshold_settle():
         decision = "DISPUTE"
     elif on_chain == "Settled":
         decision = "SETTLED"
@@ -4187,14 +4498,32 @@ def verify_shipment(shipment_id: str):
         ai_verdict_panel["recorded_at"] = navi_note.get("ts")
         ai_verdict_panel["source"] = "algorand_transaction_note"
 
+    boxes = chain.read_shipment_boxes_verify(shipment_id) if APP_ID and chain.use_navitrust() else {}
+    timeline = chain.fetch_shipment_timeline(shipment_id, limit=30) if APP_ID else []
+    sqlite_row = None
+    if row:
+        sqlite_row = {k: row[k] for k in row.keys()}
+
     return {
         "shipment_id": shipment_id,
-        "found": row is not None,
+        "found": row is not None or oc_st not in ("Not_Found", "Unregistered", ""),
         "app_id": APP_ID,
         "network": ALGO_NETWORK,
+        "lora_app_url": chain.lora_app_url() if APP_ID else LORA_TESTNET_APP,
+        "chain": {
+            "status": on_chain,
+            "funds_microalgo": funds_micro,
+            "risk_score": on_chain_risk,
+            "route": full.get("route") if isinstance(full, dict) else None,
+            "supplier_address": full.get("supplier_address") if isinstance(full, dict) else None,
+            "verdict_json": full.get("verdict_json") if isinstance(full, dict) else None,
+            "certificate_asa": cert_id,
+        },
+        "boxes": boxes,
+        "timeline": timeline,
+        "sqlite": sqlite_row,
         "on_chain": full,
         "on_chain_status": on_chain,
-        "off_chain_status": row["status"] if row else None,
         "origin": row["origin"] if row else None,
         "destination": row["destination"] if row else None,
         "box_raw_b64": box_raw,
@@ -4206,12 +4535,12 @@ def verify_shipment(shipment_id: str):
         "certificate_asa_id": cert_id,
         "on_chain_risk_score": on_chain_risk,
         "chain_verdict_reasoning": chain_verdict_text,
-        "explorer_url": full.get("lora_url") or f"{LORA_TESTNET_APP}/{APP_ID}",
+        "explorer_url": full.get("lora_url") or chain.lora_app_url(),
         "lora_verdict_tx_url": chain.lora_tx_url(verdict_tx) if verdict_tx else None,
         "lora_cert_url": full.get("lora_cert_url")
         if isinstance(full, dict) and full.get("lora_cert_url")
         else (
-            f"https://lora.algokit.io/testnet/asset/{int(cert_id)}"
+            f"{chain.LORA_BASE_URL}/asset/{int(cert_id)}"
             if cert_id
             else None
         ),
@@ -4225,6 +4554,78 @@ def verify_shipment(shipment_id: str):
         "jury_hash": (latest or {}).get("jury_hash") if isinstance(latest, dict) else None,
         "hash_lora_url": (latest or {}).get("jury_hash_lora_tx_url") if isinstance(latest, dict) else None,
     }
+
+
+@app.get("/shipments/{shipment_id}/timeline")
+def shipment_timeline(shipment_id: str):
+    """On-chain event timeline from indexer JSON notes (pramanik/v1 + legacy NAVI_*)."""
+    sid = (shipment_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=422, detail="shipment_id required")
+    return {
+        "shipment_id": sid,
+        "app_id": APP_ID,
+        "events": chain.fetch_shipment_timeline(sid, limit=50),
+    }
+
+
+@app.get("/export/shipments.csv")
+def export_shipments_csv():
+    """CSV export of all shipments with live chain state."""
+    import csv
+    import io
+
+    from fastapi.responses import StreamingResponse
+
+    rows_out: list[dict] = []
+    try:
+        ledger = chain.list_shipment_statuses_from_boxes() if APP_ID else []
+    except Exception:
+        ledger = []
+    seen: set[str] = set()
+    for sid, st in ledger:
+        seen.add(sid)
+        full = chain.read_shipment_full(sid)
+        rows_out.append(
+            {
+                "shipment_id": sid,
+                "status": st,
+                "funds_microalgo": full.get("funds_microalgo", 0),
+                "risk_score": full.get("risk_score", 0),
+                "route": full.get("route", ""),
+                "supplier": full.get("supplier_address", ""),
+            }
+        )
+    with get_db() as conn:
+        for r in conn.execute("SELECT id FROM shipments").fetchall():
+            sid = str(r["id"])
+            if sid in seen:
+                continue
+            full = chain.read_shipment_full(sid) if APP_ID else {}
+            rows_out.append(
+                {
+                    "shipment_id": sid,
+                    "status": full.get("status", "sqlite_only"),
+                    "funds_microalgo": full.get("funds_microalgo", 0),
+                    "risk_score": full.get("risk_score", 0),
+                    "route": full.get("route", ""),
+                    "supplier": full.get("supplier_address", ""),
+                }
+            )
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf,
+        fieldnames=["shipment_id", "status", "funds_microalgo", "risk_score", "route", "supplier"],
+    )
+    writer.writeheader()
+    writer.writerows(rows_out)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="pramanik_shipments.csv"'},
+    )
 
 
 @app.post("/verify-hash")
@@ -4302,6 +4703,128 @@ def verify_hash(payload: dict = Body(...)):
             "verified": False,
             "error": str(e),
         }
+
+
+@app.get("/live-transactions")
+def live_transactions():
+    aid = APP_ID if isinstance(APP_ID, int) else int(os.environ.get("APP_ID") or 0)
+    return {
+        "transactions": chain.indexer_recent_app_txns(limit=15),
+        "app_id": aid,
+        "lora_app_url": f"{LORA_TESTNET_APP}/{aid}" if aid else LORA_TESTNET_APP,
+    }
+
+
+@app.get("/live-feed")
+def live_feed():
+    return {"feed": list(LIVE_FEED), "count": len(LIVE_FEED)}
+
+
+@app.websocket("/ws/live")
+async def ws_live_transactions(websocket: WebSocket):
+    """Push recent app transactions (indexer poll) for dashboard live feed."""
+    await websocket.accept()
+    poll = pcfg.websocket_poll_seconds()
+    try:
+        while True:
+            aid = APP_ID if isinstance(APP_ID, int) else int(os.environ.get("APP_ID") or 0)
+            txns = _transactions_formatted(20) if aid else []
+            await websocket.send_json(
+                {
+                    "type": "transactions",
+                    "app_id": aid,
+                    "lora_app_url": chain.lora_app_url() if aid else "",
+                    "transactions": txns,
+                    "poll_interval_seconds": poll,
+                }
+            )
+            await asyncio.sleep(poll)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.debug("ws/live closed: %s", e)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+@app.post("/simulate-event")
+def simulate_event(body: SimulateEventBody):
+    with get_db() as conn:
+        row = conn.execute("SELECT id FROM shipments WHERE id = ?", (body.shipment_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+    entry = {
+        "shipment_id": body.shipment_id,
+        "event": body.event,
+        "severity": body.severity,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    LOGISTICS_EVENTS.append(entry)
+    save_logistics_events()
+    return {"status": "ok", "event": entry, "total_events": len(LOGISTICS_EVENTS)}
+
+
+@app.get("/logistics-events/{shipment_id}")
+def logistics_events(shipment_id: str):
+    events = get_events_for(shipment_id)
+    return {"shipment_id": shipment_id, "events": events, "count": len(events)}
+
+
+@app.get("/supplier-trust/{wallet_address}")
+def supplier_trust(wallet_address: str):
+    addr = (wallet_address or "").strip()
+    try:
+        algo_encoding.decode_address(addr)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Invalid Algorand address") from e
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT score FROM supplier_trust WHERE wallet = ?", (addr,)
+        ).fetchone()
+    score: int
+    source = "sqlite"
+    if row:
+        score = int(row[0])
+    elif chain.use_navitrust():
+        on_chain = chain.read_supplier_reputation_on_chain(addr)
+        if on_chain.get("score") is None:
+            score = 50
+            source = "default_no_history"
+        else:
+            score = int(on_chain["score"])
+            source = "algorand_box_storage"
+    else:
+        score = 50
+        source = "default_no_history"
+    grade = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D" if score >= 40 else "F"
+    warning = score < 30
+    with get_db() as conn:
+        ships = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id AS shipment_id, origin, destination FROM shipments WHERE supplier_address = ?",
+                (addr,),
+            ).fetchall()
+        ]
+    mitigations = []
+    with get_db() as conn:
+        for r in conn.execute(
+            "SELECT shipment_id, resolution_text, created_at FROM supplier_mitigations WHERE wallet = ? ORDER BY id DESC LIMIT 20",
+            (addr,),
+        ).fetchall():
+            mitigations.append(dict(r))
+    return {
+        "wallet": addr,
+        "score": score,
+        "grade": grade,
+        "warning": warning,
+        "warning_message": ("Low supplier trust — proceed with caution." if warning else None),
+        "source": source,
+        "shipments": ships,
+        "mitigations": mitigations,
+    }
 
 
 if __name__ == "__main__":

@@ -28,73 +28,98 @@ ROOT = os.path.dirname(os.path.abspath(__file__)) or "."
 load_dotenv(os.path.join(ROOT, ".env"))
 
 import algorand_client as chain
+import pramanik_config as pcfg
+
+_lb = (chain.LORA_BASE_URL or "https://lora.algokit.io/testnet").rstrip("/")
+LORA_TX = f"{_lb}/transaction"
+LORA_APP = f"{_lb}/application"
+LORA_ACCOUNT = f"{_lb}/account"
+LORA_ASSET = f"{_lb}/asset"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 DB_PATH = os.path.join(ROOT, "shipments.db")
 AUDIT_PATH = os.path.join(ROOT, "audit_trail.json")
 
-LORA_TX = "https://lora.algokit.io/testnet/transaction"
-LORA_APP = "https://lora.algokit.io/testnet/application"
-LORA_ACCOUNT = "https://lora.algokit.io/testnet/account"
-LORA_ASSET = "https://lora.algokit.io/testnet/asset"
-
-VERDICT_CHEN = (
-    '{"verdict":"DISPUTE","score":87,"reasoning":"Active storm system over Arabian Sea '
-    'with 12mm precipitation and 78km/h winds at destination port. Weather risk exceeds '
-    'safe threshold for cargo delivery confirmation.","sentry_flag":true,"auditor_passed":false}'
+VERDICT_MUMBAI = json.dumps(
+    {
+        "verdict": "SETTLE",
+        "reasoning": (
+            "Weather Sentinel detected Cyclone Biparjoy remnants at 92/100 risk. "
+            "Compliance Auditor confirmed IN_TRANSIT status. Fraud Detector cleared (rep: 75/100). "
+            "Chief Arbiter issued SETTLE at 94% confidence."
+        ),
+        "final_risk_score": 91,
+        "confidence": 0.94,
+    },
+    separators=(",", ":"),
 )
 
-VERDICT_DELHI = (
-    '{"verdict":"SETTLE","score":18,"reasoning":"Clear weather at Singapore port, 0mm precipitation, '
-    '12km/h winds. Compliance check passed. Safe to release escrow to supplier.",'
-    '"sentry_flag":false,"auditor_passed":true}'
+VERDICT_CHEN = json.dumps(
+    {
+        "verdict": "HOLD",
+        "reasoning": (
+            "Risk score 45/100. Weather clear. One medium logistics event. "
+            "Insufficient evidence for settlement."
+        ),
+        "final_risk_score": 45,
+        "confidence": 0.78,
+    },
+    separators=(",", ":"),
 )
 
-DEMO_ROWS = [
-    {
-        "id": "SHIP_MUMBAI_001",
-        "origin": "Mumbai",
-        "destination": "Dubai",
-        "lat": 19.076,
-        "lon": 72.877,
-        "dlat": 25.276,
-        "dlon": 55.296,
-        "route": "Mumbai,India|Dubai,UAE",
-        "fund_micro": 2_000_000,
-        "verdict_json": None,
-        "risk": None,
-        "settle": False,
-    },
-    {
-        "id": "SHIP_CHEN_002",
-        "origin": "Chennai",
-        "destination": "Rotterdam",
-        "lat": 13.082,
-        "lon": 80.270,
-        "dlat": 51.924,
-        "dlon": 4.477,
-        "route": "Chennai,India|Rotterdam,Netherlands",
-        "fund_micro": 3_000_000,
-        "verdict_json": VERDICT_CHEN,
-        "risk": 87,
-        "settle": False,
-    },
-    {
-        "id": "SHIP_DELHI_003",
-        "origin": "Delhi",
-        "destination": "Singapore",
-        "lat": 28.614,
-        "lon": 77.209,
-        "dlat": 1.352,
-        "dlon": 103.819,
-        "route": "Delhi,India|Singapore,Singapore",
-        "fund_micro": 2_000_000,
-        "verdict_json": VERDICT_DELHI,
-        "risk": 18,
-        "settle": True,
-    },
-]
+def _demo_shipment_rows() -> list[dict]:
+    ids = pcfg.get_demo_shipments()
+    if len(ids) < 3:
+        raise RuntimeError("config.json must list at least 3 demo_shipments for seed_blockchain.py")
+    a, b, c = ids[0], ids[1], ids[2]
+    return [
+        {
+            "id": a,
+            "origin": "Mumbai, Maharashtra",
+            "destination": "Rotterdam, Netherlands",
+            "lat": 19.076090,
+            "lon": 72.877426,
+            "dlat": 51.924419,
+            "dlon": 4.462456,
+            "route": "Mumbai→Suez→Rotterdam",
+            "fund_micro": 4_750_000,
+            "verdict_json": VERDICT_MUMBAI,
+            "risk": 91,
+            "settle": False,
+        },
+        {
+            "id": b,
+            "origin": "Chennai, Tamil Nadu",
+            "destination": "Singapore",
+            "lat": 13.082680,
+            "lon": 80.270718,
+            "dlat": 1.352083,
+            "dlon": 103.819836,
+            "route": "Chennai→Malacca Strait→Singapore",
+            "fund_micro": 2_000_000,
+            "verdict_json": VERDICT_CHEN,
+            "risk": 45,
+            "settle": False,
+        },
+        {
+            "id": c,
+            "origin": "Delhi, NCT",
+            "destination": "Dubai, UAE",
+            "lat": 28.613939,
+            "lon": 77.209023,
+            "dlat": 25.204849,
+            "dlon": 55.270783,
+            "route": "Delhi→Nhava Sheva→Dubai",
+            "fund_micro": 3_000_000,
+            "verdict_json": None,
+            "risk": 0,
+            "settle": False,
+        },
+    ]
+
+
+DEMO_ROWS = _demo_shipment_rows()
 
 
 def _box_seeded(shipment_id: str) -> bool:
@@ -231,10 +256,10 @@ def _sqlite_upsert_demo_rows(oracle_addr: str) -> None:
         conn.execute(
             """
             INSERT INTO shipments (
-                id, origin, destination, current_lat, current_lon, status,
+                id, origin, destination, current_lat, current_lon,
                 dest_lat, dest_lon, supplier_address, created_at
             )
-            VALUES (?, ?, ?, ?, ?, 'In_Transit', ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 origin = excluded.origin,
                 destination = excluded.destination,
@@ -325,16 +350,25 @@ def _write_lora_proof(app_id: int, app_address: str, summary: dict[str, dict]) -
     def tx_line(tid: str | None) -> str:
         return f"`{LORA_TX}/{tid}`" if tid else "`(n/a)`"
 
-    m = summary.get("SHIP_MUMBAI_001", {})
-    c = summary.get("SHIP_CHEN_002", {})
-    d = summary.get("SHIP_DELHI_003", {})
+    ids = pcfg.get_demo_shipments()
+    if len(ids) < 3:
+        raise RuntimeError("config.json must list at least 3 demo_shipments for LORA_PROOF.md")
+    id_a, id_b, id_c = ids[0], ids[1], ids[2]
+
+    m = summary.get(id_a, {})
+    c = summary.get(id_b, {})
+    d = summary.get(id_c, {})
 
     cert = d.get("cert_asa")
-    cert_line = f"`{LORA_ASSET}/{cert}`" if cert and int(cert) > 0 else "`(n/a)`"
+    try:
+        cid = int(cert) if cert is not None else 0
+    except (TypeError, ValueError):
+        cid = 0
+    cert_line = f"`{LORA_ASSET}/{cid}`" if cid > 0 else "`(fill after seed — curl /shipment/<third-demo-id> → certificate_asa)`"
 
     body = f"""# Pramanik — on-chain proof (Lora)
 
-Generated by `python seed_blockchain.py`. Open each link in [Lora](https://lora.algokit.io/testnet).
+Generated by `python seed_blockchain.py`. Open each link in [Lora]({_lb}).
 
 ## Application
 
@@ -343,7 +377,7 @@ Generated by `python seed_blockchain.py`. Open each link in [Lora](https://lora.
 
 ---
 
-## SHIP_MUMBAI_001 — in transit, 2 ALGO locked
+## {id_a} — in transit, 2 ALGO locked
 
 | Step     | Lora link |
 |----------|-----------|
@@ -352,7 +386,7 @@ Generated by `python seed_blockchain.py`. Open each link in [Lora](https://lora.
 
 ---
 
-## SHIP_CHEN_002 — disputed, 3 ALGO locked, risk 87
+## {id_b} — disputed, 3 ALGO locked, risk 87
 
 | Step     | Lora link |
 |----------|-----------|
@@ -362,7 +396,7 @@ Generated by `python seed_blockchain.py`. Open each link in [Lora](https://lora.
 
 ---
 
-## SHIP_DELHI_003 — settled, certificate minted
+## {id_c} — settled, certificate minted
 
 | Step        | Lora link |
 |-------------|-----------|
@@ -404,7 +438,7 @@ def main() -> None:
 
     algorand = AlgorandClient.testnet()
     deployer = algorand.account.from_mnemonic(mnemonic=mnemonic)
-    oracle_addr = deployer.address
+    oracle_addr = (os.environ.get("ORACLE_ADDRESS") or "").strip() or deployer.address
     app_address = get_application_address(app_id)
 
     logger.info("Oracle : %s", oracle_addr)
@@ -523,30 +557,36 @@ def main() -> None:
             return f"    {label}: (n/a)"
         return f"    {label}: {LORA_TX}/{tid}"
 
-    mumbai = summary.get("SHIP_MUMBAI_001", {})
-    chen = summary.get("SHIP_CHEN_002", {})
-    delhi = summary.get("SHIP_DELHI_003", {})
+    demo_ids = pcfg.get_demo_shipments()
+    if len(demo_ids) < 3:
+        logger.error("config.json must list 3 demo_shipments for seed summary output")
+        demo_ids = [r["id"] for r in DEMO_ROWS]
+    id_a, id_b, id_c = demo_ids[0], demo_ids[1], demo_ids[2]
+
+    mumbai = summary.get(id_a, {})
+    chen = summary.get(id_b, {})
+    delhi = summary.get(id_c, {})
 
     if not mumbai.get("skipped"):
-        print("  SHIP_MUMBAI_001  In_Transit  2 ALGO locked")
+        print(f"  {id_a}  In_Transit  2 ALGO locked")
         print(_line("Register", mumbai.get("register_tx")))
         print(_line("Fund", mumbai.get("fund_tx")))
     else:
-        print("  SHIP_MUMBAI_001  (already on-chain)")
+        print(f"  {id_a}  (already on-chain)")
 
     print()
     if not chen.get("skipped"):
-        print("  SHIP_CHEN_002    Disputed    3 ALGO locked")
+        print(f"  {id_b}    Disputed    3 ALGO locked")
         print(_line("Register", chen.get("register_tx")))
         print(_line("Fund", chen.get("fund_tx")))
         print(_line("Verdict", chen.get("verdict_tx")))
     else:
-        print("  SHIP_CHEN_002    (already on-chain)")
+        print(f"  {id_b}    (already on-chain)")
 
     print()
     cert = delhi.get("cert_asa")
     if not delhi.get("skipped"):
-        print(f"  SHIP_DELHI_003   Settled     Certificate return value: {cert}")
+        print(f"  {id_c}   Settled     Certificate return value: {cert}")
         print(_line("Register", delhi.get("register_tx")))
         print(_line("Fund", delhi.get("fund_tx")))
         print(_line("Verdict", delhi.get("verdict_tx")))
@@ -555,12 +595,12 @@ def main() -> None:
             print(f"    Cert:   {LORA_ASSET}/{cert}")
     elif delhi.get("settle_tx"):
         cert = delhi.get("cert_asa")
-        print("  SHIP_DELHI_003   Settled     (recovered settle from prior failed run)")
+        print(f"  {id_c}   Settled     (recovered settle from prior failed run)")
         print(_line("Settle", delhi.get("settle_tx")))
         if cert and int(cert) > 0:
             print(f"    Cert:   {LORA_ASSET}/{cert}")
     else:
-        print("  SHIP_DELHI_003   (already on-chain)")
+        print(f"  {id_c}   (already on-chain)")
 
     print(" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 

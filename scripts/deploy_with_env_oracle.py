@@ -188,7 +188,13 @@ def main() -> int:
     print("2. Restart Vite (npm run dev) so VITE_APP_ID reloads")
     print("3. python scripts/verify_algorand_env.py   # should show oracle_matches_app_global: true")
     print("4. Optional demo chain: python seed_blockchain.py")
-    print(f"\nNew Lora app URL: https://lora.algokit.io/testnet/application/{app_id}")
+    try:
+        lora_base = str(json.loads((ROOT / "config.json").read_text(encoding="utf-8")).get("lora_base_url") or "").rstrip("/")
+    except (OSError, json.JSONDecodeError):
+        lora_base = ""
+    if not lora_base:
+        lora_base = "https://lora.algokit.io/testnet"
+    print(f"\nNew Lora app URL: {lora_base}/application/{app_id}")
     return 0
 
 

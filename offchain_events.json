@@ -1,14 +1,8 @@
 [
   {
-    "shipment_id": "SHIP_DOES_NOT_EXIST_999",
-    "event": "test",
+    "shipment_id": "TEST_SHIP_001",
+    "event": "delay",
     "severity": "medium",
-    "timestamp": "2026-04-18T11:21:01Z"
-  },
-  {
-    "shipment_id": "SHIP_SMOKE_123",
-    "event": "GPS calibration drift",
-    "severity": "medium",
-    "timestamp": "2026-04-18T11:21:01Z"
+    "timestamp": "2026-05-19T22:44:01.653042+00:00"
   }
 ]

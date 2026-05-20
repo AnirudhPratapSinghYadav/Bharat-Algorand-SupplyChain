@@ -18,6 +18,14 @@ from algopy import (
 from algopy.arc4 import UInt64 as arc4_UInt64
 
 
+class ShipmentEvent(arc4.Struct):
+    """ARC-28 structured log for indexer filters (shipment lifecycle)."""
+
+    shipment_id: arc4.String
+    event_type: arc4.String
+    value: arc4.UInt64
+
+
 class NaviTrust(ARC4Contract):
     """
     Pramanik (प्रमाणिक) — Supply Chain Dispute Oracle on Algorand.
@@ -36,6 +44,8 @@ class NaviTrust(ARC4Contract):
       rt_ = route           (Bytes)
       ce_ = certificate ASA (UInt64)
       rp_ = supplier rep    (UInt64, key = supplier)
+
+    ARC-28: ShipmentEvent emitted on register / fund / verdict / settle / void.
     """
 
     def __init__(self) -> None:
@@ -81,6 +91,13 @@ class NaviTrust(ARC4Contract):
         self.shipment_risk[sid] = UInt64(0)
         self.shipment_route[sid] = route.native.bytes
         self.total_shipments.value = self.total_shipments.value + UInt64(1)
+        arc4.emit(
+            ShipmentEvent(
+                shipment_id=shipment_id,
+                event_type=arc4.String("REGISTERED"),
+                value=arc4_UInt64(UInt64(0)),
+            )
+        )
 
     @arc4.abimethod
     def fund_shipment(
@@ -94,10 +111,18 @@ class NaviTrust(ARC4Contract):
         sid = shipment_id.native.bytes
         assert sid in self.shipment_status, "Shipment not registered"
         assert self.shipment_status[sid] != String("Settled"), "Cannot fund settled shipment"
+        assert self.shipment_status[sid] != String("VOID"), "Cannot fund voided shipment"
         self.shipment_buyer[sid] = payment.sender
         has_funds, current = self.shipment_funds.maybe(sid)
         self.shipment_funds[sid] = (
             current + payment.amount if has_funds else payment.amount
+        )
+        arc4.emit(
+            ShipmentEvent(
+                shipment_id=shipment_id,
+                event_type=arc4.String("FUNDED"),
+                value=arc4_UInt64(payment.amount),
+            )
         )
 
     @arc4.abimethod
@@ -113,6 +138,7 @@ class NaviTrust(ARC4Contract):
         sid = shipment_id.native.bytes
         assert sid in self.shipment_status, "Shipment not registered"
         assert self.shipment_status[sid] != String("Settled"), "Cannot record verdict on settled shipment"
+        assert self.shipment_status[sid] != String("VOID"), "Cannot record verdict on voided shipment"
         rs = risk_score.native
         old_r = UInt64(0)
         if sid in self.shipment_risk:
@@ -129,6 +155,13 @@ class NaviTrust(ARC4Contract):
                 if self.total_disputed.value > UInt64(0):
                     self.total_disputed.value = self.total_disputed.value - UInt64(1)
             self.shipment_status[sid] = String("In_Transit")
+        arc4.emit(
+            ShipmentEvent(
+                shipment_id=shipment_id,
+                event_type=arc4.String("VERDICT"),
+                value=arc4_UInt64(rs),
+            )
+        )
 
     @arc4.abimethod
     def settle_shipment(self, shipment_id: arc4.String) -> arc4_UInt64:
@@ -146,6 +179,7 @@ class NaviTrust(ARC4Contract):
         assert self.shipment_status[sid] != String(
             "Disputed"
         ), "Cannot settle disputed shipment directly — record cleared verdict first"
+        assert self.shipment_status[sid] != String("VOID"), "Cannot settle voided shipment"
         assert sid in self.shipment_verdict, "No verdict recorded — run jury first"
         if sid in self.shipment_cert:
             assert self.shipment_cert[sid] == UInt64(0), "Certificate already minted"
@@ -193,7 +227,70 @@ class NaviTrust(ARC4Contract):
         else:
             self.supplier_rep[supplier] = new_rep
 
+        arc4.emit(
+            ShipmentEvent(
+                shipment_id=shipment_id,
+                event_type=arc4.String("SETTLED"),
+                value=arc4_UInt64(cert_id),
+            )
+        )
         return arc4_UInt64(cert_id)
+
+    @arc4.abimethod
+    def void_shipment(self, shipment_id: arc4.String) -> None:
+        """
+        Oracle voids a shipment: refund escrow to buyer (if known) else oracle,
+        set status VOID, penalize supplier reputation (−20, floor 0).
+        """
+        assert Txn.sender == self.oracle_address.value, "Oracle only"
+        assert self.is_paused.value == UInt64(0), "Oracle is paused"
+        sid = shipment_id.native.bytes
+        assert sid in self.shipment_status, "Shipment not registered"
+        st = self.shipment_status[sid]
+        assert st != String("Settled"), "Cannot void settled shipment"
+        assert st != String("VOID"), "Already voided"
+
+        funds_u = UInt64(0)
+        if sid in self.shipment_funds:
+            funds_u = self.shipment_funds[sid]
+
+        if funds_u > UInt64(0):
+            if sid in self.shipment_buyer:
+                receiver = self.shipment_buyer[sid]
+            else:
+                receiver = self.oracle_address.value
+            itxn.Payment(
+                receiver=receiver,
+                amount=funds_u,
+                note=Bytes(b"Pramanik: escrow refunded on void"),
+                fee=UInt64(0),
+            ).submit()
+
+        if st == String("Disputed"):
+            if self.total_disputed.value > UInt64(0):
+                self.total_disputed.value = self.total_disputed.value - UInt64(1)
+
+        self.shipment_funds[sid] = UInt64(0)
+        self.shipment_status[sid] = String("VOID")
+
+        supplier = self.shipment_supplier[sid]
+        if supplier in self.supplier_rep:
+            acc = self.supplier_rep[supplier]
+        else:
+            acc = UInt64(50)
+        penalty = UInt64(20)
+        if acc >= penalty:
+            self.supplier_rep[supplier] = acc - penalty
+        else:
+            self.supplier_rep[supplier] = UInt64(0)
+
+        arc4.emit(
+            ShipmentEvent(
+                shipment_id=shipment_id,
+                event_type=arc4.String("VOID"),
+                value=arc4_UInt64(funds_u),
+            )
+        )
 
     @arc4.abimethod
     def pause_oracle(self) -> None:

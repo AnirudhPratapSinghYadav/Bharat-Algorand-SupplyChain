@@ -1,5 +1,5 @@
 > **Note (2026):** This file is the original **Agri-Jury** architecture (3-agent narrative, legacy shipment IDs).  
-> **Navi-Trust** (4-agent jury, `SHIP_MUMBAI_001` / `SHIP_CHEN_002` / `SHIP_DELHI_003`, current APIs) is documented in **`NAVI_TRUST_ARCHITECTURE.md`**.  
+> **Navi-Trust** (4-agent jury, demo IDs from `config.json` → `demo_shipments`, current APIs) is documented in **`NAVI_TRUST_ARCHITECTURE.md`**.  
 > Keep this file for historical reference; prefer the Navi-Trust doc for judges and contributors.
 
 ---

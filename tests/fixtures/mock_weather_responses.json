@@ -1,0 +1,20 @@
+{
+  "clear": {
+    "city": "Mumbai",
+    "temperature_c": 28.0,
+    "precipitation_mm": 0.0,
+    "wind_kmh": 12.0,
+    "weather_code": 0,
+    "description": "Clear",
+    "is_risky": false
+  },
+  "storm": {
+    "city": "Chennai",
+    "temperature_c": 26.0,
+    "precipitation_mm": 22.0,
+    "wind_kmh": 55.0,
+    "weather_code": 95,
+    "description": "Thunderstorm",
+    "is_risky": true
+  }
+}

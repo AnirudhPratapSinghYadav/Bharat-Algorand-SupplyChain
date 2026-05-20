@@ -32,10 +32,23 @@ jobs:
         with:
           python-version-file: .python-version
           cache: pip
-      - run: pip install -r requirements.txt pytest pip-audit
+      - run: pip install -r requirements.txt -r requirements-test.txt pip-audit
       - run: pip-audit -r requirements.txt
         continue-on-error: true
-      - run: pytest -q
+      - name: Unit tests
+        env:
+          SKIP_ORACLE_VERIFY: "1"
+          AUTO_SEED_DEMO: "0"
+        run: pytest tests/unit tests/test_protocol_api.py -q --tb=short
+      - name: Integration tests (TestNet)
+        if: ${{ secrets.ORACLE_MNEMONIC != '' }}
+        env:
+          ORACLE_MNEMONIC: ${{ secrets.ORACLE_MNEMONIC }}
+          APP_ID: ${{ secrets.APP_ID }}
+          SKIP_ORACLE_VERIFY: "1"
+          AUTO_SEED_DEMO: "0"
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: pytest tests/integration tests/e2e -q --tb=short --timeout=180 -m testnet
 
   contract-build:
     runs-on: ubuntu-latest

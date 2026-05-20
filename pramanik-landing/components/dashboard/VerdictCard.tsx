@@ -1,4 +1,4 @@
-import { VerdictResult } from '@/lib/types';
+import { loraTransactionUrl } from '@/lib/constants';
 
 interface VerdictCardProps {
   result: VerdictResult;
@@ -73,7 +73,7 @@ export default function VerdictCard({ result }: VerdictCardProps) {
           <p className="text-[#9AA5B4]">
             Written to Algorand transaction note.<br />
             <a 
-              href={`https://lora.algokit.io/testnet/transaction/${result.txn_id}`} 
+              href={loraTransactionUrl(result.txn_id)} 
               target="_blank" 
               rel="noopener noreferrer"
               className="text-[#3A6FF7] hover:underline"

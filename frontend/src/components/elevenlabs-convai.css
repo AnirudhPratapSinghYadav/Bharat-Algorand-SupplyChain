@@ -1,0 +1,64 @@
+.el-convai {
+  border: 1px solid var(--border, rgba(148, 163, 184, 0.25));
+  border-radius: 12px;
+  background: var(--bg-card, #0f172a);
+  padding: 14px 16px;
+  min-height: 200px;
+}
+
+.el-convai__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.el-convai__title {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--text, #e2e8f0);
+}
+
+.el-convai__badge {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent, #38bdf8);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.el-convai__ctx {
+  font-size: 0.72rem;
+  color: var(--muted, #94a3b8);
+  margin: 0 0 10px;
+}
+
+.el-convai__host {
+  min-height: 420px;
+  width: 100%;
+}
+
+.el-convai__host elevenlabs-convai {
+  display: block;
+  width: 100%;
+  min-height: 420px;
+}
+
+.el-convai__loading,
+.el-convai__hint,
+.el-convai__error {
+  font-size: 0.8rem;
+  color: var(--muted, #94a3b8);
+  margin: 8px 0 0;
+}
+
+.el-convai__error {
+  color: #f87171;
+}
+
+.el-convai--disabled {
+  opacity: 0.85;
+}

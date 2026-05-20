@@ -1,0 +1,14 @@
+[
+  {
+    "shipment_id": "PRM-EX-MUM-RDM-001",
+    "origin": "Mumbai",
+    "destination": "Rotterdam",
+    "route": "Mumbai→Rotterdam"
+  },
+  {
+    "shipment_id": "PRM-EX-CHN-SGP-002",
+    "origin": "Chennai",
+    "destination": "Singapore",
+    "route": "Chennai→Singapore"
+  }
+]

@@ -27,6 +27,37 @@ function resolveBackendUrl(): string {
 /** No trailing slash — avoids `//navibot` and failed POSTs. */
 export const BACKEND_URL = resolveBackendUrl().replace(/\/+$/, '');
 
+function trimUrl(s: string | undefined): string {
+  return (s || '').trim().replace(/\/+$/, '');
+}
+
+const DEFAULT_LORA_FOR_NETWORK: Record<string, string> = {
+  testnet: 'https://lora.algokit.io/testnet',
+  mainnet: 'https://lora.algokit.io/mainnet',
+};
+
+/**
+ * Lora explorer base (`…/testnet` or `…/mainnet`). Uses `VITE_LORA_BASE_URL`, else infers from `VITE_ALGORAND_NETWORK`.
+ */
+function resolveLoraBaseUrl(): string {
+  const fromEnv = trimUrl(import.meta.env.VITE_LORA_BASE_URL as string | undefined);
+  if (fromEnv) return fromEnv;
+  const net = (import.meta.env.VITE_ALGORAND_NETWORK as string | undefined)?.toLowerCase() || 'testnet';
+  return DEFAULT_LORA_FOR_NETWORK[net] || DEFAULT_LORA_FOR_NETWORK.testnet;
+}
+
+/** Warn only when explicitly forcing empty via env (unusual). */
+function warnIfLoraDisabled(): void {
+  const raw = import.meta.env.VITE_LORA_BASE_URL as string | undefined;
+  if (raw !== undefined && !trimUrl(raw) && import.meta.env.PROD) {
+    console.warn('[Pramanik] VITE_LORA_BASE_URL is empty — using network default for Lora links.');
+  }
+}
+
+warnIfLoraDisabled();
+
+export const LORA_BASE_URL = resolveLoraBaseUrl();
+
 /** Bootstrap / heavy ledger reads — avoid false empty dashboard on slow chain or SQLite */
 export const API_TIMEOUT = 15000;
 
@@ -37,8 +68,33 @@ export const LANDING_DEMO_SHIPMENT_ID = String(import.meta.env.VITE_LANDING_DEMO
 
 export const EXPLORER_URL = 'https://testnet.explorer.perawallet.app/tx/';
 
-export const LORA_APP = (id: number) => `https://lora.algokit.io/testnet/application/${id}`;
+function requireEnv(name: string, value: string | undefined): string {
+  const v = (value || '').trim().replace(/\/+$/, '');
+  if (!v && import.meta.env.PROD) {
+    console.warn(`[Pramanik] Missing ${name} — set in Vercel/build env.`);
+  }
+  return v;
+}
+
+export const LORA_TX = LORA_BASE_URL ? `${LORA_BASE_URL}/transaction` : '';
+
+export const LORA_APP = (id: number) => (LORA_BASE_URL && id ? `${LORA_BASE_URL}/application/${id}` : '');
+
+export const loraTransactionUrl = (txId: string) => (txId && LORA_TX ? `${LORA_TX}/${txId}` : '');
+
+export const loraAssetUrl = (assetId: number | string) =>
+  LORA_BASE_URL && assetId ? `${LORA_BASE_URL}/asset/${assetId}` : '';
+
+export const loraAccountUrl = (addr: string) => (LORA_BASE_URL && addr ? `${LORA_BASE_URL}/account/${addr}` : '');
+
+export function wsLiveUrl(): string {
+  if (import.meta.env.DEV && typeof window !== 'undefined') {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${window.location.host}/api/ws/live`;
+  }
+  const base = BACKEND_URL.replace(/^https/, 'wss').replace(/^http/, 'ws');
+  return `${base}/ws/live`;
+}
 
 /** Algod base URL (must match wallet / indexer network). */
-export const ALGOD_URL =
-  (import.meta.env.VITE_ALGORAND_NODE as string) || 'https://testnet-api.algonode.cloud';
+export const ALGOD_URL = requireEnv('VITE_ALGORAND_NODE', import.meta.env.VITE_ALGORAND_NODE as string | undefined);

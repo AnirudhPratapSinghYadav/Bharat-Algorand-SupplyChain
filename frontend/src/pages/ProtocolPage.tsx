@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
 import { ClipboardCopy, Download, ExternalLink, Shield } from 'lucide-react';
-import { BACKEND_URL, FALLBACK_APP_ID } from '../constants/api';
+import { BACKEND_URL, FALLBACK_APP_ID, LORA_APP } from '../constants/api';
 import { DisputeFeed } from '../components/DisputeFeed';
 
 export default function ProtocolPage() {
@@ -187,7 +187,7 @@ export default function ProtocolPage() {
           <div>
             <strong>App ID:</strong> {appId || '—'}{' '}
             {appId ? (
-              <a href={`https://lora.algokit.io/testnet/application/${appId}`} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', fontWeight: 600 }}>
+              <a href={LORA_APP(Number(appId))} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', fontWeight: 600 }}>
                 Open on Lora ↗ <ExternalLink size={14} style={{ verticalAlign: 'middle' }} />
               </a>
             ) : null}

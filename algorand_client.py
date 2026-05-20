@@ -34,27 +34,56 @@ NAVITRUST_SPEC = ROOT / "artifacts" / "NaviTrust.arc56.json"
 # Same DB file as app.py (metadata only: origin, destination, supplier_address, created_at).
 SHIPMENTS_DB_PATH = ROOT / "shipments.db"
 
-APP_ID = int(os.environ.get("APP_ID", 0) or os.environ.get("VITE_APP_ID", 0))
-ALGO_NETWORK = os.environ.get("ALGO_NETWORK", "testnet")
+from pramanik_config import (
+    get_algod_url,
+    get_app_id,
+    get_indexer_url,
+    get_lora_base_url,
+    get_network,
+    get_verify_public_base_url,
+    load_config,
+)
+
+APP_ID = get_app_id()
+ALGO_NETWORK = get_network()
 ORACLE_MNEMONIC = os.environ.get("ORACLE_MNEMONIC") or os.environ.get("DEPLOYER_MNEMONIC")
 DEPLOYER_MNEMONIC = ORACLE_MNEMONIC
 
 
 def _sync_env_globals() -> None:
     """Re-read APP_ID / oracle mnemonic after load_dotenv() (import order safe for seed_blockchain, etc.)."""
-    global APP_ID, ORACLE_MNEMONIC, DEPLOYER_MNEMONIC
-    APP_ID = int(os.environ.get("APP_ID", 0) or os.environ.get("VITE_APP_ID", 0))
+    global APP_ID, ORACLE_MNEMONIC, DEPLOYER_MNEMONIC, ALGO_NETWORK, ALGOD_URL, INDEXER_URL
+    global LORA_BASE_URL, LORA_TESTNET_TX, LORA_TESTNET_APP
+    load_config.cache_clear()
+    APP_ID = get_app_id()
+    ALGO_NETWORK = get_network()
     ORACLE_MNEMONIC = os.environ.get("ORACLE_MNEMONIC") or os.environ.get("DEPLOYER_MNEMONIC")
     DEPLOYER_MNEMONIC = ORACLE_MNEMONIC
+    ALGOD_URL = get_algod_url()
+    INDEXER_URL = get_indexer_url()
+    LORA_BASE_URL = get_lora_base_url()
+    LORA_TESTNET_TX = f"{LORA_BASE_URL}/transaction" if LORA_BASE_URL else ""
+    LORA_TESTNET_APP = f"{LORA_BASE_URL}/application" if LORA_BASE_URL else ""
 
-ALGOD_URL = os.environ.get("ALGOD_ADDRESS", "https://testnet-api.algonode.cloud")
-INDEXER_URL = os.environ.get(
-    "VITE_INDEXER_URL",
-    "https://testnet-idx.algonode.cloud" if ALGO_NETWORK == "testnet" else "https://mainnet-idx.algonode.cloud",
-)
 
-LORA_TESTNET_TX = "https://lora.algokit.io/testnet/transaction"
-LORA_TESTNET_APP = "https://lora.algokit.io/testnet/application"
+_sync_env_globals()
+ALGOD_URL = get_algod_url()
+INDEXER_URL = get_indexer_url()
+LORA_BASE_URL = get_lora_base_url()
+LORA_TESTNET_TX = f"{LORA_BASE_URL}/transaction" if LORA_BASE_URL else ""
+LORA_TESTNET_APP = f"{LORA_BASE_URL}/application" if LORA_BASE_URL else ""
+
+
+def lora_asset_url(asset_id: int | str | None) -> str:
+    if not asset_id or not LORA_BASE_URL:
+        return ""
+    return f"{LORA_BASE_URL}/asset/{int(asset_id)}"
+
+
+def lora_account_url(address: str | None) -> str:
+    if not address or not LORA_BASE_URL:
+        return ""
+    return f"{LORA_BASE_URL}/account/{address.strip()}"
 
 # Algokit TransactionComposer defaults non-localnet app/payment txns to a 10-round validity window.
 # That is too narrow for simulate + network latency; match typical algod suggested_params (~1000 rounds).
@@ -65,6 +94,20 @@ def lora_tx_url(tx_id: str | None) -> str:
     if not tx_id:
         return ""
     return f"{LORA_TESTNET_TX}/{tx_id}"
+
+
+def lora_box_url(shipment_id: str, prefix: str) -> str:
+    """Deep-link style URL for a box key (hex-encoded prefix+shipment_id)."""
+    _sync_env_globals()
+    if not APP_ID:
+        return ""
+    box_name_hex = (prefix + shipment_id).encode("utf-8").hex()
+    return f"{LORA_TESTNET_APP}/{APP_ID}?box={box_name_hex}"
+
+
+def lora_app_url() -> str:
+    _sync_env_globals()
+    return f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else LORA_TESTNET_APP
 
 
 def fetch_transaction_note_json(tx_id: str) -> Optional[dict]:
@@ -95,6 +138,14 @@ STATUS_IN_TRANSIT = "In_Transit"
 STATUS_LEGACY_FLAGGED = "Delayed_Disaster"
 STATUS_DISPUTED = "Disputed"
 STATUS_SETTLED = "Settled"
+STATUS_UNREGISTERED = "Unregistered"
+STATUS_UNKNOWN = "Unknown"
+# API-facing aliases (spec); on-chain uses In_Transit / Disputed / Settled
+STATUS_CREATED = "CREATED"
+STATUS_API_IN_TRANSIT = "IN_TRANSIT"
+STATUS_API_DISPUTED = "DISPUTE"
+STATUS_API_SETTLED = "SETTLED"
+STATUS_VOID = "VOID"
 
 # Global-state keys shown on /protocol (hide legacy badge / pact fields).
 NAVITRUST_DISPLAY_KEYS = frozenset(
@@ -120,6 +171,7 @@ def _build_navitrust_arc4_name_map() -> Dict[str, str]:
         ("fund_shipment", ["string", "pay"], "void"),
         ("record_verdict", ["string", "string", "uint64"], "void"),
         ("settle_shipment", ["string"], "uint64"),
+        ("void_shipment", ["string"], "void"),
         ("pause_oracle", [], "void"),
         ("unpause_oracle", [], "void"),
         ("update_oracle", ["address"], "void"),
@@ -140,6 +192,7 @@ METHOD_ACTION_LABELS = {
     "register_shipment": "Shipment registered",
     "record_verdict": "Verdict recorded",
     "settle_shipment": "Shipment settled",
+    "void_shipment": "Shipment voided (refund + rep penalty)",
     "fund_shipment": "Escrow funded",
     "pause_oracle": "Oracle paused",
     "unpause_oracle": "Oracle unpaused",
@@ -271,14 +324,21 @@ def _oracle_account():
     return algorand.account.from_mnemonic(mnemonic=ORACLE_MNEMONIC)
 
 
-def oracle_address_string() -> Optional[str]:
-    """Public Algorand address for the oracle/deployer account, if mnemonic is configured."""
+def oracle_account():
+    """Signing account from ORACLE_MNEMONIC, or None if not configured."""
+    _sync_env_globals()
     if not ORACLE_MNEMONIC:
         return None
     try:
-        return _oracle_account().address
+        return _oracle_account()
     except Exception:
         return None
+
+
+def oracle_address_string() -> Optional[str]:
+    """Public Algorand address for the oracle/deployer account, if mnemonic is configured."""
+    acct = oracle_account()
+    return acct.address if acct else None
 
 
 # Minimum oracle liquid balance (µALGO) before signing app calls / witness notes.
@@ -456,7 +516,7 @@ def mint_supplier_passport_asa(
 
     score_i = max(0, min(100, int(reputation_score)))
     asset_name_bytes = f"PRAMANIK-PASS-{score_i}".encode("utf-8")[:32]
-    base_url = (os.environ.get("PASSPORT_URL_BASE") or "https://pramanik.vercel.app").rstrip("/")
+    base_url = get_verify_public_base_url()
     url_str = (f"{base_url}/supplier/{addr}")[:96]
 
     passport_note = {
@@ -543,16 +603,14 @@ def store_jury_hash_box(shipment_id: str, jury_hash_hex: str) -> Optional[dict]:
     if not sid or not h:
         return None
     try:
-        note_obj = {
-            "type": "NAVI_JURY_HASH",
-            "v": "1",
-            "app": APP_ID,
-            "sid": sid,
-            "hash": h,
-            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
-        note = json.dumps(note_obj, separators=(",", ":"))
-        return send_oracle_zero_note(note)
+        from pramanik_notes import build_pramanik_note
+
+        note_b = build_pramanik_note(
+            "jury_hash",
+            sid,
+            extra={"hash": h, "app": APP_ID, "legacy_type": "NAVI_JURY_HASH"},
+        )
+        return send_oracle_zero_note(note_b.decode("utf-8"))
     except Exception as e:
         logger.warning("store_jury_hash_box failed: %s", e)
         return None
@@ -642,7 +700,7 @@ def get_shipment_from_chain(shipment_id: str) -> Dict[str, Any]:
         "supplier_address": (meta.get("supplier_address") or "").strip(),
         "created_at": meta.get("created_at", ""),
         "app_id": app_id,
-        "lora_app_url": f"https://lora.algokit.io/testnet/application/{app_id}" if app_id else "",
+        "lora_app_url": lora_app_url() if app_id else "",
         "source": "algorand_box_storage",
     }
 
@@ -709,10 +767,26 @@ def get_shipment_from_chain(shipment_id: str) -> Dict[str, Any]:
     if cert_id:
         cid = int(cert_id)
         result["certificate_asa"] = cid
-        result["lora_cert_url"] = f"https://lora.algokit.io/testnet/asset/{cid}"
+        result["lora_cert_url"] = lora_asset_url(cid)
 
     result["lora_url"] = f"{LORA_TESTNET_APP}/{app_id}"
     return result
+
+
+def navitrust_void_shipment_box_refs(shipment_id: str) -> list[BoxReference]:
+    """Boxes touched by void_shipment: st_, sp_, by_, fn_, rp_."""
+    if not APP_ID:
+        return []
+    refs: list[BoxReference] = [
+        BoxReference(APP_ID, _navi_str_key_box_name(b"st_", shipment_id)),
+        BoxReference(APP_ID, _navi_str_key_box_name(b"sp_", shipment_id)),
+        BoxReference(APP_ID, _navi_str_key_box_name(b"by_", shipment_id)),
+        BoxReference(APP_ID, _navi_str_key_box_name(b"fn_", shipment_id)),
+    ]
+    sup = read_navitrust_supplier_address(shipment_id)
+    if sup:
+        refs.append(BoxReference(APP_ID, _navi_rep_box_name(sup)))
+    return refs
 
 
 def navitrust_shipment_box_refs(shipment_id: str) -> list[BoxReference]:
@@ -859,13 +933,34 @@ def settle_shipment_chain(shipment_id: str) -> Optional[dict]:
     if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
         return None
     try:
+        from pramanik_notes import build_pramanik_note
+
         deployer = _oracle_account()
         app_client = get_app_client()
+        try:
+            vh = read_verdict_hash(shipment_id)
+        except Exception:
+            vh = ""
+        settle_note = build_pramanik_note(
+            "settle",
+            shipment_id,
+            extra={
+                "event_type": "SETTLED",
+                "verdict_hash": vh or None,
+                "arc69": {
+                    "standard": "arc69",
+                    "description": "Pramanik Settlement Certificate",
+                    "shipment_id": shipment_id,
+                    "external_url": f"{get_verify_public_base_url()}/verify/{shipment_id}",
+                },
+            },
+        )
         result = app_client.send.call(
             params=AppClientMethodCallParams(
                 method="settle_shipment",
                 args=[shipment_id],
                 sender=deployer.address,
+                note=settle_note,
                 box_references=navitrust_settle_shipment_box_refs(shipment_id),
                 extra_fee=AlgoAmount(micro_algo=4000),
                 validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
@@ -1012,13 +1107,21 @@ def register_navitrust(shipment_id: str, supplier: str, route: str) -> dict:
     if st not in ("Unregistered", "Unknown"):
         raise ValueError(f"Shipment already on-chain (status: {st}). Use a new shipment_id.")
     ensure_navitrust_app_mbr()
+    from pramanik_notes import build_pramanik_note
+
     deployer = _oracle_account()
     app_client = get_app_client()
+    reg_note = build_pramanik_note(
+        "register",
+        shipment_id,
+        extra={"supplier": supplier, "route": route, "event_type": "REGISTERED"},
+    )
     result = app_client.send.call(
         params=AppClientMethodCallParams(
             method="register_shipment",
             args=[shipment_id, supplier, route],
             sender=deployer.address,
+            note=reg_note,
             box_references=navitrust_shipment_box_refs(shipment_id),
             extra_fee=AlgoAmount(micro_algo=4000),
             validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
@@ -1028,7 +1131,7 @@ def register_navitrust(shipment_id: str, supplier: str, route: str) -> dict:
     return {
         "tx_id": tx_id,
         "app_id": APP_ID,
-        "lora_url": f"{LORA_TESTNET_APP}/{APP_ID}",
+        "lora_url": lora_app_url(),
         "lora_tx_url": lora_tx_url(tx_id),
     }
 
@@ -1228,7 +1331,7 @@ def global_stats_navitrust() -> dict:
         escrow_algo = round(int(acct.get("amount", 0)) / 1_000_000.0, 4)
         out["escrow_total_algo"] = escrow_algo
         out["contract_app_address"] = app_addr
-        out["lora_contract_url"] = f"https://lora.algokit.io/testnet/account/{app_addr}"
+        out["lora_contract_url"] = lora_account_url(app_addr)
     except Exception as e:
         logger.debug("global_stats_navitrust balance: %s", e)
 
@@ -1250,6 +1353,174 @@ def global_stats_navitrust() -> dict:
         elif st == STATUS_DISPUTED:
             out["total_disputed"] += 1
     return out
+
+
+def normalize_status_for_api(on_chain_status: str) -> str:
+    """Map deployed contract status strings to spec-style API labels where useful."""
+    s = (on_chain_status or "").strip()
+    if s in ("Unregistered", "Not_Found", ""):
+        return STATUS_UNREGISTERED
+    if s == "In_Transit":
+        return STATUS_API_IN_TRANSIT
+    if s == "Disputed":
+        return STATUS_API_DISPUTED
+    if s == "Settled":
+        return STATUS_API_SETTLED
+    if s == "VOID":
+        return "VOID"
+    return s
+
+
+def read_verdict_hash(shipment_id: str) -> str:
+    """
+    SHA-256 jury hash from transaction note witness (NAVI_JURY_HASH / NAVI_VERDICT).
+    Deployed contract has no vh_ box — hash lives in oracle payment notes.
+    """
+    if not APP_ID:
+        return ""
+    try:
+        aid = APP_ID
+        url = f"{INDEXER_URL.rstrip('/')}/v2/transactions?application-id={aid}&limit=50"
+        r = requests.get(url, timeout=12)
+        if r.status_code != 200:
+            return ""
+        for tx in r.json().get("transactions", []):
+            note_b64 = tx.get("note")
+            if not note_b64:
+                continue
+            try:
+                note = json.loads(base64.b64decode(note_b64).decode("utf-8"))
+            except Exception:
+                continue
+            if not isinstance(note, dict):
+                continue
+            if str(note.get("sid", "")).strip() != shipment_id.strip():
+                continue
+            if note.get("type") == "NAVI_JURY_HASH" and note.get("hash"):
+                return str(note["hash"]).strip().lower()
+            if note.get("type") == "NAVI_VERDICT" and note.get("jury_hash"):
+                return str(note["jury_hash"]).strip().lower()
+    except Exception as e:
+        logger.debug("read_verdict_hash: %s", e)
+    return ""
+
+
+def get_shipment_full_state(shipment_id: str) -> Dict[str, Any]:
+    """Spec alias: all box values + metadata for backend responses."""
+    raw = get_shipment_from_chain(shipment_id)
+    st = str(raw.get("status") or "")
+    registered = st not in ("Not_Found", "Unregistered", "Unknown", "")
+    rep = 0
+    sup = raw.get("supplier_address") or ""
+    if sup:
+        rep_data = read_supplier_reputation_on_chain(sup)
+        if rep_data.get("score") is not None:
+            rep = int(rep_data["score"])
+    return {
+        "shipment_id": shipment_id,
+        "status": normalize_status_for_api(st) if registered else STATUS_UNREGISTERED,
+        "on_chain_status": st,
+        "funds_microalgo": int(raw.get("funds_microalgo") or 0),
+        "funds_algo": float(raw.get("funds_algo") or 0),
+        "risk_score": int(raw.get("risk_score") or 0),
+        "rep_score": rep,
+        "route": str(raw.get("route") or ""),
+        "verdict_json": raw.get("verdict_json"),
+        "verdict_hash": read_verdict_hash(shipment_id),
+        "certificate_asa": raw.get("certificate_asa"),
+        "lora_app_url": raw.get("lora_app_url") or (f"{LORA_TESTNET_APP}/{APP_ID}" if APP_ID else ""),
+        "lora_cert_url": raw.get("lora_cert_url"),
+        "registered": registered,
+    }
+
+
+def activate_shipment_chain(shipment_id: str) -> Optional[dict]:
+    """
+    Spec lifecycle hook. Deployed contract sets In_Transit at register_shipment — no-op if already active.
+    """
+    st = read_shipment_status(shipment_id)
+    if st in ("Unregistered", "Unknown"):
+        return None
+    if st in ("In_Transit", "Disputed", "Settled", "VOID"):
+        return {"tx_id": None, "lora_url": None, "skipped": True, "status": st}
+    return None
+
+
+def mark_disputed_chain(shipment_id: str) -> Optional[dict]:
+    """
+    On deployed contract, Disputed is set by record_verdict when risk > 65.
+  Record a high-risk placeholder verdict if not already disputed.
+    """
+    st = read_shipment_status(shipment_id)
+    if st == "VOID":
+        return None
+    if st == "Disputed":
+        return {"tx_id": None, "lora_url": None, "skipped": True}
+    if st in ("Unregistered", "Unknown", "Settled"):
+        return None
+    placeholder = json.dumps(
+        {"verdict": "DISPUTE", "reasoning": "Oracle marked disputed", "final_risk_score": 87},
+        separators=(",", ":"),
+    )
+    return record_verdict_chain(shipment_id, placeholder, 87)
+
+
+def void_shipment_chain(shipment_id: str) -> Optional[dict]:
+    """Oracle voids shipment on upgraded NaviTrust (refund + VOID status + rep −20)."""
+    _sync_env_globals()
+    if not ORACLE_MNEMONIC or not APP_ID or not use_navitrust():
+        logger.warning("void_shipment_chain: missing oracle, APP_ID, or not NaviTrust")
+        return None
+    try:
+        from pramanik_notes import build_pramanik_note
+
+        deployer = _oracle_account()
+        app_client = get_app_client()
+        note_b = build_pramanik_note("void", shipment_id, extra={})
+        result = app_client.send.call(
+            params=AppClientMethodCallParams(
+                method="void_shipment",
+                args=[shipment_id],
+                sender=deployer.address,
+                note=note_b,
+                box_references=navitrust_void_shipment_box_refs(shipment_id),
+                extra_fee=AlgoAmount(micro_algo=3000),
+                validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
+            )
+        )
+        tx_id = result.tx_ids[0] if result.tx_ids else None
+        cr = result.confirmation.get("confirmed-round") if result.confirmation else None
+        return {"tx_id": tx_id, "confirmed_round": cr, "lora_url": lora_tx_url(tx_id)}
+    except Exception as e:
+        logger.warning("void_shipment failed: %s", e)
+        return None
+
+
+def submit_signed_txns_b64(signed_b64_list: list[str], wait_rounds: int = 20) -> dict:
+    """
+    Broadcast wallet-signed transaction(s) via algod.
+    Use for Pera-signed fund_shipment groups when the browser cannot call algod directly.
+    Returns tx_id (first txn in group) and lora_url.
+    """
+    if not signed_b64_list:
+        raise ValueError("No signed transactions provided")
+    stxns = []
+    for b64 in signed_b64_list:
+        raw = base64.b64decode(b64.strip())
+        stxns.append(encoding.msgpack_decode(raw))
+    algod = algorand.client.algod
+    if len(stxns) == 1:
+        tx_id = algod.send_transaction(stxns[0])
+    else:
+        tx_id = algod.send_transactions(stxns)
+    conf = wait_for_confirmation(algod, tx_id, wait_rounds)
+    rnd = conf.get("confirmed-round") if isinstance(conf, dict) else None
+    return {
+        "tx_id": tx_id,
+        "lora_url": lora_tx_url(tx_id),
+        "confirmed_round": rnd,
+        "count": len(stxns),
+    }
 
 
 def read_supplier_reputation_on_chain(supplier_address: str) -> dict:
@@ -1282,5 +1553,128 @@ def read_supplier_reputation_on_chain(supplier_address: str) -> dict:
         "score": None,
         "source": "no_box",
         "has_box": False,
-        "lora_url": f"{LORA_TESTNET_APP}/{APP_ID}",
+        "lora_url": lora_app_url(),
     }
+
+
+def _read_box_raw(prefix: bytes, shipment_id: str) -> Optional[bytes]:
+    if not APP_ID:
+        return None
+    try:
+        name = _navi_str_key_box_name(prefix, shipment_id)
+        box_resp = algorand.client.algod.application_box_by_name(APP_ID, name)
+        return base64.b64decode(box_resp["value"])
+    except Exception:
+        return None
+
+
+def read_shipment_boxes_verify(shipment_id: str) -> dict[str, Any]:
+    """Machine-readable box map for /verify — raw + decoded + Lora link per field."""
+    sid = (shipment_id or "").strip()
+    specs: list[tuple[str, bytes, str]] = [
+        ("status", b"st_", "string"),
+        ("supplier", b"sp_", "address"),
+        ("buyer", b"by_", "address"),
+        ("funds_microalgo", b"fn_", "uint64"),
+        ("risk_score", b"rs_", "uint64"),
+        ("verdict_json", b"vd_", "bytes"),
+        ("route", b"rt_", "string"),
+        ("certificate_asa", b"ce_", "uint64"),
+    ]
+    out: dict[str, Any] = {}
+    prefix_str_map = {
+        b"st_": "st_",
+        b"sp_": "sp_",
+        b"by_": "by_",
+        b"fn_": "fn_",
+        b"rs_": "rs_",
+        b"vd_": "vd_",
+        b"rt_": "rt_",
+        b"ce_": "ce_",
+    }
+    for key, prefix, kind in specs:
+        raw = _read_box_raw(prefix, sid)
+        pfx = prefix_str_map.get(prefix, prefix.decode())
+        entry: dict[str, Any] = {
+            "prefix": pfx,
+            "box_name_hex": (pfx + sid).encode("utf-8").hex(),
+            "lora_box_url": lora_box_url(sid, pfx),
+            "present": raw is not None,
+            "raw_hex": raw.hex() if raw else None,
+            "decoded": None,
+        }
+        if raw is None:
+            out[key] = entry
+            continue
+        if kind == "string":
+            entry["decoded"] = _decode_arc4_string(raw)
+        elif kind == "uint64":
+            entry["decoded"] = int.from_bytes(raw[-8:], "big") if len(raw) >= 8 else int.from_bytes(raw, "big")
+        elif kind == "address" and len(raw) >= 32:
+            entry["decoded"] = encoding.encode_address(raw[:32])
+        elif kind == "bytes":
+            entry["decoded"] = _decode_arc4_string(raw) or raw.decode("utf-8", errors="replace")
+        else:
+            entry["decoded"] = raw.hex()
+        out[key] = entry
+    sup = out.get("supplier", {}).get("decoded")
+    if sup:
+        rep_raw = None
+        try:
+            name = _navi_rep_box_name(str(sup))
+            box_resp = algorand.client.algod.application_box_by_name(APP_ID, name)
+            rep_raw = base64.b64decode(box_resp["value"])
+        except Exception:
+            pass
+        out["supplier_reputation"] = {
+            "prefix": "rp_",
+            "box_name_hex": ("rp_" + str(sup)).encode("utf-8").hex()[:64],
+            "lora_box_url": lora_app_url(),
+            "present": rep_raw is not None,
+            "raw_hex": rep_raw.hex() if rep_raw else None,
+            "decoded": int.from_bytes(rep_raw[-8:], "big") if rep_raw and len(rep_raw) >= 8 else None,
+        }
+    return out
+
+
+def fetch_shipment_timeline(shipment_id: str, limit: int = 40) -> list[dict[str, Any]]:
+    """Indexer timeline: app txs whose JSON note references shipment_id."""
+    _sync_env_globals()
+    sid = (shipment_id or "").strip()
+    if not APP_ID or not sid:
+        return []
+    events: list[dict[str, Any]] = []
+    try:
+        url = f"{INDEXER_URL.rstrip('/')}/v2/transactions"
+        params = {"application-id": APP_ID, "limit": min(max(limit, 1), 100)}
+        r = requests.get(url, params=params, timeout=15)
+        if r.status_code != 200:
+            return []
+        for tx in r.json().get("transactions", []):
+            note_b64 = tx.get("note")
+            if not note_b64:
+                continue
+            try:
+                note = json.loads(base64.b64decode(note_b64).decode("utf-8"))
+            except Exception:
+                continue
+            if not isinstance(note, dict):
+                continue
+            ref = str(note.get("shipment_id") or note.get("sid") or "").strip()
+            if ref != sid:
+                continue
+            tx_id = tx.get("id") or ""
+            events.append(
+                {
+                    "tx_id": tx_id,
+                    "lora_tx_url": lora_tx_url(tx_id),
+                    "round": tx.get("round"),
+                    "type": note.get("type") or note.get("legacy_type"),
+                    "standard": note.get("standard"),
+                    "note": note,
+                }
+            )
+        events.sort(key=lambda e: int(e.get("round") or 0))
+    except Exception as e:
+        logger.warning("fetch_shipment_timeline: %s", e)
+    return events[-limit:]

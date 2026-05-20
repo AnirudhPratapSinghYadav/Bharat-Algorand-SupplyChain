@@ -24,8 +24,9 @@ INDEXER_URL = chain.INDEXER_URL.rstrip("/")
 ALGOD_URL = chain.ALGOD_URL.rstrip("/")
 LORA_TX = chain.LORA_TESTNET_TX
 LORA_APP = chain.LORA_TESTNET_APP
-LORA_ACCT = "https://lora.algokit.io/testnet/account"
-LORA_ASSET = "https://lora.algokit.io/testnet/asset"
+_lb = (chain.LORA_BASE_URL or "").rstrip("/")
+LORA_ACCT = f"{_lb}/account" if _lb else ""
+LORA_ASSET = f"{_lb}/asset" if _lb else ""
 
 # ARC-4 selector (first 4 bytes of SHA-512/256 of UTF-8 method signature) → signature string
 _ARC4_SELECTOR_TO_SIG: Dict[str, str] = {}

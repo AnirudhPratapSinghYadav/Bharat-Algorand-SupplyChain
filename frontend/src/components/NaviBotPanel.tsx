@@ -2,9 +2,12 @@
  * NaviBot — text chat; POST /navibot. Instant role-aware greeting; last 10 messages.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Bot, MessageSquare, X, Play, ExternalLink } from 'lucide-react';
+import { useNavigate, Link } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import axios from 'axios';
+import { Bot, MessageSquare, X, Play, ExternalLink, Mic } from 'lucide-react';
 import { askNavibot } from '../api';
+import { BACKEND_URL } from '../constants/api';
 import './navibot.css';
 
 type Role = 'stakeholder' | 'supplier';
@@ -31,11 +34,18 @@ function readWallet(): string | undefined {
   }
 }
 
-const GREETING_STAKEHOLDER =
-  '3 shipments tracked. 5 ALGO in escrow.\nSHIP_CHEN_002 is disputed — 3 ALGO frozen.\nClick Run AI Jury on SHIP_MUMBAI_001 to get a live verdict.';
-
-const GREETING_SUPPLIER =
-  'Your reputation is 55/100 on Algorand.\nSHIP_DELHI_003 settled — 2 ALGO received.\nSHIP_CHEN_002 payment is frozen.';
+function buildGreeting(
+  role: Role,
+  labels: Record<string, string>,
+  demoIds: string[],
+): string {
+  const samples = demoIds.slice(0, 3).map((id) => labels[id] || id);
+  const corridor = samples.length ? samples.join(' · ') : 'your registered corridors';
+  if (role === 'supplier') {
+    return `Your on-chain reputation drives settlement release.\nActive lanes: ${corridor}.\nAsk about escrow status or open Verify for a public proof link.`;
+  }
+  return `Live corridors: ${corridor}.\nOpen an in-transit shipment and tap Request Settlement Review for a recorded verdict with a Lora proof link.\nFor voice, open Oracle assistant (ElevenLabs).`;
+}
 
 const QUICK_PILLS = [
   'Why is Chennai frozen?',
@@ -63,7 +73,25 @@ export function NaviBotPanel({
   const linesRef = useRef(lines);
   linesRef.current = lines;
 
-  const intro = useMemo(() => (role === 'supplier' ? GREETING_SUPPLIER : GREETING_STAKEHOLDER), [role]);
+  const configQ = useQuery({
+    queryKey: ['navibot-config'],
+    queryFn: async () =>
+      (await axios.get(`${BACKEND_URL}/config`, { timeout: 8000 })).data as {
+        demo_shipments?: string[];
+        demo_labels?: Record<string, string>;
+      },
+    staleTime: 60_000,
+  });
+
+  const intro = useMemo(
+    () =>
+      buildGreeting(
+        role,
+        configQ.data?.demo_labels ?? {},
+        Array.isArray(configQ.data?.demo_shipments) ? configQ.data!.demo_shipments! : [],
+      ),
+    [role, configQ.data],
+  );
 
   useEffect(() => {
     const seed: ChatLine = { role: 'assistant', text: intro, at: Date.now() };
@@ -158,7 +186,12 @@ export function NaviBotPanel({
           <Bot size={20} className="navibot-panel__icon" />
           <div>
             <div className="navibot-panel__name">NaviBot</div>
-            <div className="navibot-panel__sub">Help &amp; shipment Q&amp;A</div>
+            <div className="navibot-panel__sub">
+              Text Q&amp;A ·{' '}
+              <Link to="/navibot" style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                <Mic size={12} style={{ verticalAlign: 'middle' }} /> Voice agent
+              </Link>
+            </div>
           </div>
         </div>
         <button

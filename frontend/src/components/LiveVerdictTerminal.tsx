@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import axios from 'axios';
 import { X, Cloud, ShieldCheck, ScanSearch, Gavel, CheckCircle2, Loader2 } from 'lucide-react';
-import { BACKEND_URL } from '../constants/api';
+import { BACKEND_URL, loraTransactionUrl } from '../constants/api';
+import { AGENT_DISPLAY, verdictUserLabel } from '../lib/displayLabels';
 
 const CYAN = '#00C2FF';
 const AMBER = '#F59E0B';
@@ -120,10 +121,10 @@ function riskBand(rs: number): string {
 }
 
 const PIPELINE: { key: 's' | 'a' | 'f' | 'r'; label: string; short: string; Icon: typeof Cloud; color: string }[] = [
-    { key: 's', label: 'Weather Sentinel', short: 'Sentinel', Icon: Cloud, color: CYAN },
-    { key: 'a', label: 'Compliance Auditor', short: 'Audit', Icon: ShieldCheck, color: AMBER },
-    { key: 'f', label: 'Fraud Detector', short: 'Fraud', Icon: ScanSearch, color: '#a78bfa' },
-    { key: 'r', label: 'Chief Arbiter', short: 'Arbiter', Icon: Gavel, color: '#e2e8f0' },
+    { key: 's', label: AGENT_DISPLAY.sentinel.label, short: 'Weather', Icon: Cloud, color: CYAN },
+    { key: 'a', label: AGENT_DISPLAY.auditor.label, short: 'Contract', Icon: ShieldCheck, color: AMBER },
+    { key: 'f', label: AGENT_DISPLAY.fraud.label, short: 'Fraud', Icon: ScanSearch, color: '#a78bfa' },
+    { key: 'r', label: AGENT_DISPLAY.arbiter.label, short: 'Verdict', Icon: Gavel, color: '#e2e8f0' },
 ];
 
 function ScoreBar({ value, max = 100, color }: { value: number; max?: number; color: string }) {
@@ -131,7 +132,7 @@ function ScoreBar({ value, max = 100, color }: { value: number; max?: number; co
     return (
         <div style={{ marginTop: 10 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#94a3b8', marginBottom: 4 }}>
-                <span>Risk score (0–{max})</span>
+                <span>Settlement Confidence (0–{max})</span>
                 <span style={{ fontFamily: 'ui-monospace, monospace', color: '#e2e8f0', fontWeight: 700 }}>{Math.round(value)}</span>
             </div>
             <div style={{ height: 9, borderRadius: 5, background: 'rgba(15,23,42,0.9)', overflow: 'hidden', border: '1px solid rgba(148,163,184,0.15)' }}>
@@ -626,7 +627,7 @@ export function LiveVerdictTerminal({
             { text: '[⚖ CHIEF ARBITER] Delivering final verdict...', color: '#e2e8f0' },
             { text: `Weighted score: ${weighted}/100`, color: '#e2e8f0' },
             { text: '— — — — — — — — — — — — — — —', color: '#475569' },
-            { text: `VERDICT: ${v}   RISK: ${finalScore}/100   ${band}`, color: vk },
+            { text: `Outcome: ${verdictUserLabel(v)}   Settlement Confidence: ${finalScore}/100   ${band}`, color: vk },
         ];
         if (quote) {
             lines.push({ text: `"${quote}${quote.length >= 400 ? '…' : ''}"`, color: vk });
@@ -652,7 +653,7 @@ export function LiveVerdictTerminal({
     const txId = apiData?.on_chain_tx_id ?? '';
     const roundN = apiData?.confirmed_round;
     const loraVerdictUrl =
-        apiData?.lora_tx_url || apiData?.explorer_url || (txId ? `https://lora.algokit.io/testnet/transaction/${txId}` : '');
+        apiData?.lora_tx_url || apiData?.explorer_url || (txId ? loraTransactionUrl(txId) : '');
 
     const waitingHttp = bootDone && !apiData && !apiError;
     let pipelineActive = -1;
@@ -743,7 +744,7 @@ export function LiveVerdictTerminal({
                 {apiData && secSentry && (
                     <AgentPerformanceCard
                         step={1}
-                        title="Weather Sentinel"
+                        title={AGENT_DISPLAY.sentinel.label}
                         accent={CYAN}
                         {...buildSentinelPerf(apiData, destinationCity)}
                     />
@@ -764,7 +765,7 @@ export function LiveVerdictTerminal({
                 {apiData && secAuditor && (
                     <AgentPerformanceCard
                         step={2}
-                        title="Compliance Auditor"
+                        title={AGENT_DISPLAY.auditor.label}
                         accent={AMBER}
                         {...buildAuditorPerf(apiData, fundsAlgo)}
                     />
@@ -785,7 +786,7 @@ export function LiveVerdictTerminal({
                 {apiData && secFraud && (
                     <AgentPerformanceCard
                         step={3}
-                        title="Fraud Detector"
+                        title={AGENT_DISPLAY.fraud.label}
                         accent="#a78bfa"
                         {...buildFraudPerf(apiData)}
                     />
@@ -806,7 +807,7 @@ export function LiveVerdictTerminal({
                 {apiData && secArbiter && arbiterPerf ? (
                     <AgentPerformanceCard
                         step={4}
-                        title="Chief Arbiter"
+                        title={AGENT_DISPLAY.arbiter.label}
                         accent={arbAccent}
                         badge="Verdict sealed"
                         score={arbiterPerf.score}
@@ -947,6 +948,28 @@ export function LiveVerdictTerminal({
                                     View Dispute Details
                                 </button>
                             ) : null}
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    try {
+                                        void navigator.clipboard.writeText(JSON.stringify(apiData, null, 2));
+                                    } catch {
+                                        /* ignore */
+                                    }
+                                }}
+                                style={{
+                                    padding: '10px 14px',
+                                    borderRadius: 8,
+                                    border: '1px solid rgba(148,163,184,0.35)',
+                                    background: 'transparent',
+                                    color: CYAN,
+                                    fontWeight: 600,
+                                    cursor: 'pointer',
+                                    fontSize: '0.82rem',
+                                }}
+                            >
+                                Copy Full Report
+                            </button>
                             <button
                                 type="button"
                                 onClick={onClose}
