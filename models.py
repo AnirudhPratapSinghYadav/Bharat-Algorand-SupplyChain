@@ -93,6 +93,7 @@ class RegisterShipmentBody(BaseModel):
     shipment_id: str
     supplier_address: str
     route: str = ""
+    commodity: str = ""
     origin: str
     destination: str
     origin_lat: float

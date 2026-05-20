@@ -68,16 +68,62 @@ export function formatEscrowTriple(
   inr?: number | null,
   usd?: number | null,
 ): string {
-  const a = `${algo.toFixed(2)} ALGO`;
+  return formatEscrowUserFacing(algo, inr, usd);
+}
+
+/** Primary ₹ for exporters; ALGO labeled as crypto escrow. */
+export function formatEscrowUserFacing(
+  algo: number,
+  inr?: number | null,
+  usd?: number | null,
+): string {
   const i =
     typeof inr === 'number' && Number.isFinite(inr)
       ? `₹${inr.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
       : '≈ ₹–';
+  const a = `${algo.toFixed(2)} ALGO (crypto)`;
   const u =
     typeof usd === 'number' && Number.isFinite(usd)
       ? `$${usd.toFixed(2)}`
       : '≈ $–';
-  return `${a} / ${i} / ${u}`;
+  return `${i} · ${a} · ${u}`;
+}
+
+export function shipmentDisplayTitle(ship: {
+  display_label?: string | null;
+  origin?: string;
+  destination?: string;
+  commodity?: string | null;
+  created_at?: string | null;
+}): string {
+  if (ship.display_label?.trim()) return ship.display_label.trim();
+  const o = (ship.origin || '').split(',')[0].trim() || 'Origin';
+  const d = (ship.destination || '').split(',')[0].trim() || 'Destination';
+  const c = (ship.commodity || '').trim() || 'Goods';
+  let datePart = '';
+  if (ship.created_at) {
+    try {
+      const dt = new Date(ship.created_at);
+      if (!Number.isNaN(dt.getTime())) {
+        datePart = ` | ${dt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return `${o} → ${d} | ${c}${datePart}`;
+}
+
+export const VERDICT_UI: Record<string, { label: string; color: string }> = {
+  SETTLE: { label: '✅ Payment Released', color: '#22c55e' },
+  HOLD: { label: '⏳ Under Review', color: '#eab308' },
+  DISPUTE: { label: '⚠️ Escalate to Dispute', color: '#f97316' },
+  DISPUTED: { label: '⚠️ Escalate to Dispute', color: '#f97316' },
+};
+
+export function verdictUi(verdict: string | null | undefined) {
+  const v = (verdict || '').toUpperCase().trim();
+  return VERDICT_UI[v] || VERDICT_UI.HOLD;
 }
 
 export type JuryButtonState =

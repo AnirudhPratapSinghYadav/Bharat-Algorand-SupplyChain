@@ -927,7 +927,7 @@ export function LiveVerdictTerminal({
                                         fontSize: '0.82rem',
                                     }}
                                 >
-                                    💰 Settle Shipment
+                                    💰 Release Payment
                                 </button>
                             ) : null}
                             {vk === 'DISPUTE' && onViewDispute ? (

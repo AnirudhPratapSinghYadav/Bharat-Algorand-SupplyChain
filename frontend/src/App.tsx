@@ -12,14 +12,16 @@ import {
 
 import { BACKEND_URL, FALLBACK_APP_ID, API_TIMEOUT, LORA_APP, loraAssetUrl, loraTransactionUrl } from './constants/api';
 import {
-    shipmentCardTitle,
+    shipmentDisplayTitle,
     stageBadgeColors,
     stageUserLabel,
-    formatEscrowTriple,
     juryButtonState,
     AGENT_DISPLAY,
     shortAddress,
+    verdictUserLabel,
 } from './lib/displayLabels';
+import { EscrowDisplay } from './components/EscrowDisplay';
+import { AddressCopy } from './components/AddressCopy';
 import { RegisterShipmentModal, type RegisterFormState } from './components/RegisterShipmentModal';
 import { CertificateQr } from './components/CertificateQr';
 import VerifyPage from './pages/VerifyPage';
@@ -117,6 +119,9 @@ function isErrorToastMessage(message: string): boolean {
 
 interface Shipment {
     shipment_id: string;
+    display_label?: string | null;
+    route?: string | null;
+    commodity?: string | null;
     origin: string;
     destination: string;
     lat: number;
@@ -585,7 +590,10 @@ function MainApp() {
                     origin: form.origin,
                     destination: form.destination,
                     route,
+                    commodity: form.commodity,
                     supplier_address: form.supplier.trim(),
+                    origin_lat: 0,
+                    origin_lon: 0,
                 },
                 {
                     headers: { 'Content-Type': 'application/json' },
@@ -896,7 +904,7 @@ function MainApp() {
     <table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f8fafc;"><th style="padding:12px 14px;text-align:left;font-size:0.7rem;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;width:100px;">Severity</th><th style="padding:12px 14px;text-align:left;font-size:0.7rem;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">Event</th></tr></thead><tbody>${eventRows}</tbody></table>
   </div>
   <div style="margin-top:32px;padding:16px 24px;background:#f1f5f9;border-radius:8px;font-size:0.8rem;color:#64748b;text-align:center;">
-    Pramanik · Algorand Testnet · APP_ID ${appId || 'N/A'} · ${new Date().toISOString()}
+    Pramanik · Settlement audit · ${new Date().toISOString()}
   </div>
 </div>
 </body></html>`;
@@ -991,7 +999,7 @@ function MainApp() {
                         className="primary-btn"
                         style={{ padding: '8px 14px', fontSize: '0.78rem', whiteSpace: 'nowrap' }}
                         onClick={() => setRegisterModal(true)}
-                        title="Calls the API — the oracle account signs register_shipment on TestNet"
+                        title="Calls the API — the oracle account signs registration on your behalf"
                     >
                         Register shipment
                     </button>
@@ -1010,7 +1018,7 @@ function MainApp() {
                             </div>
                             <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#34d399', flexShrink: 0 }} />
                             <span className="dash-wallet-addr">
-                                {accountAddress.substring(0, 4)}...{accountAddress.substring(accountAddress.length - 5)}
+                                <AddressCopy address={accountAddress} />
                             </span>
                         </button>
                         <button type="button" onClick={disconnectWallet} className="dash-disconnect">
@@ -1043,7 +1051,7 @@ function MainApp() {
                     <strong>Backend offline.</strong> Deploy FastAPI (<code style={{ fontSize: '0.78rem' }}>app.py</code>) and set{' '}
                     <code style={{ fontSize: '0.78rem' }}>VITE_API_URL</code> in Vercel → Environment Variables to your API root (e.g.{' '}
                     <code style={{ fontSize: '0.78rem' }}>https://your-service.onrender.com</code>). Add that origin to API CORS. The bundled
-                    default demo URL may be sleeping or removed — Algod/TestNet is separate; green “Testnet” only means public nodes are up.
+                    default API URL may be offline — check VITE_API_URL and that the backend is running.
                 </div>
             ) : null}
             <NewsTicker />
@@ -1777,7 +1785,7 @@ function MainApp() {
                                 <span style={{ color: '#64748b' }}>After you deposit, a confirmation banner appears with a Lora link.</span>
                             </div>
                             <p style={{ fontSize: '0.72rem', color: '#94a3b8', lineHeight: 1.45, margin: '0 0 8px' }}>
-                                <strong style={{ color: '#cbd5e1' }}>Why Pera?</strong> Escrow moves <em>your</em> TestNet ALGO into the contract — only your wallet can authorize that (Algokit + Pera; not VibeKit).{' '}
+                                <strong style={{ color: '#cbd5e1' }}>Why Pera?</strong> Escrow moves <em>your</em> funds into the contract — only your wallet can authorize deposits (Pera wallet).
                                 <strong style={{ color: '#cbd5e1' }}>Register shipment</strong> is server-signed with the oracle key — no wallet popup.
                             </p>
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
@@ -1911,7 +1919,7 @@ function MainApp() {
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                         <Package size={15} color="#2563eb" />
                                         <span style={{ fontSize: '0.95rem', fontWeight: 700, color: '#f1f5f9' }}>
-                                            {shipmentCardTitle(ship.origin, ship.destination, ship.created_at)}
+                                            {shipmentDisplayTitle(ship)}
                                         </span>
                                     </div>
                                     <div style={{ fontSize: '0.72rem', fontFamily: 'ui-monospace, monospace', color: '#64748b', marginTop: 4 }}>
@@ -2086,7 +2094,7 @@ function MainApp() {
                                         <>
                                             <div style={{ fontWeight: 800, fontSize: '0.85rem', color: '#15803d', marginBottom: 6 }}>✓ PAYMENT RECEIVED</div>
                                             <div style={{ fontSize: '0.8rem', color: '#334155', marginBottom: 8 }}>
-                                                {(supplierPaidAlgo ?? 2).toFixed(4)} ALGO released to your account (demo settlement)
+                                                Payment released to your account from escrow
                                             </div>
                                             <div style={{ fontSize: '0.78rem', color: '#64748b', marginBottom: 10 }}>
                                                 Your reputation score is tracked on-chain (see card above).
@@ -2227,9 +2235,12 @@ function MainApp() {
                             {role === 'stakeholder' && fundsMicro > 0 && (
                                 <div style={{ marginBottom: 10, fontSize: '0.8rem', color: '#94a3b8' }}>
                                     Escrow locked:{' '}
-                                    <span style={{ fontWeight: 600, color: '#e2e8f0' }}>
-                                        {formatEscrowTriple(fundsMicro / 1e6, ship.funds_inr, ship.funds_usd)}
-                                    </span>
+                                    <EscrowDisplay
+                                        algo={fundsMicro / 1e6}
+                                        inr={ship.funds_inr}
+                                        usd={ship.funds_usd}
+                                        style={{ fontWeight: 600, color: '#e2e8f0' }}
+                                    />
                                 </div>
                             )}
 
@@ -2297,7 +2308,7 @@ function MainApp() {
                                 >
                                     <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 10 }}>
                                         <span style={{ fontWeight: 700, color: '#0f172a' }}>
-                                            Risk score: {risk ?? '—'} / 100
+                                            Settlement Confidence: {risk ?? '—'} / 100
                                         </span>
                                         {risk != null && (
                                             <span
@@ -2474,7 +2485,7 @@ function MainApp() {
                                                 }}
                                                 onClick={() => void handleSettleShipment(ship.shipment_id)}
                                             >
-                                                <CheckCircle size={13} /> Settle shipment
+                                                <CheckCircle size={13} /> Release Payment
                                             </button>
                                         ) : null}
                                         {healthSnapshot?.oracle_address &&
@@ -2503,7 +2514,7 @@ function MainApp() {
                                                 title="Oracle only — void on-chain (refund + rep penalty)"
                                                 onClick={() => void handleVoidShipment(ship.shipment_id)}
                                             >
-                                                {voidBusy === ship.shipment_id ? 'Voiding…' : 'Void shipment'}
+                                                {voidBusy === ship.shipment_id ? 'Cancelling…' : 'Cancel Shipment (Fraud)'}
                                             </button>
                                         ) : null}
                                         {ship.stage !== 'Not_Registered' &&
@@ -2594,7 +2605,7 @@ function MainApp() {
                         </div>
                         <div style={{ padding: 16, borderRadius: 10, border: '1px solid #e5e7eb', background: '#fafafa', marginBottom: 16 }}>
                             <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                                <span style={{ fontWeight: 700, color: '#0f172a' }}>Risk score: {rscore ?? '—'} / 100</span>
+                                <span style={{ fontWeight: 700, color: '#0f172a' }}>Settlement Confidence: {rscore ?? '—'} / 100</span>
                                 {rband ? (
                                     <span style={{ fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.05em', color: '#b45309' }}>{rband}</span>
                                 ) : null}

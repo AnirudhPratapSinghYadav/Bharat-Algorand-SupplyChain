@@ -414,6 +414,8 @@ def init_db():
             "ALTER TABLE shipments ADD COLUMN dest_lon REAL",
             "ALTER TABLE shipments ADD COLUMN supplier_address TEXT",
             "ALTER TABLE shipments ADD COLUMN created_at TEXT",
+            "ALTER TABLE shipments ADD COLUMN route TEXT",
+            "ALTER TABLE shipments ADD COLUMN commodity TEXT",
         ):
             try:
                 conn.execute(ddl)
@@ -779,7 +781,8 @@ def _hours_since_last_jury(shipment_id: str) -> Optional[float]:
 async def _run_auto_jury_cycle() -> None:
     """Single APScheduler tick: jury In_Transit shipments (AUTO_JURY_ENABLED=1). AUTO_SETTLE=0 by default."""
     from services.cron_log import append_cron_entry
-    from services.telegram_service import fire_async, format_escrow_line, format_route_label, notify_auto_jury_summary, notify_verdict
+    from services.shipment_labels import resolve_shipment_label, verdict_label_for_cron
+    from services.telegram_service import fire_async, format_escrow_line, notify_auto_jury_summary, notify_verdict
 
     if not pcfg.auto_jury_enabled() or not chain.APP_ID or not chain.ORACLE_MNEMONIC:
         return
@@ -787,7 +790,7 @@ async def _run_auto_jury_cycle() -> None:
     reviewed = settled_n = hold_n = 0
     try:
         with get_db() as conn:
-            rows = conn.execute("SELECT id, origin, destination FROM shipments").fetchall()
+            rows = conn.execute("SELECT id, origin, destination, route, commodity, created_at FROM shipments").fetchall()
         for row in rows:
             sid = str(row["id"])
             st = chain.read_shipment_status(sid)
@@ -812,32 +815,35 @@ async def _run_auto_jury_cycle() -> None:
                     settled_n += 1
                 else:
                     hold_n += 1
-                logger.info("[AUTO-JURY] %s → %s (confidence: %s)", sid, verdict, conf)
-                append_cron_entry(
-                    {
-                        "shipment_id": sid,
-                        "verdict": verdict,
-                        "auto_settled": auto_settled,
-                        "tx_id": tx_id,
-                        "confidence": conf,
-                    }
-                )
-                origin = str(row["origin"] or "")
+                shipment_label = resolve_shipment_label(sid, conn)
+                logger.info("[AUTO-JURY] %s → %s (confidence: %s)", shipment_label, verdict, conf)
                 full = chain.read_shipment_full(sid) if APP_ID else {}
                 micro = int(full.get("funds_microalgo") or 0)
                 px = get_algo_usd_price()
                 fu, fi = _escrow_fiat_from_micro(micro, px)
-                route = format_route_label(origin, str(row["destination"] or ""))
-                if verdict != "HOLD":
+                telegram_sent = verdict != "HOLD"
+                if telegram_sent:
                     fire_async(
                         notify_verdict(
-                            route_label=route,
+                            route_label=shipment_label,
                             verdict=verdict,
                             confidence_pct=float(conf) if conf is not None else None,
                             escrow_line=format_escrow_line(micro / 1e6, fi, fu),
                             lora_tx_url=chain.lora_tx_url(str(tx_id)) if tx_id else "",
                         )
                     )
+                append_cron_entry(
+                    {
+                        "shipment_id": sid,
+                        "shipment_label": shipment_label,
+                        "verdict": verdict,
+                        "verdict_label": verdict_label_for_cron(verdict),
+                        "auto_settled": auto_settled,
+                        "tx_id": tx_id,
+                        "confidence": conf,
+                        "telegram_sent": telegram_sent,
+                    }
+                )
             except HTTPException as he:
                 logger.warning("Auto-jury skipped %s: %s", sid, he.detail)
             except Exception as e:
@@ -2483,6 +2489,14 @@ def _shipment_row_for_ui(sid: str, chain_status: str, db_row, price: Optional[di
     dest_lat = float(dest_lat_v) if dest_lat_v is not None else None
     dest_lon = float(dest_lon_v) if dest_lon_v is not None else None
     sup_addr = _read_supplier_address(sid)
+    db_route = str(_db_cell(db_row, "route") or route or "")
+    db_commodity = str(_db_cell(db_row, "commodity") or "")
+    db_created = str(_db_cell(db_row, "created_at") or "") or None
+    from services.shipment_labels import build_display_label
+
+    display_label = build_display_label(
+        sid, origin, dest, commodity=db_commodity, route=db_route, created_at=db_created
+    )
     rep_score = None
     rep_src = None
     if sup_addr and APP_ID and chain.use_navitrust():
@@ -2495,6 +2509,10 @@ def _shipment_row_for_ui(sid: str, chain_status: str, db_row, price: Optional[di
             rep_src = "default"
     return {
         "shipment_id": sid,
+        "display_label": display_label,
+        "route": db_route or (f"{origin} → {dest}" if origin or dest else ""),
+        "commodity": db_commodity,
+        "created_at": db_created,
         "origin": origin or "—",
         "destination": dest or "—",
         "lat": lat,
@@ -2781,9 +2799,10 @@ async def run_jury(body: RunJuryRequest):
     JURY_CACHE[shipment_id] = payload
 
     try:
-        from services.telegram_service import fire_async, format_escrow_line, format_route_label, notify_verdict
+        from services.shipment_labels import resolve_shipment_label
+        from services.telegram_service import fire_async, format_escrow_line, notify_verdict
 
-        route = format_route_label(origin, destination)
+        route = resolve_shipment_label(shipment_id)
         fire_async(
             notify_verdict(
                 route_label=route,
@@ -3072,6 +3091,7 @@ def _register_shipment_core(
     supplier_reputation: int = 50,
     *,
     route: str | None = None,
+    commodity: str = "",
     origin_lat: float = 0.0,
     origin_lon: float = 0.0,
     dest_lat: float | None = None,
@@ -3169,20 +3189,51 @@ def _register_shipment_core(
     with get_db() as conn:
         row_existed = conn.execute("SELECT 1 FROM shipments WHERE id = ?", (shipment_id,)).fetchone() is not None
         if row_existed:
+            on_chain_route = (route or "").strip() or f"{origin} → {destination}"
+            comm = (commodity or "").strip()
+            if comm and "|" not in on_chain_route:
+                on_chain_route = f"{on_chain_route} | {comm}"
             conn.execute(
                 """
                 UPDATE shipments SET origin = ?, destination = ?, current_lat = ?, current_lon = ?,
-                dest_lat = ?, dest_lon = ?, supplier_address = ? WHERE id = ?
+                dest_lat = ?, dest_lon = ?, supplier_address = ?, route = ?, commodity = ? WHERE id = ?
                 """,
-                (origin, destination, origin_lat, origin_lon, dest_lat, dest_lon, supplier, shipment_id),
+                (
+                    origin,
+                    destination,
+                    origin_lat,
+                    origin_lon,
+                    dest_lat,
+                    dest_lon,
+                    supplier,
+                    on_chain_route,
+                    comm,
+                    shipment_id,
+                ),
             )
         else:
+            on_chain_route = (route or "").strip() or f"{origin} → {destination}"
+            comm = (commodity or "").strip()
+            if comm and "|" not in on_chain_route:
+                on_chain_route = f"{on_chain_route} | {comm}"
             conn.execute(
                 """
-                INSERT INTO shipments (id, origin, destination, current_lat, current_lon, dest_lat, dest_lon, supplier_address, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                INSERT INTO shipments (id, origin, destination, current_lat, current_lon, dest_lat, dest_lon,
+                    supplier_address, created_at, route, commodity)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)
                 """,
-                (shipment_id, origin, destination, origin_lat, origin_lon, dest_lat, dest_lon, supplier),
+                (
+                    shipment_id,
+                    origin,
+                    destination,
+                    origin_lat,
+                    origin_lon,
+                    dest_lat,
+                    dest_lon,
+                    supplier,
+                    on_chain_route,
+                    comm,
+                ),
             )
         conn.commit()
 
@@ -3250,7 +3301,8 @@ def register_shipment(body: RegisterShipmentBody):
     dst = (body.destination or "").strip()
     if not org or not dst:
         raise HTTPException(status_code=422, detail="origin and destination are required.")
-    route = (body.route or "").strip() or f"{org} → {dst}"
+    comm = (body.commodity or "").strip()
+    route = (body.route or "").strip() or (f"{org} → {dst}" + (f" | {comm}" if comm else ""))
     out = _register_shipment_core(
         body.shipment_id,
         org,
@@ -3261,6 +3313,7 @@ def register_shipment(body: RegisterShipmentBody):
         7,
         50,
         route=route,
+        commodity=comm,
         origin_lat=body.origin_lat,
         origin_lon=body.origin_lon,
         dest_lat=body.dest_lat,
@@ -3271,11 +3324,12 @@ def register_shipment(body: RegisterShipmentBody):
     _SHIPMENTS_CACHE["payload"] = None
     _STATS_CACHE["payload"] = None
     try:
-        from services.telegram_service import fire_async, format_route_label, notify_registered
+        from services.shipment_labels import build_display_label
+        from services.telegram_service import fire_async, notify_registered
 
         fire_async(
             notify_registered(
-                route_label=format_route_label(org, dst),
+                route_label=build_display_label(body.shipment_id, org, dst, commodity=comm, route=route),
                 escrow_algo=0.0,
                 inr=None,
             )
@@ -3672,17 +3726,16 @@ def settle_shipment_api(body: SettleBody):
         **r,
     }
     try:
-        from services.telegram_service import fire_async, format_route_label, notify_settlement
+        from services.shipment_labels import resolve_shipment_label
+        from services.telegram_service import fire_async, notify_settlement
 
         with get_db() as conn:
-            row = conn.execute("SELECT origin, destination FROM shipments WHERE id = ?", (body.shipment_id,)).fetchone()
-        origin = str(row["origin"]) if row else ""
-        dest = str(row["destination"]) if row else ""
+            label = resolve_shipment_label(body.shipment_id, conn)
         px = get_algo_usd_price()
         _, inr = _escrow_fiat_from_micro(funds_micro, px)
         fire_async(
             notify_settlement(
-                route_label=format_route_label(origin, dest),
+                route_label=label,
                 supplier_paid_algo=funds_micro / 1_000_000.0,
                 inr=inr,
                 cert_asa_id=cert or None,

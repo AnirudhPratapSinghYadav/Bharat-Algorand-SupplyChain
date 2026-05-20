@@ -7,11 +7,11 @@ type ConvaiConfig = {
   agent_id?: string | null;
   signed_url?: string | null;
   enabled?: boolean;
+  tts_configured?: boolean;
 };
 
 type Props = {
-  /** Override agent id (else from API / Vite env). */
-  agentId?: string | null;
+  shipmentContextLabel?: string | null;
   shipmentId?: string | null;
   walletAddress?: string | null;
   className?: string;
@@ -55,7 +55,7 @@ function loadConvaiScript(): Promise<void> {
 }
 
 export function ElevenLabsConvaiWidget({
-  agentId: agentIdProp,
+  shipmentContextLabel,
   shipmentId,
   walletAddress,
   className,
@@ -65,19 +65,26 @@ export function ElevenLabsConvaiWidget({
   const [cfg, setCfg] = useState<ConvaiConfig | null>(null);
   const [scriptReady, setScriptReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const envAgent = (import.meta.env.VITE_ELEVENLABS_AGENT_ID as string | undefined)?.trim() || '';
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    setLoading(true);
     axios
-      .get(`${BACKEND_URL}/elevenlabs/config`, { timeout: 8000 })
-      .then((r) => setCfg(r.data as ConvaiConfig))
-      .catch(() => setCfg({ enabled: !!envAgent, agent_id: envAgent || null }));
-  }, [envAgent]);
+      .get(`${BACKEND_URL}/elevenlabs/config`, { timeout: 12000 })
+      .then((r) => {
+        setCfg(r.data as ConvaiConfig);
+        setError(null);
+      })
+      .catch((e) => {
+        setCfg({ enabled: false });
+        setError(e instanceof Error ? e.message : 'Could not load voice agent config');
+      })
+      .finally(() => setLoading(false));
+  }, []);
 
-  const resolvedAgentId = (agentIdProp || cfg?.agent_id || envAgent || '').trim();
+  const resolvedAgentId = (cfg?.agent_id || '').trim();
   const signedUrl = (cfg?.signed_url || '').trim();
-  const enabled = cfg?.enabled !== false && !!(resolvedAgentId || signedUrl);
+  const enabled = cfg?.enabled === true && !!(resolvedAgentId || signedUrl);
 
   useEffect(() => {
     if (!enabled) return;
@@ -95,23 +102,30 @@ export function ElevenLabsConvaiWidget({
     } else if (resolvedAgentId) {
       el.setAttribute('agent-id', resolvedAgentId);
     }
-    const vars: Record<string, string> = {};
-    if (shipmentId) vars.shipment_id = shipmentId;
+    const vars: Record<string, string> = { product: 'Pramanik Oracle' };
+    if (shipmentContextLabel) vars.shipment = shipmentContextLabel;
+    else if (shipmentId) vars.shipment_id = shipmentId;
     if (walletAddress) vars.wallet_address = walletAddress.slice(0, 12);
-    vars.product = 'Pramanik Oracle';
-    if (Object.keys(vars).length > 0) {
-      el.setAttribute('dynamic-variables', JSON.stringify(vars));
-    }
+    el.setAttribute('dynamic-variables', JSON.stringify(vars));
     hostRef.current.appendChild(el);
-  }, [scriptReady, enabled, resolvedAgentId, signedUrl, shipmentId, walletAddress]);
+  }, [scriptReady, enabled, resolvedAgentId, signedUrl, shipmentContextLabel, shipmentId, walletAddress]);
+
+  if (loading) {
+    return (
+      <div className={`el-convai ${className || ''}`}>
+        <p className="el-convai__loading">Loading voice agent from API…</p>
+      </div>
+    );
+  }
 
   if (!enabled) {
     return (
       <div className={`el-convai el-convai--disabled ${className || ''}`}>
         <p className="el-convai__hint">
-          Voice agent not configured. Set <code>ELEVENLABS_AGENT_ID</code> or <code>VITE_ELEVENLABS_AGENT_ID</code> in
-          .env.
+          Voice agent not configured on the server. Set <code>ELEVENLABS_AGENT_ID</code> and{' '}
+          <code>ELEVENLABS_API_KEY</code> in the API <code>.env</code>, then restart the backend.
         </p>
+        {error ? <p className="el-convai__error">{error}</p> : null}
       </div>
     );
   }
@@ -120,16 +134,19 @@ export function ElevenLabsConvaiWidget({
     <div className={`el-convai ${className || ''}`}>
       <div className="el-convai__head">
         <span className="el-convai__title">{title}</span>
-        <span className="el-convai__badge">ElevenLabs</span>
+        <span className="el-convai__badge">ElevenLabs · Live</span>
       </div>
-      {shipmentId ? (
+      {shipmentContextLabel ? (
         <p className="el-convai__ctx">
-          Context: shipment <code>{shipmentId}</code>
+          Shipment context: <strong>{shipmentContextLabel}</strong>
         </p>
       ) : null}
+      <p className="el-convai__mic-hint">
+        Tap the microphone in the widget below and ask about escrow, settlement review, or proof links.
+      </p>
       {error ? <p className="el-convai__error">{error}</p> : null}
       <div ref={hostRef} className="el-convai__host" aria-label="ElevenLabs voice assistant" />
-      {!scriptReady && !error ? <p className="el-convai__loading">Loading voice assistant…</p> : null}
+      {!scriptReady && !error ? <p className="el-convai__loading">Starting voice session…</p> : null}
     </div>
   );
 }

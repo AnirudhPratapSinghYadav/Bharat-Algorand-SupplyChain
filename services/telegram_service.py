@@ -108,13 +108,14 @@ def format_route_label(origin: str, destination: str, commodity: str = "") -> st
 
 
 def format_escrow_line(algo: Optional[float], inr: Optional[float], usd: Optional[float]) -> str:
+    """INR-first for MSME Telegram copy; ALGO as secondary."""
     parts = []
-    if algo is not None:
-        parts.append(f"{algo:.2f} locked")
     if inr is not None:
         parts.append(f"≈ ₹{inr:,.0f}")
-    elif inr is None and algo is not None:
+    elif algo is not None:
         parts.append("≈ ₹–")
+    if algo is not None:
+        parts.append(f"{algo:.2f} digital escrow (ALGO)")
     if usd is not None:
         parts.append(f"≈ ${usd:.2f}")
     return " · ".join(parts) if parts else "Escrow pending"

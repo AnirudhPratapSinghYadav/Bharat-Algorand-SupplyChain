@@ -36,11 +36,15 @@ export default function VerdictCard({ result }: VerdictCardProps) {
         <div>
           <p className="text-[#9AA5B4] mb-1">VERDICT</p>
           <p className={`text-2xl font-bold ${getVerdictColor().split(' ')[0]}`}>
-            {result.verdict}
+            {result.verdict === 'SETTLE'
+              ? '✅ Payment Released'
+              : result.verdict === 'DISPUTE'
+                ? '⚠️ Escalate to Dispute'
+                : '⏳ Under Review'}
           </p>
         </div>
         <div className="text-right">
-          <p className="text-[#9AA5B4] mb-1">CONFIDENCE</p>
+          <p className="text-[#9AA5B4] mb-1">SETTLEMENT CONFIDENCE</p>
           <p className="text-[#F5F5F2]">{result.confidence}%</p>
           <p className={getVerdictColor().split(' ')[0]}>{barString}</p>
         </div>

@@ -47,6 +47,13 @@
   min-height: 420px;
 }
 
+.el-convai__mic-hint {
+  font-size: 0.78rem;
+  color: var(--muted, #94a3b8);
+  margin: 0 0 12px;
+  line-height: 1.45;
+}
+
 .el-convai__loading,
 .el-convai__hint,
 .el-convai__error {

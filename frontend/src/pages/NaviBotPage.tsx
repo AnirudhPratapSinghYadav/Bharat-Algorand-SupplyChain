@@ -1,16 +1,34 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import axios from 'axios';
 import { Bot, Mic, MessageSquare } from 'lucide-react';
 import { NaviBotPanel } from '../components/NaviBotPanel';
 import { ElevenLabsConvaiWidget } from '../components/ElevenLabsConvaiWidget';
 import { useRole } from '../context/RoleContext';
 import { useWallet } from '../context/WalletContext';
+import { BACKEND_URL } from '../constants/api';
 
 export default function NaviBotPage() {
   const { role } = useRole();
   const { address } = useWallet();
   const [tab, setTab] = useState<'text' | 'voice'>('voice');
   const [contextShipment, setContextShipment] = useState('');
+
+  const configQ = useQuery({
+    queryKey: ['navibot-page-config'],
+    queryFn: async () =>
+      (await axios.get(`${BACKEND_URL}/config`, { timeout: 8000 })).data as {
+        demo_labels?: Record<string, string>;
+      },
+    staleTime: 60_000,
+  });
+
+  const contextLabel = useMemo(() => {
+    const id = contextShipment.trim();
+    if (!id) return null;
+    return configQ.data?.demo_labels?.[id] || null;
+  }, [contextShipment, configQ.data]);
 
   return (
     <div className="dashboard-container" style={{ minHeight: '100vh', padding: 24, paddingBottom: 48 }}>
@@ -92,6 +110,7 @@ export default function NaviBotPage() {
 
       {tab === 'voice' ? (
         <ElevenLabsConvaiWidget
+          shipmentContextLabel={contextLabel}
           shipmentId={contextShipment.trim() || null}
           walletAddress={address}
           className="el-convai--page"

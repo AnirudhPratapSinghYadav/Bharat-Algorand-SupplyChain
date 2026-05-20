@@ -82,7 +82,8 @@ def _demo_shipment_rows() -> list[dict]:
             "lon": 72.877426,
             "dlat": 51.924419,
             "dlon": 4.462456,
-            "route": "Mumbai→Suez→Rotterdam",
+            "route": "Mumbai → Rotterdam | Cotton Fabric",
+            "commodity": "Cotton Fabric",
             "fund_micro": 4_750_000,
             "verdict_json": VERDICT_MUMBAI,
             "risk": 91,
@@ -96,7 +97,8 @@ def _demo_shipment_rows() -> list[dict]:
             "lon": 80.270718,
             "dlat": 1.352083,
             "dlon": 103.819836,
-            "route": "Chennai→Malacca Strait→Singapore",
+            "route": "Chennai → Singapore | Spices",
+            "commodity": "Spices",
             "fund_micro": 2_000_000,
             "verdict_json": VERDICT_CHEN,
             "risk": 45,
@@ -110,7 +112,8 @@ def _demo_shipment_rows() -> list[dict]:
             "lon": 77.209023,
             "dlat": 25.204849,
             "dlon": 55.270783,
-            "route": "Delhi→Nhava Sheva→Dubai",
+            "route": "Delhi → Dubai | Handicrafts",
+            "commodity": "Handicrafts",
             "fund_micro": 3_000_000,
             "verdict_json": None,
             "risk": 0,
@@ -257,9 +260,9 @@ def _sqlite_upsert_demo_rows(oracle_addr: str) -> None:
             """
             INSERT INTO shipments (
                 id, origin, destination, current_lat, current_lon,
-                dest_lat, dest_lon, supplier_address, created_at
+                dest_lat, dest_lon, supplier_address, created_at, route, commodity
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 origin = excluded.origin,
                 destination = excluded.destination,
@@ -268,7 +271,9 @@ def _sqlite_upsert_demo_rows(oracle_addr: str) -> None:
                 dest_lat = excluded.dest_lat,
                 dest_lon = excluded.dest_lon,
                 supplier_address = COALESCE(excluded.supplier_address, supplier_address),
-                created_at = COALESCE(shipments.created_at, excluded.created_at)
+                created_at = COALESCE(shipments.created_at, excluded.created_at),
+                route = excluded.route,
+                commodity = excluded.commodity
             """,
             (
                 r["id"],
@@ -280,6 +285,8 @@ def _sqlite_upsert_demo_rows(oracle_addr: str) -> None:
                 r["dlon"],
                 oracle_addr,
                 created,
+                r.get("route", ""),
+                r.get("commodity", ""),
             ),
         )
     conn.commit()
