@@ -28,8 +28,7 @@ import { RegisterShipmentModal, type RegisterFormState } from './components/Regi
 import { CertificateQr } from './components/CertificateQr';
 import VerifyPage from './pages/VerifyPage';
 import ProtocolPage from './pages/ProtocolPage';
-import NaviBotPage from './pages/NaviBotPage';
-import { NaviBotPanel } from './components/NaviBotPanel';
+import PramanikAssistantPage from './pages/PramanikAssistantPage';
 import { WalletProvider, useWallet } from './context/WalletContext';
 import { LandingPage } from './components/landing/LandingPage';
 import { ShipmentDestinationWeatherRow } from './components/DestinationWeather';
@@ -958,7 +957,7 @@ function MainApp() {
             <header className="dash-header">
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     <div className="dash-brand-icon">
-                        <Shield size={20} color="#7dd3fc" strokeWidth={2} />
+                        <Shield size={20} color="var(--accent)" strokeWidth={2} />
                     </div>
                     <div>
                         <h1 className="dash-title">Pramanik — Dispute Oracle for Indian Exporters</h1>
@@ -1069,9 +1068,9 @@ function MainApp() {
                         marginTop: 10,
                         padding: '12px 16px',
                         borderRadius: 10,
-                        background: 'rgba(127, 29, 29, 0.25)',
-                        border: '1px solid rgba(248, 113, 113, 0.45)',
-                        color: '#fecaca',
+                        background: '#fff5f0',
+                        border: '1px solid rgba(193, 116, 53, 0.35)',
+                        color: '#5c4a42',
                         fontSize: '0.82rem',
                         lineHeight: 1.5,
                         display: 'flex',
@@ -1083,7 +1082,7 @@ function MainApp() {
                     role="alert"
                 >
                     <span>
-                        <strong style={{ color: '#fca5a5' }}>Shipment list not synced:</strong> {shipmentsSyncError}
+                        <strong style={{ color: 'var(--accent)' }}>Could not load shipments:</strong> {shipmentsSyncError}
                     </span>
                     <button
                         type="button"
@@ -3007,14 +3006,6 @@ function MainApp() {
                 </nav>
             </footer>
 
-            {accountAddress && (
-                <NaviBotPanel
-                    shipmentId={selectedShipment?.shipment_id ?? null}
-                    walletAddress={accountAddress}
-                    role={role}
-                    onRequestRunJury={(id) => setJuryTerminalShipmentId(id)}
-                />
-            )}
         </div>
         </div>
     );
@@ -3028,7 +3019,7 @@ export default function App() {
                 <Route path="/verify/:shipmentId" element={<VerifyPage />} />
                 <Route path="/verify" element={<VerifyPage />} />
                 <Route path="/protocol" element={<ProtocolPage />} />
-                <Route path="/pramanik-bot" element={<NaviBotPage />} />
+                <Route path="/pramanik-bot" element={<PramanikAssistantPage />} />
                 <Route path="/navibot" element={<Navigate to="/pramanik-bot" replace />} />
                 <Route path="/" element={<MainApp />} />
             </Routes>

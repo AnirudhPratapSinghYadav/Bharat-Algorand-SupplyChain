@@ -1,0 +1,339 @@
+/**
+ * Pramanik warm product theme (from pramanik-landing local design).
+ * Cream paper, terracotta accent, serif headlines.
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,600;0,700;0,800;1,600&display=swap');
+
+:root {
+  --bg: #faf8f4;
+  --bg-card: #ffffff;
+  --bg-raised: #fffdf9;
+  --border: #e8e0d5;
+  --primary: #1a1a1a;
+  --accent: #c17435;
+  --accent-soft: rgba(193, 116, 53, 0.12);
+  --success: #2a9d8f;
+  --warning: #c17435;
+  --danger: #c45c4a;
+  --text: #1a1a1a;
+  --muted: #6b6560;
+  --dim: #9a9288;
+  --font: 'Inter', system-ui, sans-serif;
+  --font-display: 'Playfair Display', Georgia, serif;
+  --shadow-sm: 0 1px 3px rgba(26, 26, 26, 0.06);
+  --shadow-md: 0 8px 24px rgba(26, 26, 26, 0.08);
+  --radius: 12px;
+  color-scheme: light;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ── Dashboard shell ─────────────────────────────────────────── */
+.dashboard-shell {
+  background: var(--bg);
+  min-height: 100vh;
+}
+
+.dashboard-shell .dash-header {
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+.dashboard-shell .dash-title {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #111;
+  letter-spacing: -0.02em;
+}
+
+.dashboard-shell .dash-brand-icon {
+  background: var(--accent-soft);
+  border: 1px solid rgba(193, 116, 53, 0.25);
+  color: var(--accent);
+}
+
+.dashboard-shell .dash-nav {
+  border-bottom: 1px solid var(--border);
+}
+
+.dashboard-shell .dash-nav a {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.dashboard-shell .dash-nav a:hover {
+  color: var(--accent);
+}
+
+.dashboard-shell .card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+
+.dashboard-shell .primary-btn {
+  background: #111;
+  color: #faf8f4;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+}
+
+.dashboard-shell .primary-btn:hover {
+  background: #2d2d2d;
+}
+
+.dashboard-shell .dash-role-btn--stakeholder-active,
+.dashboard-shell .dash-role-btn--supplier-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(193, 116, 53, 0.35);
+}
+
+.dashboard-shell .dash-wallet-pill {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.dashboard-shell .dash-kpi-num {
+  color: #111;
+}
+
+.dashboard-shell .dash-subtitle {
+  font-family: var(--font-display);
+  color: #111;
+}
+
+/* ── Jury pipeline (replaces dark boxes) ───────────────────── */
+.jury-pipeline-warm {
+  margin-top: 18px;
+  padding: 22px 24px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+.jury-pipeline-warm__title {
+  margin: 0 0 6px;
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #111;
+}
+
+.jury-pipeline-warm__lead {
+  margin: 0 0 20px;
+  font-size: 0.88rem;
+  color: var(--muted);
+  line-height: 1.6;
+  max-width: 640px;
+}
+
+.jury-steps-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.jury-step-warm {
+  flex: 1;
+  min-width: 140px;
+  padding: 16px 14px;
+  text-align: center;
+}
+
+.jury-step-warm__icon {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto 10px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-soft);
+  border: 1px solid rgba(193, 116, 53, 0.2);
+  color: var(--accent);
+}
+
+.jury-step-warm__label {
+  margin: 0 0 6px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #111;
+}
+
+.jury-step-warm__hint {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.jury-connector {
+  flex: 0 0 32px;
+  align-self: center;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #d4b896, transparent);
+  margin-top: -28px;
+}
+
+.trust-flow-warm {
+  margin-top: 14px;
+  padding: 18px 22px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.trust-flow-warm ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0;
+}
+
+.trust-flow-warm li {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  gap: 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.trust-flow-warm li:last-child {
+  border-bottom: none;
+}
+
+.trust-flow-warm__num {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: #111;
+  color: #faf8f4;
+  font-weight: 700;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Assistant page (unified voice + chat) ───────────────────── */
+.assistant-page {
+  min-height: 100vh;
+  background: var(--bg);
+  padding: 24px 32px 48px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.assistant-page__back {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+  font-size: 0.88rem;
+  display: inline-block;
+  margin-bottom: 20px;
+}
+
+.assistant-page__back:hover {
+  text-decoration: underline;
+}
+
+.assistant-page__header {
+  margin-bottom: 24px;
+}
+
+.assistant-page__title {
+  margin: 0 0 8px;
+  font-family: var(--font-display);
+  font-size: clamp(1.5rem, 3vw, 2rem);
+  font-weight: 700;
+  color: #111;
+}
+
+.assistant-page__sub {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--muted);
+  line-height: 1.6;
+  max-width: 560px;
+}
+
+.assistant-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-md);
+  padding: 20px 22px 24px;
+}
+
+.assistant-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  margin-bottom: 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.assistant-context label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.assistant-context input {
+  flex: 1;
+  min-width: 200px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  font-size: 0.88rem;
+  color: var(--text);
+}
+
+.assistant-context input:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.assistant-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.assistant-pill {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.assistant-pill:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}

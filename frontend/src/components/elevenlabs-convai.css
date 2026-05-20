@@ -1,22 +1,35 @@
 .el-convai {
-  border: 1px solid var(--border, rgba(148, 163, 184, 0.25));
-  border-radius: 12px;
-  background: var(--bg-card, #0f172a);
-  padding: 14px 16px;
-  min-height: 200px;
+  border: 1px solid var(--border, #e8e0d5);
+  border-radius: 14px;
+  background: var(--bg-raised, #fffdf9);
+  padding: 0;
+  min-height: 480px;
+  overflow: hidden;
+}
+
+.el-convai--unified {
+  border: none;
+  background: transparent;
+  min-height: 520px;
+}
+
+.el-convai--unified .el-convai__head {
+  padding: 0 0 12px;
 }
 
 .el-convai__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
+  padding: 14px 16px 0;
+  margin-bottom: 0;
 }
 
 .el-convai__title {
   font-weight: 700;
-  font-size: 0.9rem;
-  color: var(--text, #e2e8f0);
+  font-size: 0.95rem;
+  color: var(--text, #1a1a1a);
+  font-family: var(--font-display, Georgia, serif);
 }
 
 .el-convai__badge {
@@ -24,48 +37,54 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--accent, #38bdf8);
-  border: 1px solid rgba(56, 189, 248, 0.35);
-  padding: 2px 8px;
+  color: var(--accent, #c17435);
+  border: 1px solid rgba(193, 116, 53, 0.35);
+  background: rgba(193, 116, 53, 0.08);
+  padding: 4px 10px;
   border-radius: 999px;
 }
 
 .el-convai__ctx {
-  font-size: 0.72rem;
-  color: var(--muted, #94a3b8);
-  margin: 0 0 10px;
+  font-size: 0.8rem;
+  color: var(--muted, #6b6560);
+  margin: 0;
+  padding: 0 16px 10px;
 }
 
 .el-convai__host {
-  min-height: 420px;
+  min-height: 480px;
   width: 100%;
+  background: #fff;
+  border-radius: 0 0 12px 12px;
 }
 
 .el-convai__host elevenlabs-convai {
   display: block;
   width: 100%;
-  min-height: 420px;
+  min-height: 480px;
 }
 
 .el-convai__mic-hint {
-  font-size: 0.78rem;
-  color: var(--muted, #94a3b8);
-  margin: 0 0 12px;
-  line-height: 1.45;
+  font-size: 0.82rem;
+  color: var(--muted, #6b6560);
+  margin: 0;
+  padding: 0 16px 12px;
+  line-height: 1.5;
 }
 
 .el-convai__loading,
 .el-convai__hint,
 .el-convai__error {
-  font-size: 0.8rem;
-  color: var(--muted, #94a3b8);
-  margin: 8px 0 0;
+  font-size: 0.85rem;
+  color: var(--muted, #6b6560);
+  margin: 8px 16px;
 }
 
 .el-convai__error {
-  color: #f87171;
+  color: var(--danger, #c45c4a);
 }
 
 .el-convai--disabled {
-  opacity: 0.85;
+  opacity: 0.9;
+  padding: 16px;
 }

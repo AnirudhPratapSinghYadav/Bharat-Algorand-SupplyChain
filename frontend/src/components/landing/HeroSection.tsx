@@ -4,27 +4,33 @@ export function HeroSection() {
   return (
     <section className="nt-hero" aria-labelledby="nt-hero-title">
       <div className="nt-hero-copy">
-        <span className="nt-hero-eyebrow">Algorand · escrow · immutable verdicts</span>
+        <span className="nt-hero-eyebrow">Automated trade escrow · Built for India</span>
         <h1 id="nt-hero-title">
-          <span className="nt-hero-highlight">The AI Court for Supply Chain Disputes</span>
+          Payments that keep
+          <br />
+          <em style={{ fontStyle: 'italic', color: 'var(--nt-accent)' }}>their promise.</em>
         </h1>
         <p className="nt-hero-sub">
-          Buyer locks ALGO. Four specialized agents score weather, chain truth, and fraud risk — then the Chief Arbiter
-          seals a verdict on-chain.
+          Pramanik holds payment in escrow, reads shipping and weather signals, and releases funds with an
+          on-chain verdict — without months of email dispute.
         </p>
         <p className="nt-hero-subline">
-          No black box: Open-Meteo weather, real box reads, and an audit trail you can show to insurers or partners.
+          Connect your wallet to register a corridor, lock ALGO, and request settlement review with a proof link
+          on Lora.
         </p>
         <div className="nt-hero-actions">
-          <a href="#agents" className="nt-btn nt-btn--ghost">
-            See how the agents work
+          <a href="#agents" className="nt-btn nt-btn--primary">
+            See how it works
+          </a>
+          <a href="#how-it-works" className="nt-btn nt-btn--ghost">
+            Escrow flow
           </a>
         </div>
       </div>
       <div className="nt-hero-visual">
         <img
           src={LANDING_IMAGES.hero}
-          alt="Container port and cargo operations at night with harbor lighting"
+          alt="Export logistics and port operations"
           width={1200}
           height={900}
           loading="eager"

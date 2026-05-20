@@ -1,14 +1,14 @@
-/* Pramanik premium landing — dark only, accent #00D4FF */
+/* Pramanik landing — warm humanised theme (matches pramanik-landing local) */
 
 .nt-landing {
-  --nt-bg: #050810;
-  --nt-bg-elevated: #0a0f1e;
-  --nt-surface: rgba(14, 20, 38, 0.72);
-  --nt-border: rgba(0, 212, 255, 0.12);
-  --nt-accent: #00d4ff;
-  --nt-accent-dim: rgba(0, 212, 255, 0.15);
-  --nt-text: #e8edf5;
-  --nt-muted: #a8b8cc;
+  --nt-bg: #faf8f4;
+  --nt-bg-elevated: #ffffff;
+  --nt-surface: rgba(255, 255, 255, 0.92);
+  --nt-border: #e8e0d5;
+  --nt-accent: #c17435;
+  --nt-accent-dim: rgba(193, 116, 53, 0.12);
+  --nt-text: #1a1a1a;
+  --nt-muted: #6b6560;
   --nt-radius: 1rem;
   --nt-radius-xl: 1.25rem;
   --nt-max: 1120px;
@@ -24,19 +24,20 @@
 .nt-landing h2,
 .nt-landing h3,
 .nt-landing h4 {
-  color: #f8fafc;
+  color: #111;
+  font-family: 'Playfair Display', Georgia, serif;
 }
 
 .nt-landing p {
-  color: rgba(226, 232, 240, 0.9);
+  color: #555;
 }
 
 .nt-landing a:not(.nt-btn) {
-  color: #7dd3fc;
+  color: var(--nt-accent);
 }
 
 .nt-landing a:not(.nt-btn):hover {
-  color: #bae6fd;
+  color: #8f4f2a;
 }
 
 .nt-landing *,
@@ -87,9 +88,9 @@ body:has(.nt-landing) {
   position: fixed;
   inset: 0;
   background:
-    radial-gradient(ellipse 85% 65% at 12% 22%, rgba(0, 212, 255, 0.07), transparent 52%),
-    radial-gradient(ellipse 65% 50% at 88% 12%, rgba(0, 212, 255, 0.04), transparent 48%),
-    linear-gradient(180deg, #0a0f1e 0%, #02040a 55%, #000 100%);
+    radial-gradient(ellipse 80% 60% at 10% 20%, rgba(193, 116, 53, 0.08), transparent 55%),
+    radial-gradient(ellipse 60% 50% at 90% 10%, rgba(212, 184, 150, 0.15), transparent 50%),
+    linear-gradient(180deg, #faf8f4 0%, #f5f0e8 100%);
   z-index: 0;
 }
 
@@ -285,8 +286,8 @@ body:has(.nt-landing) {
   font-size: 0.875rem;
   font-weight: 600;
   letter-spacing: 0.01em;
-  background: linear-gradient(135deg, #00d4ff 0%, #00a8f0 55%, #0099ff 100%);
-  color: #030712;
+  background: #111;
+  color: #faf8f4;
   box-shadow:
     0 0 0 1px rgba(0, 212, 255, 0.45),
     0 0 20px rgba(0, 212, 255, 0.3),
@@ -329,18 +330,15 @@ body:has(.nt-landing) {
 }
 
 .nt-btn--primary {
-  background: linear-gradient(135deg, #33e0ff 0%, #00d4ff 42%, #00b8e6 100%);
-  color: #02040a;
-  box-shadow:
-    0 0 0 1px rgba(0, 212, 255, 0.4),
-    0 8px 24px rgba(0, 212, 255, 0.18);
+  background: #111;
+  color: #faf8f4;
+  box-shadow: 0 4px 14px rgba(26, 26, 26, 0.15);
 }
 
 .nt-btn--primary:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow:
-    0 0 0 1px rgba(0, 212, 255, 0.55),
-    0 10px 32px rgba(0, 212, 255, 0.22);
+  background: #2d2d2d;
+  box-shadow: 0 6px 20px rgba(26, 26, 26, 0.2);
 }
 
 .nt-btn--ghost {

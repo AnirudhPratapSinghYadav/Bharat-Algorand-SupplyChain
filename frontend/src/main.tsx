@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App.tsx'
 import { ErrorBoundary } from './ErrorBoundary'
 import './index.css'
+import './styles/pramanik-warm.css'
 
 const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: 1, staleTime: 15_000 } },

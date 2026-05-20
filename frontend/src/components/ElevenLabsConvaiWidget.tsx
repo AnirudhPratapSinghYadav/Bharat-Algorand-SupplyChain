@@ -59,7 +59,7 @@ export function ElevenLabsConvaiWidget({
   shipmentId,
   walletAddress,
   className,
-  title = 'Voice oracle assistant',
+  title = 'Speak or type your question',
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [cfg, setCfg] = useState<ConvaiConfig | null>(null);
@@ -134,7 +134,7 @@ export function ElevenLabsConvaiWidget({
     <div className={`el-convai ${className || ''}`}>
       <div className="el-convai__head">
         <span className="el-convai__title">{title}</span>
-        <span className="el-convai__badge">ElevenLabs · Live</span>
+        <span className="el-convai__badge">Voice + Chat</span>
       </div>
       {shipmentContextLabel ? (
         <p className="el-convai__ctx">
@@ -142,7 +142,8 @@ export function ElevenLabsConvaiWidget({
         </p>
       ) : null}
       <p className="el-convai__mic-hint">
-        Tap the microphone in the widget below and ask about escrow, settlement review, or proof links.
+        Use the panel below: <strong>type</strong> in the chat box or <strong>tap the microphone</strong> for voice — same
+        Pramanik agent, same shipment context.
       </p>
       {error ? <p className="el-convai__error">{error}</p> : null}
       <div ref={hostRef} className="el-convai__host" aria-label="ElevenLabs voice assistant" />
