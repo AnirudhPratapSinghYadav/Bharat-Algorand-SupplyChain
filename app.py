@@ -123,7 +123,7 @@ def get_gemini_model_chain(purpose: str = "default") -> tuple[list[str], genai_t
             chain = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-8b"]
     cfgs = {
         "jury": genai_types.GenerateContentConfig(max_output_tokens=400, temperature=0.2),
-        "navibot": genai_types.GenerateContentConfig(max_output_tokens=150, temperature=0.3),
+        "navibot": genai_types.GenerateContentConfig(max_output_tokens=400, temperature=0.35),
         "default": genai_types.GenerateContentConfig(max_output_tokens=300, temperature=0.3),
     }
     return chain, cfgs.get(purpose, cfgs["default"])
@@ -135,14 +135,20 @@ def gemini_generate(purpose: str, prompt: str) -> str:
         return ""
     client = genai.Client(api_key=key)
     chain, cfg = get_gemini_model_chain(purpose)
+    last_err: Exception | None = None
     for mid in chain:
+        model_id = mid if mid.startswith("models/") else mid
         try:
-            resp = client.models.generate_content(model=mid, contents=prompt, config=cfg)
+            resp = client.models.generate_content(model=model_id, contents=prompt, config=cfg)
             t = (getattr(resp, "text", None) or "").strip()
             if t:
                 return t
-        except Exception:
+        except Exception as e:
+            last_err = e
+            logger.debug("gemini %s failed (%s): %s", model_id, purpose, e)
             continue
+    if last_err:
+        logger.warning("gemini_generate exhausted chain (%s models): %s", len(chain), last_err)
     return ""
 
 
@@ -1127,6 +1133,13 @@ def _transactions_formatted(limit: int = 15) -> list[dict]:
                 "lora_url": t.get("lora_url") or (f"{LORA_TESTNET_TX}/{tx_id}" if tx_id else ""),
             }
         )
+    out.sort(
+        key=lambda x: (
+            int(x.get("round") or 0),
+            str(x.get("timestamp") or ""),
+        ),
+        reverse=True,
+    )
     return out
 
 
@@ -2011,15 +2024,15 @@ def _chain_snapshot_for_jury(shipment_id: str) -> dict:
 
 
 def get_supplier_reputation_score(supplier_address: str) -> dict:
-    """On-chain rp_ box score; default 50 when no box (never expose internal no_box to clients)."""
+    """On-chain rp_ box score; null score when no box yet (UI shows 'not rated')."""
     if not supplier_address:
-        return {"score": 50, "source": "default", "has_box": False, "address": ""}
+        return {"score": None, "source": "not_rated", "has_box": False, "address": ""}
     rep = chain.read_supplier_reputation_on_chain(supplier_address)
     sc = rep.get("score")
     if sc is None:
         return {
-            "score": 50,
-            "source": "default",
+            "score": None,
+            "source": "not_rated",
             "has_box": False,
             "address": supplier_address,
         }
@@ -2508,8 +2521,8 @@ def _shipment_row_for_ui(sid: str, chain_status: str, db_row, price: Optional[di
             rep_score = int(rep.get("score"))
             rep_src = "algorand_box_storage"
         else:
-            rep_score = 50
-            rep_src = "default"
+            rep_score = None
+            rep_src = "not_rated"
     return {
         "shipment_id": sid,
         "display_label": display_label,
@@ -2652,7 +2665,8 @@ async def run_jury(body: RunJuryRequest):
             fraud_detector=fraud if isinstance(fraud, dict) else {},
             arbiter=arbiter if isinstance(arbiter, dict) else {},
         )
-    except Exception:
+    except Exception as e:
+        logger.warning("compute_jury_hash failed for %s: %s", shipment_id, e)
         jury_hash = ""
 
     arc69_meta = NFTMetadataGenerator.generate_arc69(
@@ -2794,6 +2808,8 @@ async def run_jury(body: RunJuryRequest):
         "oracle_stake": None,
         "stake_tx_id": None,
         "jury_hash": jury_hash,
+        "input_hash": f"sha256:{jury_hash}" if jury_hash else None,
+        "verdict_hash": jury_hash or None,
         "chain_writes": chain_writes,
         "verdict": verdict_upper,
     }
@@ -3091,7 +3107,7 @@ def _register_shipment_core(
     wallet_age_days: int = 30,
     amount_algo: float = 1.0,
     delivery_days: int = 7,
-    supplier_reputation: int = 50,
+    supplier_reputation: int | None = None,
     *,
     route: str | None = None,
     commodity: str = "",
@@ -3137,6 +3153,10 @@ def _register_shipment_core(
                 ),
             )
 
+    rep_for_register = supplier_reputation
+    if rep_for_register is None:
+        rep_on_chain = get_supplier_reputation_score(supplier)
+        rep_for_register = int(rep_on_chain["score"]) if rep_on_chain.get("score") is not None else 0
     shipment_data = {
         "origin": origin,
         "destination": destination,
@@ -3144,7 +3164,7 @@ def _register_shipment_core(
         "wallet_age_days": wallet_age_days,
         "amount_algo": amount_algo,
         "delivery_days": delivery_days,
-        "supplier_reputation": supplier_reputation,
+        "supplier_reputation": rep_for_register,
     }
     fraud_report = _fraud_report_stub(shipment_data, _register_history_for_fraud())
     fraud_note = json.dumps(
@@ -3323,6 +3343,8 @@ def register_shipment(body: RegisterShipmentBody):
         dest_lon=body.dest_lon,
     )
     out["route"] = route
+    planned_algo = float(body.planned_escrow_algo or 1.0)
+    out["planned_escrow_algo"] = planned_algo
     # Bust in-memory caches so GET /shipments and /stats reflect the new box immediately (otherwise 15s stale UI).
     _SHIPMENTS_CACHE["payload"] = None
     _STATS_CACHE["payload"] = None
@@ -3330,11 +3352,17 @@ def register_shipment(body: RegisterShipmentBody):
         from services.shipment_labels import build_display_label
         from services.telegram_service import fire_async, notify_registered
 
+        px = get_algo_usd_price()
+        _, inr_planned = _escrow_fiat_from_micro(int(planned_algo * 1_000_000), px)
+        tx_url = out.get("lora_tx_url") or chain.lora_tx_url(out.get("tx_id"))
+        reg_tx = str(out.get("tx_id") or "")
         fire_async(
             notify_registered(
                 route_label=build_display_label(body.shipment_id, org, dst, commodity=comm, route=route),
-                escrow_algo=0.0,
-                inr=None,
+                escrow_algo=planned_algo,
+                inr=inr_planned,
+                lora_tx_url=str(tx_url or chain.lora_tx_url(reg_tx) or ""),
+                note="Next step: buyer deposits ALGO via Pera Wallet on the shipment card.",
             )
         )
     except Exception as e:
@@ -3363,6 +3391,19 @@ def _fire_webhook(event: str, payload: dict) -> None:
         requests.post(url, json={"event": event, **payload}, timeout=8)
     except Exception as e:
         logger.debug("webhook %s failed: %s", event, e)
+
+
+@app.get("/")
+def api_root():
+    """Render/Vercel smoke checks and service discovery."""
+    return {
+        "service": "Pramanik Oracle API",
+        "status": "ok",
+        "health": "/health",
+        "docs": "/docs",
+        "network": os.environ.get("ALGO_NETWORK", "testnet"),
+        "app_id": APP_ID if isinstance(APP_ID, int) else int(os.environ.get("APP_ID") or 0) or None,
+    }
 
 
 @app.get("/health")
@@ -3639,13 +3680,12 @@ def get_supplier_reputation(address: str):
     sc = r.get("score")
     has_box = sc is not None
     if sc is None:
-        sc = 50
-        src = "default"
+        src = "not_rated"
     else:
         src = "algorand_box_storage"
     return {
         "address": addr,
-        "score": int(sc),
+        "score": int(sc) if sc is not None else None,
         "source": src,
         "has_box": has_box,
         "lora_url": chain.lora_account_url(addr),
@@ -3678,7 +3718,7 @@ def mint_supplier_passport(body: dict = Body(...)):
         raise HTTPException(status_code=400, detail="supplier_address required")
     _require_oracle_gas(chain.MIN_ORACLE_MICRO_FOR_MINT_ASA, "mint the supplier passport ASA")
     rep = get_supplier_reputation_score(supplier_address)
-    score = int(rep.get("score") or 50)
+    score = int(rep["score"]) if rep.get("score") is not None else 0
     settled, disputed = _audit_settle_dispute_counts()
     try:
         result = chain.mint_supplier_passport_asa(
@@ -3693,17 +3733,23 @@ def mint_supplier_passport(body: dict = Body(...)):
         logger.warning("mint_supplier_passport: %s", e)
         raise HTTPException(status_code=503, detail=_format_oracle_chain_error("Mint failed", e)) from e
     aid = result.get("asa_id")
+    pending = bool(result.get("transfer_pending"))
+    msg = (
+        "Exporter certificate created on chain. Open Pera Wallet → opt in to the asset if prompted, then refresh this page."
+        if pending
+        else "Exporter certificate created and sent to your wallet when possible."
+    )
     return {
         "supplier_address": supplier_address,
         "passport_asa_id": aid,
         "reputation_score": score,
         "mint_tx_id": result.get("mint_tx_id"),
         "transfer_tx_id": result.get("transfer_tx_id"),
-        "transfer_pending": result.get("transfer_pending"),
+        "transfer_pending": pending,
         "transfer_note": result.get("transfer_note"),
         "lora_url": chain.lora_asset_url(aid) if aid else None,
         "lora_mint_url": result.get("lora_mint_url"),
-        "message": "Supplier passport minted. Verifiable on any Algorand explorer.",
+        "message": msg,
         "source": "algorand_testnet",
     }
 
@@ -3718,13 +3764,16 @@ def settle_shipment_api(body: SettleBody):
             status_code=400,
             detail="settle_shipment failed (needs Pramanik app, oracle mnemonic, and APP_ID)",
         )
-    cert = int(r.get("certificate_asa_id") or 0)
+    cert = int(r.get("certificate_asa_id") or r.get("nft_asset_id") or 0)
     tx_id = r.get("tx_id")
     out = {
         "tx_id": tx_id,
         "cert_asa_id": cert,
+        "nft_asset_id": cert,
+        "status": "Settled",
         "lora_tx_url": chain.lora_tx_url(tx_id),
         "lora_cert_url": chain.lora_asset_url(cert) if cert else None,
+        "nft_lora_url": chain.lora_asset_url(cert) if cert else None,
         "supplier_paid_algo": funds_micro / 1_000_000.0,
         **r,
     }
@@ -4036,24 +4085,28 @@ async def _get_navibot_context() -> str:
         return _navibot_context_cache
     try:
         stats = await asyncio.to_thread(chain.global_stats_navitrust)
-        ctx = f"""You are Pramanik Bot — the settlement oracle assistant for Indian export disputes on Algorand.
+        ctx = f"""You are Pramanik, a friendly assistant for Indian export supply chains using Algorand escrow.
 
-LIVE ALGORAND TESTNET STATE (App #{APP_ID}):
-Total shipments on-chain: {int(stats.get('total_shipments') or 0)}
-Settled: {int(stats.get('total_settled') or 0)} | Disputed: {int(stats.get('total_disputed') or 0)}
-ALGO in smart contract escrow: {stats.get('escrow_total_algo', 'unknown')} ALGO
 
-HOW PRAMANIK ESCROW WORKS:
-1. Buyer locks ALGO in smart contract (code holds it, not us)
-2. 4-agent AI jury: Weather Sentinel + Compliance Auditor + Fraud Detector + Chief Arbiter
-3. Verdict written permanently to Algorand transaction note
-4. ALGO auto-releases (SETTLE) or freezes (DISPUTE)
+Live portfolio (testnet app {APP_ID}):
+Shipments tracked: {int(stats.get('total_shipments') or 0)}
+Settled: {int(stats.get('total_settled') or 0)}
+In dispute: {int(stats.get('total_disputed') or 0)}
+ALGO locked in escrow: {stats.get('escrow_total_algo', 'unknown')}
 
-ANSWER RULES:
-- Max 2-3 sentences
-- If asked about a shipment, ask for the shipment_id (e.g. SHIP_...) or tell them to open the shipment card / verify page
-- If asked to execute: say "click the button on the shipment card"
-- Never make up transaction IDs or ASA IDs
+How it works for exporters:
+1. Buyer locks payment in escrow on chain
+2. Goods ship; weather and documents are checked automatically
+3. AI jury recommends release payment or hold
+4. Payment moves only after the verdict is recorded on chain
+
+Answer rules:
+Use plain language. Two to four short sentences, directly answering the user's question.
+At settlement review Pramanik checks: live weather at destination, on-chain escrow alignment, GST E-Way Bill verification, supplier trust history, then a four-agent jury (release or hold).
+Never mention API URLs, environment variables, uvicorn, or developer setup.
+If they ask to pay or lock funds, say they should approve the action in Pera Wallet on the shipment card.
+If they need proof, say open the shipment and use the Lora proof link, or Transaction history on the dashboard.
+Never invent transaction IDs or certificate numbers.
 """
         _navibot_context_cache = ctx
         _navibot_context_ts = time.time()
@@ -4187,6 +4240,65 @@ def _navibot_rule_match(query: str) -> Optional[dict]:
             True,
             None,
         )
+    if any(w in q for w in ["gstin", "gst ", "eway", "e-way", "ewaybill", "tax"]):
+        return _navibot_pack(
+            "At settlement review the Compliance Auditor checks a GST E-Way Bill number tied to the corridor reference. "
+            "After jury you will see the bill number and VALID/INVALID on the shipment card. "
+            "Full GSTIN registry lookup is on the roadmap; the live path is e-way verification plus on-chain escrow alignment.",
+            None,
+            None,
+            True,
+            None,
+        )
+    if any(w in q for w in ["register", "new shipment", "new corridor", "how do i start"]):
+        return _navibot_pack(
+            "Buyers: Register shipment (header), then Deposit ALGO on that corridor card with Pera. "
+            "Suppliers: switch to Supplier view and connect the wallet that receives payment. "
+            "Registration is signed by the oracle; funding is signed by your wallet.",
+            None,
+            None,
+            True,
+            None,
+        )
+    if ("supplier" in q and "shipment" in q) or "difference" in q and "supplier" in q:
+        return _navibot_pack(
+            "Shipment = one export lane (route, escrow, weather, jury, settlement). "
+            "Supplier = your exporter wallet (trust score, payments, optional exporter certificate). "
+            "Use the profile card for you; use corridor cards for each deal.",
+            None,
+            None,
+            True,
+            None,
+        )
+    if any(w in q for w in ["chat", "voice", "eleven", "assistant", "bot"]):
+        return _navibot_pack(
+            "Open Ask Pramanik (bottom right). Chat uses this brain and works without ElevenLabs. "
+            "Voice needs ELEVENLABS_AGENT_ID in server .env; if voice is empty, use the Chat tab.",
+            None,
+            None,
+            True,
+            None,
+        )
+    if "settlement" in q and any(w in q for w in ["check", "what", "pramanik", "verify", "review", "does"]):
+        return _navibot_pack(
+            "At settlement review Pramanik checks: (1) live weather at the destination port, "
+            "(2) whether escrow on Algorand matches the trade, (3) GST E-Way Bill status for the corridor, "
+            "(4) supplier trust from past deliveries, then (5) a four-agent jury that recommends release or hold. "
+            "Results appear on the corridor card and in Transaction history with Lora proof links.",
+            None,
+            None,
+            True,
+            None,
+        )
+    if any(w in q for w in ["history", "transaction", "ledger", "pdf", "download report"]):
+        return _navibot_pack(
+            "Open Transaction history in the header (beside Supplier). You will see every on-chain contract call, "
+            "open any row on Lora to verify, and download a PDF portfolio report from the dashboard.",
+            None,
+            None,
+            True,
+            None,
+        )
     return None
 
 
@@ -4196,7 +4308,7 @@ def _navibot_fallback(query: str) -> dict:
     if r is not None:
         return r
     return _navibot_pack(
-        "Ask me about a specific shipment_id (e.g. SHIP_ABC123), or ask how the 4-agent jury works.",
+        "Try: how does escrow work · supplier vs shipment · GST e-way checks · register a corridor · paste a shipment reference.",
         None,
         None,
         True,
@@ -4243,6 +4355,33 @@ def _navibot_fast_llm(context: str, history: List[dict], query: str) -> str:
     return _navibot_gemini_text(context.strip(), user_blob)
 
 
+@app.get("/report/executive-summary")
+def executive_pdf_summary():
+    """Short Gemini narrative for PDF cover (fallback when API key missing)."""
+    try:
+        stats = chain.global_stats_navitrust() if APP_ID else {}
+    except Exception:
+        stats = {}
+    fallback = (
+        "This report summarizes your Pramanik export corridors on Algorand testnet: "
+        "escrow held in the smart contract, jury-reviewed settlements, and verifiable Lora transaction links. "
+        "Fund each corridor in Pera Wallet after registration; release follows the four-agent review."
+    )
+    key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not key:
+        return {"summary": fallback, "source": "fallback"}
+    prompt = (
+        "Write exactly four short sentences for an MSME exporter reading a PDF audit report. "
+        f"Data: shipments={stats.get('total_shipments', 0)}, "
+        f"settled={stats.get('total_settled', 0)}, "
+        f"disputed={stats.get('total_disputed', 0)}, "
+        f"escrow_algo={stats.get('escrow_total_algo', 'unknown')}. "
+        "Mention escrow, jury, and verifying proofs on Lora. No invented transaction IDs."
+    )
+    text = gemini_generate("default", prompt)
+    return {"summary": (text or fallback).strip(), "source": "gemini" if text else "fallback"}
+
+
 @app.get("/transactions")
 def list_app_transactions(limit: int = 15):
     """Recent app transactions with decoded notes and human-readable actions."""
@@ -4251,7 +4390,7 @@ def list_app_transactions(limit: int = 15):
 
 @app.post("/navibot")
 async def navibot_chat(req: NavibotRequest, request: Request):
-    """Fast NaviBot: cached context, 8s LLM cap, rule-based fallback — always 200 JSON."""
+    """NaviBot: Gemini with model chain + keyword fallback — always 200 JSON."""
     soft_reply = _navibot_fallback("help")
     try:
         q = req.effective_text()
@@ -4288,23 +4427,32 @@ async def navibot_chat(req: NavibotRequest, request: Request):
         if rm is not None:
             return JSONResponse(content={**rm, "context_used": False})
 
+        has_gemini = bool((os.environ.get("GEMINI_API_KEY") or "").strip())
         context = await _get_navibot_context()
+        if req.role:
+            context += f"\nUser role: {req.role}.\n"
+        if req.wallet_address:
+            context += f"User wallet (truncated): {req.wallet_address[:12]}…\n"
+        if req.shipment_id:
+            context += f"Focused shipment: {req.shipment_id}.\n"
+
         used_fallback = False
         text = ""
-        try:
-            text = await asyncio.wait_for(
-                asyncio.to_thread(_navibot_fast_llm, context, hist, q),
-                timeout=8.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("navibot: gemini fast path timeout")
-            text = ""
-        except Exception as e:
-            logger.warning("navibot fast llm: %s", e)
-            text = ""
+        if has_gemini:
+            try:
+                text = await asyncio.wait_for(
+                    asyncio.to_thread(_navibot_fast_llm, context, hist, q),
+                    timeout=18.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("navibot: gemini timeout after 18s")
+                text = ""
+            except Exception as e:
+                logger.warning("navibot fast llm: %s", e)
+                text = ""
         if not (text or "").strip():
             fb = _navibot_fallback(q)
-            fb = {**fb, "context_used": False}
+            fb = {**fb, "context_used": False, "gemini_used": False}
             return JSONResponse(content=fb)
 
         qlow = q.lower()
@@ -4322,6 +4470,7 @@ async def navibot_chat(req: NavibotRequest, request: Request):
         shipment_id = req.shipment_id or shipment_id
         pack = _navibot_pack(text.strip(), action, None, used_fallback, shipment_id)
         pack["context_used"] = True
+        pack["gemini_used"] = True
         return JSONResponse(content=pack)
     except Exception as e:
         logger.exception("navibot fatal: %s", e)
@@ -4629,6 +4778,44 @@ def shipment_timeline(shipment_id: str):
     }
 
 
+@app.get("/shipments/{shipment_id}/pdf")
+def generate_shipment_pdf(shipment_id: str):
+    """Settlement certificate PDF (ReportLab + optional Gemini summary)."""
+    from fastapi.responses import StreamingResponse
+    from io import BytesIO
+
+    from services.shipment_pdf import build_shipment_pdf
+
+    sid = (shipment_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=422, detail="shipment_id required")
+    full = chain.read_shipment_full(sid) if APP_ID else {}
+    if str(full.get("status") or "") in ("Not_Found", "Unregistered", ""):
+        raise HTTPException(status_code=404, detail=f"Shipment {sid} not found on chain")
+    meta: dict = {}
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT * FROM shipments WHERE id = ?", (sid,)).fetchone()
+            if row:
+                meta = {k: row[k] for k in row.keys()}
+    except Exception:
+        pass
+    gemini_key = (os.environ.get("GEMINI_API_KEY") or "").strip() or None
+    pdf_bytes = build_shipment_pdf(
+        sid,
+        full,
+        meta,
+        app_id=APP_ID if isinstance(APP_ID, int) else int(os.environ.get("APP_ID") or 0) or None,
+        gemini_api_key=gemini_key,
+        lora_app_url=chain.lora_app_url(),
+    )
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="pramanik_{sid}_certificate.pdf"'},
+    )
+
+
 @app.get("/export/shipments.csv")
 def export_shipments_csv():
     """CSV export of all shipments with live chain state."""
@@ -4737,13 +4924,25 @@ def verify_hash(payload: dict = Body(...)):
                     on_chain_hash = str(note.get("jury_hash") or "").strip().lower()
                     src = "verdict_note_tx"
 
-        matched = bool(on_chain_hash) and computed == on_chain_hash
+        expected_raw = str((payload or {}).get("expected_hash") or "").strip().lower()
+        if expected_raw.startswith("sha256:"):
+            expected_raw = expected_raw[7:]
+        stored_audit_hash = str(latest.get("jury_hash") or "").strip().lower()
+        if stored_audit_hash.startswith("sha256:"):
+            stored_audit_hash = stored_audit_hash[7:]
+
+        matched = (
+            (bool(on_chain_hash) and computed == on_chain_hash)
+            or (bool(stored_audit_hash) and computed == stored_audit_hash)
+            or (bool(expected_raw) and computed == expected_raw)
+        )
         return {
             "shipment_id": sid,
             "computed_hash": computed,
             "recomputed_hash": computed,
             "on_chain_hash": on_chain_hash or None,
-            "stored_hash": on_chain_hash or None,
+            "stored_hash": on_chain_hash or stored_audit_hash or None,
+            "expected_hash": expected_raw or None,
             "match": matched,
             "verified": matched,
             "source": src,
@@ -4850,16 +5049,20 @@ def supplier_trust(wallet_address: str):
     elif chain.use_navitrust():
         on_chain = chain.read_supplier_reputation_on_chain(addr)
         if on_chain.get("score") is None:
-            score = 50
-            source = "default_no_history"
+            score = None
+            source = "not_rated"
         else:
             score = int(on_chain["score"])
             source = "algorand_box_storage"
     else:
-        score = 50
-        source = "default_no_history"
-    grade = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D" if score >= 40 else "F"
-    warning = score < 30
+        score = None
+        source = "not_rated"
+    if score is None:
+        grade = "NR"
+        warning = False
+    else:
+        grade = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D" if score >= 40 else "F"
+        warning = score < 30
     with get_db() as conn:
         ships = [
             dict(r)

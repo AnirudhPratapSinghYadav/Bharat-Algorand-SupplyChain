@@ -5,6 +5,7 @@ import axios from 'axios';
 import { ExternalLink, Search, Shield, Download } from 'lucide-react';
 import { BACKEND_URL, FALLBACK_APP_ID, LORA_APP, loraAssetUrl, loraTransactionUrl } from '../constants/api';
 import { WitnessButton } from '../components/WitnessButton';
+import { TradeRulesPanel } from '../components/TradeRulesPanel';
 import { ShipmentVerifyDetail } from '../components/ShipmentVerifyDetail';
 import { CertificateQr } from '../components/CertificateQr';
 import {
@@ -411,6 +412,8 @@ export default function VerifyPage() {
           </section>
         </div>
       )}
+
+      <TradeRulesPanel />
     </div>
   );
 }

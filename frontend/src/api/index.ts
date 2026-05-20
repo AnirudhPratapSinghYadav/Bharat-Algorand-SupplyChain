@@ -10,6 +10,8 @@ export type NavibotApiResponse = {
   shipment_id?: string | null;
   audio_url?: string | null;
   fallback?: boolean;
+  gemini_used?: boolean;
+  context_used?: boolean;
 };
 
 /**
@@ -34,7 +36,7 @@ export async function askNavibot(params: {
       role: role ?? undefined,
     },
     {
-      timeout: 12_000,
+      timeout: 22_000,
       headers: { 'Content-Type': 'application/json' },
       validateStatus: (s) => s === 200,
     },

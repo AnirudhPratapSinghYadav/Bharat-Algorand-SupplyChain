@@ -1,0 +1,185 @@
+/**
+ * Original pramanik-landing design system (local Next app).
+ * Cream #FAF8F4, terracotta #C17435, Playfair + Inter.
+ * Isolated from frontend/src/index.css dashboard globals.
+ */
+
+/* Document shell while marketing page is mounted */
+html:has(.pm-landing) {
+  scroll-behavior: smooth;
+  color-scheme: light;
+}
+
+html:has(.pm-landing),
+body:has(.pm-landing) {
+  background-color: #faf8f4 !important;
+  color: #1a1a1a !important;
+}
+
+html:has(.pm-landing)::-webkit-scrollbar,
+body:has(.pm-landing)::-webkit-scrollbar {
+  width: 4px;
+}
+
+html:has(.pm-landing)::-webkit-scrollbar-track,
+body:has(.pm-landing)::-webkit-scrollbar-track {
+  background: #faf8f4;
+}
+
+html:has(.pm-landing)::-webkit-scrollbar-thumb,
+body:has(.pm-landing)::-webkit-scrollbar-thumb {
+  background: #d4b896;
+  border-radius: 4px;
+}
+
+html:has(.pm-landing),
+body:has(.pm-landing) {
+  scrollbar-width: thin;
+  scrollbar-color: #d4b896 #faf8f4;
+}
+
+.pm-landing {
+  background-color: #faf8f4;
+  color: #1a1a1a;
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  width: 100%;
+}
+
+/* Undo index.css global typography (was shrinking headlines / wrong colors) */
+.pm-landing h1,
+.pm-landing h2,
+.pm-landing h3,
+.pm-landing h4 {
+  font-family: 'Playfair Display', Georgia, serif;
+  line-height: 1.1;
+  font-size: unset;
+  font-weight: unset;
+  margin-bottom: unset;
+  color: inherit;
+}
+
+.pm-landing p {
+  line-height: 1.75;
+  margin: 0;
+  color: #444;
+}
+
+.pm-landing a {
+  color: inherit;
+}
+
+.pm-landing button {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+/* Anchor targets clear fixed nav */
+.pm-landing #problem,
+.pm-landing #how,
+.pm-landing #sdg,
+.pm-landing #proof {
+  scroll-margin-top: 5.5rem;
+}
+
+.pm-landing .section {
+  padding: 100px 0;
+}
+
+.pm-landing .container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 32px;
+}
+
+.pm-landing .tag {
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #c17435;
+}
+
+.pm-landing .divider {
+  width: 48px;
+  height: 2px;
+  background: #c17435;
+  margin: 20px 0 32px;
+}
+
+.pm-landing .two-col {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 64px;
+  align-items: center;
+}
+
+@media (min-width: 900px) {
+  .pm-landing .two-col {
+    grid-template-columns: 1fr 1fr;
+  }
+  .pm-landing .two-col.reverse > *:first-child {
+    order: 2;
+  }
+  .pm-landing .two-col.reverse > *:last-child {
+    order: 1;
+  }
+}
+
+.pm-landing .three-col {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 32px;
+}
+
+@media (min-width: 700px) {
+  .pm-landing .three-col {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 1024px) {
+  .pm-landing .three-col {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.pm-landing .hide-mobile {
+  display: flex;
+}
+
+.pm-landing .show-mobile {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .pm-landing .hide-mobile {
+    display: none !important;
+  }
+  .pm-landing .show-mobile {
+    display: block !important;
+  }
+}
+
+.pm-landing .step-line {
+  display: none;
+}
+
+@media (min-width: 769px) {
+  .pm-landing .step-line {
+    display: block;
+    position: absolute;
+    left: 28px;
+    top: 40px;
+    bottom: 40px;
+    width: 1px;
+    background-color: #e8e0d5;
+  }
+}
+
+.pm-landing ::selection {
+  background: rgba(193, 116, 53, 0.18);
+}

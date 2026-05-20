@@ -38,7 +38,12 @@ cron_log.json
 fraud_scores.json
 .pytest_cache/
 frontend/.env
+frontend/.env.*
+!frontend/.env.example
 *.db-journal
+*.log
+test_certificate_*.pdf
+E2E_TEST_*.pdf
 
 # Build artifacts (regenerate with algokit / npm)
 frontend/dist/

@@ -570,25 +570,14 @@ def mint_supplier_passport_asa(
         out["warning"] = "Could not parse created ASA id from confirmation; check Lora for mint tx."
         return out
 
-    transfer_tx_id = None
-    transfer_err = None
-    try:
-        sp2 = algod.suggested_params()
-        sp2.flat_fee = True
-        sp2.fee = 1000
-        xfer = AssetTransferTxn(sender=sender, sp=sp2, receiver=addr, amt=1, index=int(asset_id))
-        st2 = xfer.sign(sk)
-        transfer_tx_id = algod.send_transaction(st2)
-        wait_for_confirmation(algod, transfer_tx_id, 10)
-        out["transfer_tx_id"] = transfer_tx_id
-        out["lora_transfer_url"] = lora_tx_url(transfer_tx_id)
-    except Exception as e:
-        transfer_err = str(e)
-        out["transfer_pending"] = True
-        out["transfer_note"] = (
-            "Supplier must opt in to this ASA in Pera (or another wallet), then mint can be retried "
-            f"or transfer completed manually. Underlying error: {transfer_err}"
-        )
+    # Transfer requires the supplier to opt in to the ASA in Pera first — skip auto-transfer to avoid false "mint failed".
+    out["transfer_pending"] = True
+    out["transfer_note"] = (
+        f"Certificate asset #{int(asset_id)} was minted on chain. In Pera Wallet, opt in to this asset, "
+        "then refresh your supplier profile. The oracle cannot accept the asset on your behalf."
+    )
+    if out.get("lora_mint_url"):
+        out["transfer_note"] += f" Mint proof: {out['lora_mint_url']}"
 
     return out
 
@@ -629,10 +618,15 @@ def get_app_client():
 
 
 def _decode_arc4_string(raw: bytes) -> str:
-    if not raw or len(raw) < 2:
+    if not raw:
         return ""
-    n = int.from_bytes(raw[:2], "big")
-    return raw[2 : 2 + n].decode("utf-8", errors="replace").replace("\x00", "").strip()
+    if len(raw) >= 2:
+        n = int.from_bytes(raw[:2], "big")
+        if 0 < n <= len(raw) - 2:
+            s = raw[2 : 2 + n].decode("utf-8", errors="replace").replace("\x00", "").strip()
+            if s:
+                return s
+    return raw.decode("utf-8", errors="replace").replace("\x00", "").strip()
 
 
 def _navi_str_key_box_name(prefix: bytes, shipment_id: str) -> bytes:
@@ -924,6 +918,33 @@ def legacy_report_disaster(shipment_id: str, reasoning_hash: str) -> Optional[di
         return None
 
 
+def _ensure_app_balance_for_settle(min_micro: int = 200_000) -> None:
+    """Top up app account so settle_shipment can pay supplier + mint certificate ASA."""
+    _sync_env_globals()
+    if not APP_ID or not ORACLE_MNEMONIC or not use_navitrust():
+        return
+    try:
+        app_addr = get_application_address(APP_ID)
+        deployer = _oracle_account()
+        info = algorand.client.algod.account_info(app_addr)
+        bal = int(info.get("amount", 0))
+        if bal >= min_micro + 100_000:
+            return
+        need = max(500_000, min_micro + 300_000 - bal)
+        algorand.send.payment(
+            PaymentParams(
+                sender=deployer.address,
+                receiver=app_addr,
+                amount=AlgoAmount(micro_algo=need),
+                note="Pramanik app MBR for settle + NFT",
+                validity_window=_DEFAULT_TXN_VALIDITY_WINDOW,
+            )
+        )
+        logger.info("Funded app #%s with %d microALGO before settle", APP_ID, need)
+    except Exception as e:
+        logger.warning("ensure_app_balance_for_settle: %s", e)
+
+
 def settle_shipment_chain(shipment_id: str) -> Optional[dict]:
     """
     Submit settle_shipment via Algokit; certificate ASA ID from result.abi_return
@@ -935,6 +956,7 @@ def settle_shipment_chain(shipment_id: str) -> Optional[dict]:
     try:
         from pramanik_notes import build_pramanik_note
 
+        _ensure_app_balance_for_settle()
         deployer = _oracle_account()
         app_client = get_app_client()
         try:
@@ -978,7 +1000,9 @@ def settle_shipment_chain(shipment_id: str) -> Optional[dict]:
             "tx_id": tx_id,
             "confirmed_round": cr,
             "certificate_asa_id": cert,
+            "nft_asset_id": cert,
             "lora_url": lora_tx_url(tx_id),
+            "nft_lora_url": lora_asset_url(cert) if cert else None,
             "certificate_created": cert > 0,
         }
     except Exception as e:
@@ -1303,6 +1327,7 @@ def indexer_recent_app_txns(limit: int = 20) -> List[dict]:
                     "action": action,
                 }
             )
+        result.sort(key=lambda x: int(x.get("round") or 0), reverse=True)
         return result
     except Exception as e:
         logger.warning("indexer txns: %s", e)
@@ -1674,7 +1699,7 @@ def fetch_shipment_timeline(shipment_id: str, limit: int = 40) -> list[dict[str,
                     "note": note,
                 }
             )
-        events.sort(key=lambda e: int(e.get("round") or 0))
+        events.sort(key=lambda e: int(e.get("round") or 0), reverse=True)
     except Exception as e:
         logger.warning("fetch_shipment_timeline: %s", e)
-    return events[-limit:]
+    return events[:limit]

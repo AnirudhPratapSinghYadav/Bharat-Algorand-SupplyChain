@@ -4,7 +4,10 @@ pydantic>=2.7.0
 python-dotenv>=1.0.0
 google-genai>=1.0.0
 algokit-utils>=3.0.0
-algosdk>=2.7.0
+# PyPI package name is py-algorand-sdk; Python imports use `algosdk`
+py-algorand-sdk>=2.7.0,<3
 requests>=2.32.0
 python-multipart>=0.0.9
 apscheduler>=3.10.4
+reportlab>=4.2.0
+httpx>=0.27.0

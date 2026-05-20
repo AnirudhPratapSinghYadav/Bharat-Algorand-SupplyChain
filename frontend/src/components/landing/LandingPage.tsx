@@ -1,28 +1,21 @@
-import { useRef, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useState } from 'react';
 import axios from 'axios';
-import './landing.css';
+import './pramanik-landing.css';
 import { BACKEND_URL } from '../../constants/api';
-import { useLandingHorizontalScroll } from './useLandingHorizontalScroll';
-import { HeroSection } from './HeroSection';
-import { GeopoliticalStakesSection } from './GeopoliticalStakesSection';
-import { ProblemSection } from './ProblemSection';
-import { SolutionSection } from './SolutionSection';
-import { AgentsPipelineSection } from './AgentsPipelineSection';
-import { StepsSection } from './StepsSection';
-import { QuickProofSection } from './QuickProofSection';
-import { DemoStory } from '../DemoStory';
-import { CTASection } from './CTASection';
-import { LandingFooter } from './LandingFooter';
+import { LandingNavbar } from './original/LandingNavbar';
+import { LandingHero } from './original/LandingHero';
+import { LandingProblemSection } from './original/LandingProblemSection';
+import { LandingSolutionSection } from './original/LandingSolutionSection';
+import { LandingSDGSection } from './original/LandingSDGSection';
+import { LandingOnChainSection } from './original/LandingOnChainSection';
+import { LandingCTASection } from './original/LandingCTASection';
 
 export type LandingPageProps = {
   onConnectWallet: () => void;
 };
 
 export function LandingPage({ onConnectWallet }: LandingPageProps) {
-  const landingRootRef = useRef<HTMLDivElement>(null);
   const [landingAppId, setLandingAppId] = useState<number | null>(null);
-  useLandingHorizontalScroll(landingRootRef);
 
   useEffect(() => {
     axios
@@ -35,48 +28,16 @@ export function LandingPage({ onConnectWallet }: LandingPageProps) {
   }, []);
 
   return (
-    <div ref={landingRootRef} className="nt-landing">
-      <div className="nt-bg-glow" aria-hidden />
-      <header className="nt-nav-shell">
-        <div className="nt-nav">
-          <Link to="/" className="nt-nav-brand">
-            <span className="nt-nav-logo" aria-hidden>
-              <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" className="nt-nav-logo-svg">
-                <rect x="4" y="10" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="1.5" />
-                <rect x="18" y="6" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="1.5" opacity="0.95" />
-                <rect x="18" y="18" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="1.5" opacity="0.85" />
-                <path d="M14 15h4M22 16v4M18 20h-2" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" opacity="0.55" />
-              </svg>
-            </span>
-            <span className="nt-nav-brand-text">Pramanik</span>
-          </Link>
-          <nav className="nt-nav-links" aria-label="On this page">
-            <a href="#agents">AI jury</a>
-            <a href="#how-it-works">Escrow flow</a>
-            <Link to="/verify">Verify</Link>
-          </nav>
-          <div className="nt-nav-actions">
-            <button type="button" className="nt-btn nt-btn--primary nt-nav-wallet" onClick={onConnectWallet}>
-              Connect wallet
-            </button>
-          </div>
-        </div>
-      </header>
-
+    <div className="pm-landing">
+      <LandingNavbar onConnectWallet={onConnectWallet} />
       <main>
-        <HeroSection />
-        <GeopoliticalStakesSection />
-        <ProblemSection />
-        <SolutionSection />
-        <AgentsPipelineSection />
-        <StepsSection />
-        <QuickProofSection />
-        <DemoStory />
-        <div className="section-divider" aria-hidden />
-        <CTASection onCreateShipment={onConnectWallet} />
+        <LandingHero onConnectWallet={onConnectWallet} />
+        <LandingProblemSection />
+        <LandingSolutionSection onConnectWallet={onConnectWallet} />
+        <LandingSDGSection />
+        <LandingOnChainSection onConnectWallet={onConnectWallet} appId={landingAppId} />
+        <LandingCTASection onConnectWallet={onConnectWallet} appId={landingAppId} />
       </main>
-
-      <LandingFooter appId={landingAppId} />
     </div>
   );
 }

@@ -76,8 +76,23 @@ class SettleBody(BaseModel):
 
 
 class NavibotRequest(BaseModel):
-    message: str
+    """Chat body from dashboard assistant (accepts `query` or `message`)."""
+
+    message: Optional[str] = None
+    query: Optional[str] = None
+    history: Optional[list] = None
     shipment_id: Optional[str] = None
+    wallet_address: Optional[str] = None
+    role: Optional[str] = None
+
+    def effective_text(self) -> str:
+        return (self.query or self.message or "").strip()
+
+    @model_validator(mode="after")
+    def require_question(self) -> "NavibotRequest":
+        if not self.effective_text():
+            raise ValueError("query or message required")
+        return self
 
 
 class FundShipmentBuildBody(BaseModel):
@@ -100,6 +115,7 @@ class RegisterShipmentBody(BaseModel):
     origin_lon: float
     dest_lat: Optional[float] = None
     dest_lon: Optional[float] = None
+    planned_escrow_algo: float = Field(default=1.0, ge=0.5, le=1000)
 
     @field_validator("shipment_id")
     @classmethod

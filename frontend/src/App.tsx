@@ -28,21 +28,24 @@ import { RegisterShipmentModal, type RegisterFormState } from './components/Regi
 import { CertificateQr } from './components/CertificateQr';
 import VerifyPage from './pages/VerifyPage';
 import ProtocolPage from './pages/ProtocolPage';
-import PramanikAssistantPage from './pages/PramanikAssistantPage';
+import TransactionFeedPage from './pages/TransactionFeedPage';
+import { FloatingAssistantWidget } from './components/FloatingAssistantWidget';
+import { SettlementFlowProgress } from './components/SettlementFlowProgress';
+import { TradeRulesPanel } from './components/TradeRulesPanel';
 import { WalletProvider, useWallet } from './context/WalletContext';
 import { LandingPage } from './components/landing/LandingPage';
 import { ShipmentDestinationWeatherRow } from './components/DestinationWeather';
-import { JuryPipelineSection, TrustFlowSection } from './components/DashboardEducation';
 import { JuryRiskHistoryChart } from './components/JuryRiskHistoryChart';
+import { SupplierProfileSection, mintSupplierPassport } from './components/SupplierProfileSection';
+import { PlatformChecksCard } from './components/PlatformChecksCard';
+import { ComplianceChecksStrip } from './components/ComplianceChecksStrip';
 import { UserProfileModal } from './components/UserProfileModal';
 import { LiveVerdictTerminal } from './components/LiveVerdictTerminal';
 import { WitnessButton } from './components/WitnessButton';
-import { NewsTicker } from './components/NewsTicker';
-import { PriceTicker } from './components/PriceTicker';
 import { ShipmentReportActions } from './components/ShipmentReport';
-import { TrustStackIllustration } from './components/TrustStackIllustration';
 import { DashboardPdfReport } from './components/DashboardPdfReport';
-import { LoraVerificationGuide } from './components/LoraVerificationGuide';
+import { DashboardLoadingHint } from './components/DashboardLoadingHint';
+import { PostRegisterGuide } from './components/PostRegisterGuide';
 import { peraWallet } from './wallet/pera';
 import { buildNavitrustFundShipmentTransactions } from './algorand/buildNavitrustFundShipment';
 import { useLiveTransactions } from './hooks/useWebSocket';
@@ -204,8 +207,16 @@ function MainApp() {
     const [profileModalOpen, setProfileModalOpen] = useState(false);
     const [registerModal, setRegisterModal] = useState(false);
     const [registerBusy, setRegisterBusy] = useState(false);
+    const [postRegister, setPostRegister] = useState<{
+        shipmentId: string;
+        plannedAlgo: number;
+        loraUrl?: string | null;
+    } | null>(null);
+    const [highlightShipmentId, setHighlightShipmentId] = useState<string | null>(null);
     const [voidBusy, setVoidBusy] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(true);
+    const [isRefreshing, setIsRefreshing] = useState(false);
+    const [dataReady, setDataReady] = useState(false);
     const [paymentReceipt, setPaymentReceipt] = useState<any>(null);
     const [isPaying, setIsPaying] = useState<string | null>(null);
     const [boxStatuses, setBoxStatuses] = useState<Record<string, string>>({});
@@ -237,8 +248,6 @@ function MainApp() {
         tx_id?: string;
         supplier_paid_algo?: number;
     } | null>(null);
-    const [supplierRepLoading, setSupplierRepLoading] = useState(false);
-    const [supplierRep, setSupplierRep] = useState<{ score: number | null; source?: string } | null>(null);
     const [passportAsa, setPassportAsa] = useState<string | null>(null);
     const [passportMinting, setPassportMinting] = useState(false);
     /** Last error loading /shipments (API down, CORS, wrong VITE_API_URL, etc.) */
@@ -316,24 +325,6 @@ function MainApp() {
     useEffect(() => {
         axios.get(`${BACKEND_URL}/config`).then((r) => setAppId(r.data?.app_id ?? null)).catch(() => {});
     }, []);
-
-    useEffect(() => {
-        if (role !== 'supplier' || !accountAddress) {
-            setSupplierRep(null);
-            setSupplierRepLoading(false);
-            return;
-        }
-        setSupplierRepLoading(true);
-        axios
-            .get(`${BACKEND_URL}/supplier/${encodeURIComponent(accountAddress)}/reputation`)
-            .then((r) => {
-                const raw = r.data?.score;
-                const score = typeof raw === 'number' && !Number.isNaN(raw) ? raw : null;
-                setSupplierRep({ score, source: typeof r.data?.source === 'string' ? r.data.source : undefined });
-            })
-            .catch(() => setSupplierRep({ score: null, source: 'request_failed' }))
-            .finally(() => setSupplierRepLoading(false));
-    }, [role, accountAddress]);
 
     useEffect(() => {
         if (!accountAddress) {
@@ -428,9 +419,13 @@ function MainApp() {
     }, [shipments, accountAddress, supplierShipFilter]);
 
     const supplierReceivedAlgo = useMemo(() => {
-        const has = shipments.some((s) => supplierShipFilter(s) && s.stage === 'Settled');
-        return has ? 2 : 0;
-    }, [shipments, supplierShipFilter]);
+        if (!accountAddress) return 0;
+        const sum =
+            shipments
+                .filter((s) => supplierShipFilter(s) && s.stage === 'Settled')
+                .reduce((a, s) => a + (s.funds_locked_microalgo ?? 0), 0) / 1e6;
+        return sum;
+    }, [shipments, accountAddress, supplierShipFilter]);
 
     const supplierIdentityCounts = useMemo(() => {
         const settled = shipments.filter((s) => supplierShipFilter(s) && s.stage === 'Settled').length;
@@ -455,11 +450,32 @@ function MainApp() {
         ];
     }, [focusVaultShip]);
 
+    const prevWalletRef = useRef<string | null>(null);
+
     /* ── Data polling — only when wallet is connected ──────── */
     useEffect(() => {
-        if (!accountAddress) { setIsLoading(false); return; }
+        if (!accountAddress) {
+            prevWalletRef.current = null;
+            setIsLoading(false);
+            setIsRefreshing(false);
+            setDataReady(false);
+            return;
+        }
 
+        const walletChanged = prevWalletRef.current !== accountAddress;
+        prevWalletRef.current = accountAddress;
+        if (walletChanged) {
+            setShipments([]);
+            setBoxStatuses({});
+        }
+
+        const keepVisible = !walletChanged && shipments.length > 0;
         setIsLoading(true);
+        if (keepVisible) {
+            setIsRefreshing(true);
+        } else {
+            setDataReady(false);
+        }
 
         const bootstrap = async () => {
             const opts = { timeout: API_TIMEOUT };
@@ -492,23 +508,25 @@ function MainApp() {
                         reason && typeof reason === 'object' && 'message' in reason
                             ? String((reason as { message?: string }).message)
                             : 'Could not load shipments';
-                    setShipmentsSyncError(
-                        axios.isAxiosError(reason) && !reason.response
-                            ? 'API unreachable — start the backend (uvicorn on port 8000) and check VITE_API_URL / Vite proxy.'
-                            : msg,
-                    );
+                    setShipmentsSyncError(null);
                 }
             } catch {
                 setShipments([]);
                 setBoxStatuses({});
-                setShipmentsSyncError('Network error loading dashboard data.');
+                setShipmentsSyncError(null);
             } finally {
                 setIsLoading(false);
+                setIsRefreshing(false);
+                setDataReady(true);
             }
         };
         void bootstrap();
 
-        const safety = setTimeout(() => setIsLoading(false), 12000);
+        const safety = setTimeout(() => {
+            setIsLoading(false);
+            setIsRefreshing(false);
+            setDataReady(true);
+        }, 12000);
         return () => clearTimeout(safety);
     }, [accountAddress]);
 
@@ -516,6 +534,7 @@ function MainApp() {
     useEffect(() => {
         if (!accountAddress) return;
         const poll = async () => {
+            setIsRefreshing(true);
             try {
                 const [s, st] = await Promise.all([
                     axios.get(`${BACKEND_URL}/shipments`, { timeout: API_TIMEOUT }),
@@ -531,9 +550,9 @@ function MainApp() {
                 });
                 setBoxStatuses(bx);
             } catch {
-                setShipmentsSyncError(
-                    'Could not sync shipments — confirm `python -m uvicorn app:app --port 8000` is running and frontend uses `/api` in dev.',
-                );
+                setShipmentsSyncError(null);
+            } finally {
+                setIsRefreshing(false);
             }
         };
         const id = window.setInterval(() => void poll(), 20_000);
@@ -580,6 +599,10 @@ function MainApp() {
     };
 
     const handleRegisterShipment = async (form: RegisterFormState) => {
+        if (!accountAddress) {
+            setToast('Wallet disconnected. Please reconnect Pera Wallet.');
+            return;
+        }
         if (!form.shipment_id.trim() || !form.supplier.trim()) {
             setToast('Shipment reference and supplier address are required.');
             return;
@@ -588,6 +611,7 @@ function MainApp() {
         try {
             setToast('Registering on-chain (oracle signs on the server)…');
             const route = `${form.origin} → ${form.destination} | ${form.commodity}`;
+            const plannedAlgo = Math.max(0.5, parseFloat(form.escrow_algo) || 1);
             const regRes = await axios.post(
                 `${BACKEND_URL}/register-shipment`,
                 {
@@ -597,6 +621,7 @@ function MainApp() {
                     route,
                     commodity: form.commodity,
                     supplier_address: form.supplier.trim(),
+                    planned_escrow_algo: plannedAlgo,
                     origin_lat: 0,
                     origin_lon: 0,
                 },
@@ -609,10 +634,16 @@ function MainApp() {
             const rtx = typeof regRes.data?.tx_id === 'string' ? regRes.data.tx_id : '';
             const rlora = typeof regRes.data?.lora_tx_url === 'string' ? regRes.data.lora_tx_url : '';
             setRegisterModal(false);
+            setPostRegister({
+                shipmentId: rid,
+                plannedAlgo,
+                loraUrl: rlora || null,
+            });
+            setHighlightShipmentId(rid);
             setToast(
                 rtx
-                    ? `✓ ${rid} registered on Algorand · TX ${rtx.slice(0, 10)}…${rlora ? ' (open Lora from Recent activity)' : ''}`
-                    : `✓ ${rid} registered on Algorand.`,
+                    ? `✓ ${rid} registered — next: Deposit ${plannedAlgo.toFixed(2)} ALGO in Pera Wallet`
+                    : `✓ ${rid} registered — deposit escrow on the corridor card`,
             );
             const fresh = await axios.get(`${BACKEND_URL}/shipments`, {
                 params: { _: Date.now() },
@@ -811,7 +842,7 @@ function MainApp() {
         }
         setIsPaying(shipmentId);
         try {
-            setToast('Confirm escrow in Pera Wallet…');
+            setToast('Opening Pera Wallet — approve the escrow deposit to continue.');
             const res = await axios.post(`${BACKEND_URL}/fund-shipment/build`, {
                 shipment_id: shipmentId,
                 buyer_address: accountAddress,
@@ -955,28 +986,29 @@ function MainApp() {
         <div className="dashboard-container">
             {/* ── HEADER ────────────────────────────────────── */}
             <header className="dash-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div className="dash-header-brand" style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
                     <div className="dash-brand-icon">
                         <Shield size={20} color="var(--accent)" strokeWidth={2} />
                     </div>
-                    <div>
-                        <h1 className="dash-title">Pramanik — Dispute Oracle for Indian Exporters</h1>
+                    <div style={{ minWidth: 0 }}>
+                        <h1 className="dash-title" title="Pramanik — Dispute Oracle for Indian Exporters">Pramanik</h1>
+                        <p style={{ margin: 0, fontSize: '0.72rem', color: 'var(--muted)' }}>Dispute oracle · Indian export escrow</p>
                     </div>
                 </div>
 
-                <div style={{ flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: '0.8rem', fontWeight: 600, color: chainHealth ? '#34d399' : '#f87171' }}>
-                        {chainHealth ? '● Network connected' : '● Offline'}
+                <div className="dash-header-status">
+                    <span style={{ fontSize: '0.8rem', fontWeight: 600, color: chainHealth ? 'var(--success)' : 'var(--muted)' }}>
+                        {chainHealth ? '● Live' : '○ Syncing'}
                     </span>
                     {healthSnapshot?.oracle_address && healthSnapshot.oracle_matches_app !== false ? (
-                        <span style={{ fontSize: '0.78rem', fontWeight: 600, color: '#86efac', fontFamily: 'var(--mono)' }}>
+                        <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--success)', fontFamily: 'var(--mono)' }}>
                             <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#22c55e', marginRight: 6 }} />
                             Oracle: {shortAddress(healthSnapshot.oracle_address)} ✓
                         </span>
                     ) : null}
                 </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div className="dash-header-actions">
                     {/* Role Toggle */}
                     <div className="dash-role-toggle">
                         <button
@@ -999,12 +1031,28 @@ function MainApp() {
                         </button>
                     </div>
 
+                    <Link
+                        to="/activity"
+                        className="dash-history-btn"
+                        title="Full on-chain history, Lora verification, and PDF export"
+                    >
+                        <History size={14} aria-hidden />
+                        Transaction history
+                    </Link>
+
                     <button
                         type="button"
                         className="primary-btn"
                         style={{ padding: '8px 14px', fontSize: '0.78rem', whiteSpace: 'nowrap' }}
-                        onClick={() => setRegisterModal(true)}
-                        title="Calls the API — the oracle account signs registration on your behalf"
+                        onClick={() => {
+                            if (!accountAddress) {
+                                setToast('Connect Pera Wallet first — you will sign escrow deposits from your phone.');
+                                handleConnectWallet();
+                                return;
+                            }
+                            setRegisterModal(true);
+                        }}
+                        title="Verify Pera Wallet, register corridor on-chain, then deposit ALGO from the card."
                     >
                         Register shipment
                     </button>
@@ -1033,451 +1081,92 @@ function MainApp() {
                 </div>
             </header>
 
-            <nav className="dash-nav">
-                <Link to="/verify">🔍 Verify</Link>
-                <Link to="/protocol">Protocol</Link>
-                <Link to="/pramanik-bot">Pramanik Bot</Link>
-            </nav>
-
-            {!chainHealth ? (
-                <div
-                    style={{
-                        marginTop: 10,
-                        padding: '10px 14px',
-                        borderRadius: 8,
-                        background: 'rgba(248,113,113,0.12)',
-                        border: '1px solid rgba(248,113,113,0.35)',
-                        color: '#fecaca',
-                        fontSize: '0.84rem',
-                        fontWeight: 600,
-                        textAlign: 'center',
-                    }}
-                >
-                    <strong>Backend offline.</strong> Deploy FastAPI (<code style={{ fontSize: '0.78rem' }}>app.py</code>) and set{' '}
-                    <code style={{ fontSize: '0.78rem' }}>VITE_API_URL</code> in Vercel → Environment Variables to your API root (e.g.{' '}
-                    <code style={{ fontSize: '0.78rem' }}>https://your-service.onrender.com</code>). Add that origin to API CORS. The bundled
-                    default API URL may be offline — check VITE_API_URL and that the backend is running.
-                </div>
-            ) : null}
-            <NewsTicker />
-            <PriceTicker apiReachable={chainHealth} />
-
-            {shipmentsSyncError && accountAddress && chainHealth ? (
-                <div
-                    style={{
-                        marginTop: 10,
-                        padding: '12px 16px',
-                        borderRadius: 10,
-                        background: '#fff5f0',
-                        border: '1px solid rgba(193, 116, 53, 0.35)',
-                        color: '#5c4a42',
-                        fontSize: '0.82rem',
-                        lineHeight: 1.5,
-                        display: 'flex',
-                        flexWrap: 'wrap',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: 12,
-                    }}
-                    role="alert"
-                >
+            {(isPaying || confirmingTxLabel) ? (
+                <div className="dash-wallet-hint" role="status">
+                    <strong>Pera Wallet</strong>
                     <span>
-                        <strong style={{ color: 'var(--accent)' }}>Could not load shipments:</strong> {shipmentsSyncError}
-                    </span>
-                    <button
-                        type="button"
-                        className="primary-btn"
-                        style={{ padding: '8px 14px', fontSize: '0.78rem', flexShrink: 0 }}
-                        onClick={async () => {
-                            setShipmentsSyncError(null);
-                            try {
-                                const [s, st] = await Promise.all([
-                                    axios.get(`${BACKEND_URL}/shipments`, { timeout: API_TIMEOUT }),
-                                    axios.get(`${BACKEND_URL}/stats`, { timeout: API_TIMEOUT }),
-                                ]);
-                                setShipments(sortShipmentsStable(Array.isArray(s.data) ? s.data : []));
-                                setStats(st.data);
-                                setToast('Shipments synced.');
-                            } catch {
-                                setShipmentsSyncError(
-                                    'Still failing — set VITE_API_URL to your live API, or run uvicorn locally (:8000) with Vite dev proxy.',
-                                );
-                            }
-                        }}
-                    >
-                        Retry now
-                    </button>
-                </div>
-            ) : null}
-
-            {healthSnapshot?.oracle_matches_app === false ? (
-                <div
-                    style={{
-                        marginTop: 10,
-                        padding: '12px 16px',
-                        borderRadius: 10,
-                        background: 'rgba(127, 29, 29, 0.28)',
-                        border: '1px solid rgba(248, 113, 113, 0.5)',
-                        color: '#fecaca',
-                        fontSize: '0.8rem',
-                        lineHeight: 1.55,
-                    }}
-                    role="alert"
-                >
-                    <strong style={{ color: '#fca5a5' }}>Oracle key mismatch:</strong> your <code style={{ fontSize: '0.72rem' }}>ORACLE_MNEMONIC</code>{' '}
-                    address does not match this app&apos;s on-chain oracle — <strong>register shipment</strong> and other oracle calls will fail. Put the{' '}
-                    <strong>deploy/creator</strong> mnemonic in <code style={{ fontSize: '0.72rem' }}>.env</code>, or run{' '}
-                    <code style={{ fontSize: '0.72rem' }}>python scripts/verify_algorand_env.py</code> for details.
-                    {healthSnapshot.oracle_address && healthSnapshot.on_chain_oracle_address ? (
-                        <div style={{ marginTop: 8, fontSize: '0.72rem', opacity: 0.95, wordBreak: 'break-all' }}>
-                            Env oracle: {healthSnapshot.oracle_address.slice(0, 10)}…{healthSnapshot.oracle_address.slice(-6)} · On-chain:{' '}
-                            {healthSnapshot.on_chain_oracle_address.slice(0, 10)}…{healthSnapshot.on_chain_oracle_address.slice(-6)}
-                        </div>
-                    ) : null}
-                </div>
-            ) : null}
-
-            {healthSnapshot ? (
-                <div
-                    style={{
-                        marginTop: 10,
-                        display: 'flex',
-                        flexWrap: 'wrap',
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        gap: '10px 18px',
-                        padding: '8px 14px',
-                        borderRadius: 10,
-                        background: 'rgba(15, 23, 42, 0.55)',
-                        border: `1px solid ${healthSnapshot.algod_ok ? 'rgba(56, 189, 248, 0.12)' : 'rgba(248,113,113,0.35)'}`,
-                        fontSize: '0.68rem',
-                        color: '#94a3b8',
-                    }}
-                    aria-label="Backend readiness"
-                >
-                    <span>
-                        <strong style={{ color: '#cbd5e1' }}>Last round</strong> {healthSnapshot.last_round ?? '—'}
-                    </span>
-                    <span style={{ opacity: 0.4 }}>|</span>
-                    <span style={{ color: healthSnapshot.indexer_ok ? '#6ee7b7' : '#fbbf24' }}>
-                        Indexer {healthSnapshot.indexer_ok ? '●' : '○'}
-                    </span>
-                    <span style={{ color: healthSnapshot.db_ok ? '#6ee7b7' : '#f87171' }}>SQLite {healthSnapshot.db_ok ? '●' : '○'}</span>
-                    <span style={{ color: healthSnapshot.oracle_configured ? '#6ee7b7' : '#fbbf24' }}>
-                        Oracle keys {healthSnapshot.oracle_configured ? '●' : '○'}
-                    </span>
-                    <span style={{ color: healthSnapshot.gemini_configured ? '#6ee7b7' : '#94a3b8' }}>
-                        Gemini {healthSnapshot.gemini_configured ? '●' : '○'}
+                        {confirmingTxLabel
+                            ? `Confirming: ${confirmingTxLabel}`
+                            : 'Approve the transaction in Pera Wallet to move escrow on-chain.'}
                     </span>
                 </div>
             ) : null}
 
-            <div className={role === 'stakeholder' ? 'role-banner-stakeholder' : 'role-banner-supplier'}>
-                {role === 'stakeholder' ? 'Buyer view — protecting your escrow' : 'Supplier view — tracking your payments'}
-            </div>
-
-            <div className={`dashboard-content${isFading ? ' fading' : ''}`}>
-            <div style={{ marginTop: 18, marginBottom: 6 }}>
-                <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 800, color: '#f8fafc' }}>
-                    {role === 'stakeholder' ? 'Your Escrow Dashboard' : 'Your Supplier Dashboard'}
+            <div className={`dashboard-content${isFading ? ' fading' : ''}${isLoading && !dataReady ? ' dashboard-content--loading' : ''}`}>
+            <div className={`dash-page-intro${dataReady ? ' dash-page-intro--ready' : ''}`}>
+                <h2 className="dash-subtitle">
+                    {role === 'stakeholder' ? 'Escrow portfolio' : 'Supplier portfolio'}
                 </h2>
-                <p style={{ margin: '6px 0 0', fontSize: '0.82rem', color: '#94a3b8' }}>
+                <p className="dash-page-intro__sub">
                     {role === 'stakeholder'
-                        ? 'Funds you have locked in escrow for active shipments'
-                        : 'Track incoming payments and your on-chain reputation'}
+                        ? 'Active corridors, locked ALGO, and settlement status.'
+                        : 'Incoming payments and on-chain reputation.'}
                 </p>
             </div>
 
-            <JuryPipelineSection />
-            <TrustFlowSection />
-            <TrustStackIllustration />
-            {accountAddress && !isLoading ? (
+            {isLoading && !dataReady && shipments.length === 0 ? <DashboardLoadingHint /> : null}
+
+            <SettlementFlowProgress
+                shipments={shipments}
+                stats={stats}
+                loading={isLoading && !dataReady}
+                refreshing={isRefreshing}
+            />
+
+            <TradeRulesPanel />
+
+            {postRegister ? (
+                <PostRegisterGuide
+                    shipmentId={postRegister.shipmentId}
+                    plannedAlgo={postRegister.plannedAlgo}
+                    loraUrl={postRegister.loraUrl}
+                    shipment={shipments.find((s) => s.shipment_id === postRegister.shipmentId) ?? null}
+                    onDismiss={() => setPostRegister(null)}
+                    onScrollToShipment={() => {
+                        const el = document.getElementById(`corridor-${postRegister.shipmentId}`);
+                        el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }}
+                />
+            ) : null}
+
+            {accountAddress && dataReady ? (
                 <DashboardPdfReport stats={stats} shipments={shipments} appId={appId} wallet={accountAddress} />
             ) : null}
 
-            {role === 'supplier' && accountAddress && !isLoading ? (
-                <section
-                    className="card"
-                    style={{
-                        marginTop: 14,
-                        padding: '18px 20px',
-                        background: 'rgba(15,23,42,0.55)',
-                        border: '1px solid rgba(245,158,11,0.25)',
+            {dataReady ? <PlatformChecksCard role={role} /> : null}
+
+            {role === 'supplier' && accountAddress ? (
+                <SupplierProfileSection
+                    accountAddress={accountAddress}
+                    appId={appId}
+                    settledCount={supplierIdentityCounts.settled}
+                    disputedCount={supplierIdentityCounts.disputed}
+                    passportAsa={passportAsa}
+                    passportMinting={passportMinting}
+                    pendingAlgo={supplierPendingAlgo}
+                    frozenAlgo={supplierFrozenAlgo}
+                    receivedAlgo={supplierReceivedAlgo}
+                    onMintPassport={async () => {
+                        if (!accountAddress) return;
+                        setPassportMinting(true);
+                        const result = await mintSupplierPassport(accountAddress);
+                        if (result.asaId) {
+                            try {
+                                sessionStorage.setItem(`navi_passport_asa_${accountAddress}`, result.asaId);
+                            } catch {
+                                /* ignore */
+                            }
+                            setPassportAsa(result.asaId);
+                        }
+                        if (result.message) setToast(result.message);
+                        if (result.error) setToast(result.error);
+                        setPassportMinting(false);
                     }}
-                >
-                    <div style={{ fontSize: '0.65rem', fontWeight: 800, letterSpacing: '0.12em', color: '#f59e0b', marginBottom: 10 }}>
-                        SUPPLIER IDENTITY
-                    </div>
-                    <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: '0.85rem', color: '#e2e8f0', marginBottom: 16, wordBreak: 'break-all' }}>
-                        {accountAddress.slice(0, 8)}…{accountAddress.slice(-6)}
-                    </div>
-                    <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#cbd5e1', marginBottom: 8 }}>On-chain reputation score</div>
-                    {supplierRepLoading ? (
-                        <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginBottom: 12 }}>Loading from indexer…</div>
-                    ) : typeof supplierRep?.score === 'number' ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-                            <div
-                                style={{
-                                    flex: 1,
-                                    height: 10,
-                                    borderRadius: 5,
-                                    background: 'rgba(30,41,59,0.9)',
-                                    overflow: 'hidden',
-                                }}
-                            >
-                                <div
-                                    style={{
-                                        width: `${Math.min(100, supplierRep.score)}%`,
-                                        height: '100%',
-                                        borderRadius: 5,
-                                        background:
-                                            supplierRep.score >= 70
-                                                ? '#22c55e'
-                                                : supplierRep.score >= 40
-                                                  ? '#f59e0b'
-                                                  : '#ef4444',
-                                    }}
-                                />
-                            </div>
-                            <span
-                                style={{
-                                    fontWeight: 800,
-                                    fontSize: '1.1rem',
-                                    color:
-                                        supplierRep.score >= 70 ? '#4ade80' : supplierRep.score >= 40 ? '#fbbf24' : '#f87171',
-                                }}
-                            >
-                                {supplierRep.score} / 100
-                            </span>
-                        </div>
-                    ) : (
-                        <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginBottom: 12, lineHeight: 1.5 }}>
-                            No reputation box on-chain for this wallet yet (normal until a settlement updates it).{' '}
-                            {supplierRep?.source === 'no_app' || !appId
-                                ? 'Set APP_ID in the API .env and restart the server to read live boxes.'
-                                : null}
-                        </div>
-                    )}
-                    <div style={{ fontSize: '0.72rem', color: '#64748b', marginBottom: 12 }}>
-                        {supplierRep?.source === 'algorand_box_storage'
-                            ? 'Verified on Algorand'
-                            : typeof supplierRep?.score === 'number'
-                              ? 'Default score — no on-chain reputation box yet'
-                              : null}
-                    </div>
-                    <div style={{ marginTop: 14, fontSize: '0.78rem', color: '#94a3b8' }}>
-                        Completed deliveries: <strong style={{ color: '#e2e8f0' }}>{supplierIdentityCounts.settled}</strong>
-                        {' · '}
-                        Disputes: <strong style={{ color: '#fecaca' }}>{supplierIdentityCounts.disputed}</strong>
-                    </div>
-                    <div
-                        style={{
-                            marginTop: 16,
-                            borderTop: '1px solid rgba(148,163,184,0.2)',
-                            paddingTop: 14,
-                        }}
-                    >
-                        <div
-                            style={{
-                                fontSize: '0.65rem',
-                                fontWeight: 800,
-                                letterSpacing: '0.1em',
-                                color: '#38bdf8',
-                                marginBottom: 8,
-                            }}
-                        >
-                            ON-CHAIN PASSPORT · ARC-69
-                        </div>
-                        <p style={{ fontSize: '0.72rem', color: '#64748b', margin: '0 0 12px', lineHeight: 1.5 }}>
-                            <strong style={{ color: '#94a3b8' }}>Shipments</strong> are registered by the <strong style={{ color: '#e2e8f0' }}>oracle</strong> (not your wallet).
-                            This button mints a separate <strong style={{ color: '#e2e8f0' }}>Exporter Passport</strong> (reputation ASA) so buyers can verify your supplier profile on Lora — like a digital business card on Algorand.
-                        </p>
-                        {passportAsa ? (
-                            <div>
-                                <p style={{ fontSize: '0.82rem', color: '#e2e8f0', margin: '0 0 8px', lineHeight: 1.45 }}>
-                                    Exporter Passport · ASA <strong style={{ fontFamily: 'ui-monospace, monospace' }}>{passportAsa}</strong>
-                                </p>
-                                <a
-                                    href={loraAssetUrl(passportAsa)}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    style={{ color: 'var(--accent)', fontWeight: 600, fontSize: '0.82rem' }}
-                                >
-                                    Open passport on Lora (ARC-69 metadata) ↗
-                                </a>
-                                <p style={{ fontSize: '0.72rem', color: '#64748b', margin: '8px 0 0', lineHeight: 1.45 }}>
-                                    On Lora, use the <strong style={{ color: '#94a3b8' }}>ARC-69</strong> tab to read JSON traits — proof the asset came from this app, not a screenshot.
-                                </p>
-                            </div>
-                        ) : (
-                            <div>
-                                <p style={{ fontSize: '0.75rem', color: '#94a3b8', margin: '0 0 10px', lineHeight: 1.45 }}>
-                                    One-click mint: oracle pays fees and transfers the ASA to your wallet. Opt in to the asset in Pera if prompted, then refresh this page.
-                                </p>
-                                <button
-                                    type="button"
-                                    className="primary-btn"
-                                    disabled={passportMinting}
-                                    onClick={async () => {
-                                        if (!accountAddress) return;
-                                        setPassportMinting(true);
-                                        try {
-                                            const r = await axios.post<{ passport_asa_id?: number | null; message?: string }>(
-                                                `${BACKEND_URL}/mint-supplier-passport`,
-                                                { supplier_address: accountAddress },
-                                                { timeout: 45_000 },
-                                            );
-                                            const id = r.data?.passport_asa_id;
-                                            if (id != null && id > 0) {
-                                                const s = String(id);
-                                                try {
-                                                    sessionStorage.setItem(`navi_passport_asa_${accountAddress}`, s);
-                                                } catch {
-                                                    /* ignore */
-                                                }
-                                                setPassportAsa(s);
-                                                setToast(r.data?.message || 'Supplier Passport minted.');
-                                            } else {
-                                                setToast(r.data?.message || 'Mint submitted — check API logs if ASA id missing.');
-                                            }
-                                        } catch (err: unknown) {
-                                            const detail = axios.isAxiosError(err) ? err.response?.data : undefined;
-                                            let msg = 'Mint failed (API needs ORACLE_MNEMONIC and oracle gas).';
-                                            if (detail && typeof detail === 'object' && 'detail' in detail) {
-                                                const d = (detail as { detail?: unknown }).detail;
-                                                if (typeof d === 'string') msg = d;
-                                                else if (Array.isArray(d))
-                                                    msg = d.map((x: { msg?: string }) => x.msg || '').filter(Boolean).join(' ') || msg;
-                                            }
-                                            setToast(msg);
-                                        } finally {
-                                            setPassportMinting(false);
-                                        }
-                                    }}
-                                >
-                                    {passportMinting ? 'Minting…' : 'Mint Exporter Passport'}
-                                </button>
-                            </div>
-                        )}
-                    </div>
-                    <LoraVerificationGuide variant="compact" />
-                </section>
+                />
             ) : null}
 
-            {/* ── Last transaction + confirming state ───────── */}
-            {(confirmingTxLabel || lastConfirmedTx) && (
-                <div
-                    className="card dash-tx-banner"
-                    style={{
-                        marginTop: 16,
-                        marginBottom: 8,
-                        padding: 16,
-                        background: 'rgba(15,23,42,0.78)',
-                        border: '1px solid rgba(148,163,184,0.35)',
-                    }}
-                >
-                    {confirmingTxLabel ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                            <span className="blink-dot" />
-                            <div>
-                                <div style={{ fontWeight: 700, color: '#f1f5f9', fontSize: '0.9rem' }}>Waiting for confirmation…</div>
-                                <div style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: 4 }}>{confirmingTxLabel}</div>
-                            </div>
-                        </div>
-                    ) : lastConfirmedTx ? (
-                        <div>
-                            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
-                                <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-                                    <CheckCircle size={22} color="#34d399" style={{ flexShrink: 0, marginTop: 2 }} />
-                                    <div>
-                                        <div style={{ fontSize: '0.65rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                                            Confirmed on-chain
-                                        </div>
-                                        <div style={{ fontWeight: 700, color: '#f8fafc', marginTop: 4, fontSize: '0.95rem' }}>{lastConfirmedTx.label}</div>
-                                        {lastConfirmedTx.amountMicro != null ? (
-                                            <div style={{ fontSize: '1.2rem', fontWeight: 700, color: '#e2e8f0', marginTop: 6 }}>
-                                                {(lastConfirmedTx.amountMicro / 1e6).toFixed(4)}{' '}
-                                                <span style={{ fontSize: '0.85rem', fontWeight: 500, color: '#94a3b8' }}>ALGO</span>
-                                            </div>
-                                        ) : null}
-                                    </div>
-                                </div>
-                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-                                    <a
-                                        href={loraTransactionUrl(lastConfirmedTx.txId)}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        style={{
-                                            display: 'inline-flex',
-                                            alignItems: 'center',
-                                            gap: 4,
-                                            textDecoration: 'none',
-                                            fontSize: '0.78rem',
-                                            fontWeight: 600,
-                                            color: '#7dd3fc',
-                                            padding: '4px 0',
-                                            whiteSpace: 'nowrap',
-                                        }}
-                                    >
-                                        View on Lora ↗
-                                    </a>
-                                    <button
-                                        type="button"
-                                        className="primary-btn"
-                                        style={{ background: '#475569', fontSize: '0.78rem', padding: '8px 12px' }}
-                                        onClick={() => {
-                                            void navigator.clipboard.writeText(lastConfirmedTx.txId);
-                                            setToast('Transaction ID copied.');
-                                        }}
-                                    >
-                                        <ClipboardCopy size={14} style={{ marginRight: 6, verticalAlign: 'middle' }} />
-                                        Copy tx id
-                                    </button>
-                                </div>
-                            </div>
-                            <div
-                                style={{
-                                    marginTop: 14,
-                                    paddingTop: 12,
-                                    borderTop: '1px solid rgba(148,163,184,0.2)',
-                                    display: 'grid',
-                                    gap: 6,
-                                    fontSize: '0.78rem',
-                                    color: '#cbd5e1',
-                                }}
-                            >
-                                <div>
-                                    <span style={{ color: '#64748b' }}>Transaction</span>{' '}
-                                    <span style={{ color: '#e2e8f0', fontFamily: 'ui-monospace, monospace' }}>{shortTxId(lastConfirmedTx.txId)}</span>
-                                </div>
-                                <div>
-                                    <span style={{ color: '#64748b' }}>Status</span>{' '}
-                                    <span style={{ color: '#6ee7b7', fontWeight: 600 }}>Confirmed</span>
-                                    {lastConfirmedTx.round != null ? (
-                                        <span style={{ color: '#64748b' }}>{' · '}Round {lastConfirmedTx.round}</span>
-                                    ) : null}
-                                </div>
-                                <div>
-                                    <span style={{ color: '#64748b' }}>Time</span>{' '}
-                                    {new Date(lastConfirmedTx.timestamp).toLocaleString()}
-                                </div>
-                            </div>
-                        </div>
-                    ) : null}
-                </div>
-            )}
-
-            {/* ── Four stat cards + recent on-chain activity ──────────────── */}
-            {isLoading ? (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginTop: 16 }}>
-                    {[0, 1, 2, 3].map(i => (
-                        <div key={i} className="skeleton-card">
-                            <div className="skeleton skeleton-text" style={{ width: '55%' }} />
-                            <div className="skeleton skeleton-text-lg" style={{ marginTop: 10 }} />
-                        </div>
-                    ))}
-                </div>
-            ) : role === 'stakeholder' ? (
+            {/* ── KPI cards ──────────────── */}
+            {role === 'stakeholder' && dataReady ? (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginTop: 16 }}>
                     <div className="card" style={{ padding: '14px 18px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
@@ -1491,7 +1180,7 @@ function MainApp() {
                     </div>
                     <div className="card" style={{ padding: '14px 18px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                            <Lock size={15} color={Number(stats.escrow_total_algo) > 0 ? '#f59e0b' : '#94a3b8'} />
+                            <Lock size={15} color={Number(stats.escrow_total_algo) > 0 ? 'var(--accent)' : 'var(--muted)'} />
                             <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Locked escrow</span>
                         </div>
                         <div
@@ -1499,7 +1188,7 @@ function MainApp() {
                             style={{
                                 fontSize: '1.65rem',
                                 fontWeight: 700,
-                                color: Number(stats.escrow_total_algo) > 0 ? '#fbbf24' : '#94a3b8',
+                                color: Number(stats.escrow_total_algo) > 0 ? 'var(--accent)' : 'var(--muted)',
                             }}
                         >
                             {stats.escrow_total_algo != null ? `${Number(stats.escrow_total_algo).toFixed(4)}` : '—'}
@@ -1510,7 +1199,7 @@ function MainApp() {
                     </div>
                     <div className="card" style={{ padding: '14px 18px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                            <AlertTriangle size={15} color={(stats.total_disputed ?? 0) > 0 ? '#f87171' : '#94a3b8'} />
+                            <AlertTriangle size={15} color={(stats.total_disputed ?? 0) > 0 ? 'var(--danger)' : 'var(--muted)'} />
                             <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Disputed</span>
                         </div>
                         <div
@@ -1518,7 +1207,7 @@ function MainApp() {
                             style={{
                                 fontSize: '1.65rem',
                                 fontWeight: 700,
-                                color: (stats.total_disputed ?? 0) > 0 ? '#f87171' : '#e2e8f0',
+                                color: (stats.total_disputed ?? 0) > 0 ? 'var(--danger)' : 'var(--muted)',
                             }}
                         >
                             {String(stats.total_disputed ?? 0)}
@@ -1544,80 +1233,26 @@ function MainApp() {
                         )}
                     </div>
                 </div>
-            ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginTop: 16 }}>
-                    <div className="card" style={{ padding: '14px 18px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                            <Coins size={15} color="#38bdf8" />
-                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Pending payments</span>
-                        </div>
-                        <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700 }}>
-                            {supplierPendingAlgo != null ? `${supplierPendingAlgo.toFixed(4)} ALGO` : '—'}
-                        </div>
-                    </div>
-                    <div className="card" style={{ padding: '14px 18px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                            <AlertTriangle size={15} color="#f87171" />
-                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Frozen payments</span>
-                        </div>
-                        <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700, color: supplierFrozenAlgo > 0 ? '#f87171' : '#94a3b8' }}>
-                            {supplierFrozenAlgo > 0 ? `${supplierFrozenAlgo.toFixed(4)} ALGO frozen` : '—'}
-                        </div>
-                    </div>
-                    <div className="card" style={{ padding: '14px 18px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                            <CheckCircle size={15} color="#059669" />
-                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Received (settled)</span>
-                        </div>
-                        <div className="dash-kpi-num" style={{ fontSize: '1.65rem', fontWeight: 700, color: '#4ade80' }}>
-                            {supplierReceivedAlgo > 0 ? `${supplierReceivedAlgo.toFixed(4)} ALGO` : '—'}
-                        </div>
-                    </div>
-                    <div className="card" style={{ padding: '14px 18px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                            <Activity size={15} color="#f59e0b" />
-                            <span className="dash-kpi-label" style={{ fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Reputation score</span>
-                        </div>
-                        <div
-                            className="dash-kpi-num"
-                            style={{
-                                fontSize: '1.65rem',
-                                fontWeight: 700,
-                                color:
-                                    typeof supplierRep?.score === 'number'
-                                        ? supplierRep.score >= 70
-                                            ? '#4ade80'
-                                            : supplierRep.score >= 40
-                                              ? '#fbbf24'
-                                              : '#f87171'
-                                        : '#94a3b8',
-                            }}
-                        >
-                            {supplierRepLoading ? '…' : typeof supplierRep?.score === 'number' ? supplierRep.score : '—'}
-                        </div>
-                    </div>
-                </div>
-            )}
+            ) : null}
 
             {!isLoading && stats.escrow_total_algo != null && role === 'stakeholder' ? (
                 <div
+                    className="dash-alert"
                     style={{
                         marginTop: 12,
-                        padding: '10px 14px',
-                        borderRadius: 10,
-                        background: 'rgba(15,23,42,0.45)',
-                        border: '1px solid rgba(148,163,184,0.2)',
+                        background: 'var(--bg-raised)',
+                        border: '1px solid var(--border)',
                         fontSize: '0.82rem',
-                        color: '#cbd5e1',
+                        color: 'var(--muted)',
                         display: 'flex',
                         flexWrap: 'wrap',
                         alignItems: 'center',
                         gap: 8,
                     }}
                 >
-                    <Coins size={15} color="#38bdf8" style={{ flexShrink: 0 }} />
+                    <Coins size={15} color="var(--accent)" style={{ flexShrink: 0 }} />
                     <span>
-                        Contract holds <strong style={{ color: '#f1f5f9' }}>{stats.escrow_total_algo.toFixed(4)} ALGO (crypto)</strong>
+                        Contract holds <strong style={{ color: '#111' }}>{stats.escrow_total_algo.toFixed(4)} ALGO</strong>
                         <AlgoEscrowHint size={12} />
                     </span>
                     {(stats.lora_contract_url || stats.lora_contract_account_url) && (
@@ -1633,78 +1268,7 @@ function MainApp() {
                 </div>
             ) : null}
 
-            <section className="card" style={{ marginTop: 16, padding: '16px 18px' }} aria-label="Recent activity">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                    <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>Transaction feed</div>
-                    {liveWsConnected ? (
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: '0.68rem', fontWeight: 700, color: '#4ade80' }}>
-                            <span
-                                style={{
-                                    width: 8,
-                                    height: 8,
-                                    borderRadius: '50%',
-                                    background: '#22c55e',
-                                    animation: 'pulse 1.5s ease-in-out infinite',
-                                }}
-                            />
-                            LIVE
-                        </span>
-                    ) : (
-                        <span style={{ fontSize: '0.68rem', color: '#94a3b8' }}>Polling every 30s</span>
-                    )}
-                </div>
-                <div style={{ fontSize: '0.72rem', color: '#64748b', marginBottom: 12 }}>
-                    Real-time contract activity. Open proof links in Lora for any row.
-                </div>
-                {isLoading ? (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: '0.85rem', color: '#94a3b8' }}>
-                        <div
-                            style={{
-                                width: 20,
-                                height: 20,
-                                borderRadius: '50%',
-                                border: '2px solid rgba(125,211,252,0.25)',
-                                borderTopColor: '#7dd3fc',
-                                animation: 'spin 0.8s linear infinite',
-                            }}
-                        />
-                        Loading from Algorand…
-                    </div>
-                ) : recentTxns.length === 0 ? (
-                    <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: 0 }}>No recent transactions yet.</p>
-                ) : (
-                    <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                        {recentTxns.map((t) => (
-                            <li
-                                key={t.tx_id ?? `tx-${t.round}`}
-                                style={{
-                                    display: 'flex',
-                                    flexWrap: 'wrap',
-                                    alignItems: 'center',
-                                    justifyContent: 'space-between',
-                                    gap: 8,
-                                    fontSize: '0.82rem',
-                                    color: '#cbd5e1',
-                                }}
-                            >
-                                <span>{t.action || t.action_plain || t.method_name || 'Transaction'}</span>
-                                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                    {t.lora_url && t.tx_id ? (
-                                        <a href={t.lora_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', fontSize: '0.75rem', fontWeight: 600 }}>
-                                            Lora ↗
-                                        </a>
-                                    ) : null}
-                                    <span style={{ color: '#64748b' }}>
-                                        {t.timestamp ? timeAgo(t.timestamp) : t.round != null ? `Round ${t.round}` : '—'}
-                                    </span>
-                                </span>
-                            </li>
-                        ))}
-                    </ul>
-                )}
-            </section>
-
-            {!isLoading ? <JuryRiskHistoryChart /> : null}
+            {accountAddress ? <JuryRiskHistoryChart /> : null}
 
             {!isLoading && role === 'stakeholder' && focusVaultShip && (
                 <section className="card" style={{ marginTop: 16, padding: '18px 20px' }} aria-label="Escrow for selected shipment">
@@ -1813,54 +1377,28 @@ function MainApp() {
                 </section>
             )}
 
-            {/* ── SHIPMENT CARDS (or Skeleton) ─────────────── */}
-            {isLoading ? (
-                <div className="grid">
-                    {[0, 1, 2].map(i => (
-                        <div key={i} className="skeleton-card">
-                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-                                <div>
-                                    <div className="skeleton skeleton-text" style={{ width: 120 }} />
-                                    <div className="skeleton skeleton-text" style={{ width: 200, marginTop: 6 }} />
-                                </div>
-                                <div className="skeleton" style={{ width: 80, height: 24, borderRadius: 20 }} />
-                            </div>
-                            <div style={{ display: 'flex', gap: 24, marginBottom: 16 }}>
-                                <div className="skeleton skeleton-text" style={{ width: 100 }} />
-                                <div className="skeleton skeleton-text" style={{ width: 70 }} />
-                                <div className="skeleton skeleton-text" style={{ width: 50 }} />
-                            </div>
-                            <div className="skeleton skeleton-text" style={{ width: '90%' }} />
-                            <div className="skeleton skeleton-text" style={{ width: '75%' }} />
-                            <div style={{ borderTop: '1px solid #f3f4f6', paddingTop: 12, marginTop: 14, display: 'flex', gap: 8 }}>
-                                <div className="skeleton" style={{ height: 34, flex: 1, borderRadius: 6 }} />
-                                <div className="skeleton" style={{ height: 34, width: 90, borderRadius: 6 }} />
-                            </div>
-                        </div>
-                    ))}
+            {!isLoading && displayedShipments.length > 0 ? (
+                <div className="dash-section-head">
+                    <h2 className="dash-section-title">
+                        {role === 'supplier' ? 'Your export corridors' : 'Registered export corridors'}
+                    </h2>
+                    <p className="dash-section-sub">
+                        Each card is one deal: route, escrow, weather, GST e-way check, and jury — not your supplier profile above.
+                    </p>
                 </div>
-            ) : (
+            ) : null}
+
+            {/* ── SHIPMENT CARDS ─────────────── */}
+            {dataReady ? (
             <div className="grid">
                 {displayedShipments.length === 0 ? (
-                    <div
-                        className="card"
-                        style={{
-                            gridColumn: '1 / -1',
-                            padding: '28px 22px',
-                            background: 'rgba(15,23,42,0.35)',
-                            border: '1px solid rgba(148,163,184,0.25)',
-                            textAlign: 'center',
-                        }}
-                    >
-                        <Package size={32} color="#38bdf8" style={{ marginBottom: 12 }} />
-                        <div style={{ fontWeight: 700, fontSize: '1rem', color: '#f1f5f9', marginBottom: 8 }}>No shipments registered yet.</div>
-                        <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: '0 0 18px', maxWidth: 520, marginLeft: 'auto', marginRight: 'auto' }}>
-                            Use <strong style={{ color: '#e2e8f0' }}>Register shipment</strong> in the header (oracle signs on the server), or run{' '}
-                            <code style={{ color: '#e2e8f0' }}>python seed_blockchain.py</code> with a funded oracle. The API must be on port 8000.{' '}
-                            <Link to="/verify" style={{ color: 'var(--accent)', fontWeight: 600 }}>
-                                Verify by shipment ID
-                            </Link>
-                            .
+                    <div className="card dash-empty-corridors">
+                        <Package size={32} color="var(--accent)" style={{ marginBottom: 12 }} />
+                        <div className="dash-empty-corridors__title">No corridors registered yet</div>
+                        <p className="dash-empty-corridors__copy">
+                            Connect Pera Wallet, then <strong>Register shipment</strong>. After on-chain registration, deposit ALGO on
+                            the new corridor card — your live journey tracker updates automatically.{' '}
+                            <Link to="/verify">Verify by reference ID</Link>.
                         </p>
                         <button type="button" className="primary-btn" onClick={() => setRegisterModal(true)}>
                             Register shipment
@@ -1898,7 +1436,8 @@ function MainApp() {
                     return (
                         <div
                             key={ship.shipment_id}
-                            className={`card${cardFlagged ? ' card-flagged' : ''}${cardDisputedPulse ? ' card-disputed' : ''}`}
+                            id={`corridor-${ship.shipment_id}`}
+                            className={`card${cardFlagged ? ' card-flagged' : ''}${cardDisputedPulse ? ' card-disputed' : ''}${highlightShipmentId === ship.shipment_id ? ' corridor-card--highlight' : ''}`}
                             style={{ textAlign: 'left', borderLeft: cardAccentBorder(ship.stage) }}
                         >
                             {terminalOpen ? (
@@ -1922,15 +1461,19 @@ function MainApp() {
                             ) : null}
                             {terminalOpen ? null : (
                             <>
+                            <span className="corridor-card__tag">Export corridor</span>
                             {/* Header */}
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
                                 <div>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                        <Package size={15} color="#2563eb" />
-                                        <span style={{ fontSize: '0.95rem', fontWeight: 700, color: '#f1f5f9' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                        <Package size={15} color="var(--accent)" />
+                                        <span className="corridor-card__title">
                                             {shipmentDisplayTitle(ship)}
                                         </span>
                                     </div>
+                                    {ship.commodity ? (
+                                        <p className="corridor-card__commodity">{ship.commodity}</p>
+                                    ) : null}
                                     <div style={{ fontSize: '0.68rem', color: '#64748b', marginTop: 4 }}>
                                         <button
                                             type="button"
@@ -1975,6 +1518,12 @@ function MainApp() {
                                     </div>
                                 </div>
                             </div>
+
+                            <ComplianceChecksStrip
+                                shipmentId={ship.shipment_id}
+                                auditor={jury?.auditor}
+                                sentinel={jury?.sentinel}
+                            />
 
                             {cardFlagged ? (
                                 <div
@@ -2154,15 +1703,13 @@ function MainApp() {
                                 </div>
                             ) : null}
 
-                            {role === 'stakeholder' && typeof ship.supplier_reputation_score === 'number' ? (
-                                <div style={{ fontSize: '0.75rem', color: '#475569', marginBottom: 8 }}>
-                                    Supplier reputation:{' '}
-                                    <strong>{ship.supplier_reputation_score}</strong>/100
-                                    {ship.supplier_reputation_source === 'algorand_box_storage' ? (
-                                        <span style={{ color: '#15803d', marginLeft: 6 }}>(Verified on Algorand)</span>
-                                    ) : (
-                                        <span style={{ color: '#64748b', marginLeft: 6 }}>(Default — no deliveries recorded on-chain yet)</span>
-                                    )}
+                            {role === 'stakeholder' &&
+                            ship.supplier_reputation_source === 'algorand_box_storage' &&
+                            typeof ship.supplier_reputation_score === 'number' ? (
+                                <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: 8 }}>
+                                    Supplier trust score:{' '}
+                                    <strong style={{ color: '#111' }}>{ship.supplier_reputation_score}</strong>/100
+                                    <span style={{ color: 'var(--success)', marginLeft: 6 }}>(on-chain)</span>
                                 </div>
                             ) : null}
 
@@ -2600,7 +2147,7 @@ function MainApp() {
                     );
                 })}
             </div>
-            )}
+            ) : null}
 
             </div>
 
@@ -2809,6 +2356,7 @@ function MainApp() {
                 onClose={() => setRegisterModal(false)}
                 busy={registerBusy}
                 accountAddress={accountAddress}
+                onConnectWallet={handleConnectWallet}
                 onSubmit={(form) => void handleRegisterShipment(form)}
             />
 
@@ -2997,14 +2545,17 @@ function MainApp() {
                 </div>
             )}
 
-            <footer className="dash-footer">
-                <span className="dash-footer-brand">Pramanik</span>
-                <nav className="dash-footer-nav" aria-label="Footer">
-                    <Link to="/verify">🔍 Verify</Link>
-                    <Link to="/protocol">Protocol</Link>
-                    <Link to="/pramanik-bot">Pramanik Bot</Link>
-                </nav>
+            <footer className="dash-footer dash-footer--minimal">
+                <span className="dash-footer-brand">pramanik</span>
+                <span className="dash-footer-meta">Algorand Testnet · {new Date().getFullYear()}</span>
             </footer>
+
+            <FloatingAssistantWidget
+                walletAddress={accountAddress}
+                shipmentId={selectedShipment?.shipment_id ?? focusVaultShip?.shipment_id ?? null}
+                role={role}
+                onRequestRunJury={(sid) => setJuryTerminalShipmentId(sid)}
+            />
 
         </div>
         </div>
@@ -3019,8 +2570,9 @@ export default function App() {
                 <Route path="/verify/:shipmentId" element={<VerifyPage />} />
                 <Route path="/verify" element={<VerifyPage />} />
                 <Route path="/protocol" element={<ProtocolPage />} />
-                <Route path="/pramanik-bot" element={<PramanikAssistantPage />} />
-                <Route path="/navibot" element={<Navigate to="/pramanik-bot" replace />} />
+                <Route path="/activity" element={<TransactionFeedPage />} />
+                <Route path="/pramanik-bot" element={<Navigate to="/" replace />} />
+                <Route path="/navibot" element={<Navigate to="/" replace />} />
                 <Route path="/" element={<MainApp />} />
             </Routes>
         </WalletProvider>

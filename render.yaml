@@ -1,14 +1,49 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Deploy: Dashboard → New → Blueprint → connect this repo, or merge render.yaml on main.
+#
+# After deploy, set secrets in Render Dashboard (never commit real values):
+#   ORACLE_MNEMONIC, GEMINI_API_KEY, TELEGRAM_* (optional)
+
 services:
   - type: web
-    name: navi-trust-api
-    env: python
+    name: pramanik-api
+    runtime: python
+    plan: free
+    region: singapore
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
     envVars:
-      - key: SKIP_ORACLE_VERIFY
-        value: "0"
-      # Set to your deployed NaviTrust application id (same as backend APP_ID).
+      - key: PYTHON_VERSION
+        value: "3.11.9"
       - key: APP_ID
-        value: "0"
+        value: "759052600"
       - key: ALGO_NETWORK
         value: testnet
+      - key: ALGOD_ADDRESS
+        value: https://testnet-api.algonode.cloud
+      - key: INDEXER_URL
+        value: https://testnet-idx.algonode.cloud
+      - key: LORA_BASE_URL
+        value: https://lora.algokit.io/testnet
+      - key: SKIP_ORACLE_VERIFY
+        value: "0"
+      - key: AUTO_SEED_DEMO
+        value: "0"
+      - key: AUTO_JURY_ENABLED
+        value: "0"
+      - key: SEED_MIN_ORACLE_MICRO
+        value: "2000000"
+      # Set after Vercel deploy (your exact production URL, no trailing slash):
+      - key: CORS_EXTRA_ORIGINS
+        sync: false
+      - key: VERIFY_PUBLIC_BASE_URL
+        sync: false
+      - key: ORACLE_MNEMONIC
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_IDS
+        sync: false

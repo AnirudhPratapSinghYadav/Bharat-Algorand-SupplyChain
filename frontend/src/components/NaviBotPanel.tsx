@@ -3,12 +3,13 @@
  */
 import { PRAMANIK_BOT_NAME } from '../constants/branding';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
-import { Bot, MessageSquare, X, Play, ExternalLink, Mic } from 'lucide-react';
+import { Bot, MessageSquare, X, Play, ExternalLink } from 'lucide-react';
 import { askNavibot } from '../api';
 import { BACKEND_URL } from '../constants/api';
+import { ASSISTANT_STARTER_QUESTIONS, matchAssistantFaq } from '../lib/assistantFaq';
 import './navibot.css';
 
 type Role = 'stakeholder' | 'supplier';
@@ -23,6 +24,8 @@ type Props = {
   onClose?: () => void;
   defaultOpen?: boolean;
   variant?: 'fixed' | 'inline';
+  /** Inside floating widget — compact chrome, no duplicate voice promo */
+  embedded?: boolean;
   role?: Role;
   onRequestRunJury?: (shipmentId: string) => void;
 };
@@ -45,15 +48,8 @@ function buildGreeting(
   if (role === 'supplier') {
     return `Your on-chain reputation drives settlement release.\nActive lanes: ${corridor}.\nAsk about escrow status or open Verify for a public proof link.`;
   }
-  return `Live corridors: ${corridor}.\nOpen an in-transit shipment and tap Request Settlement Review for a recorded verdict with a Lora proof link.\nFor voice, open ${PRAMANIK_BOT_NAME} (ElevenLabs).`;
+  return `Live corridors: ${corridor}.\nOpen an in-transit shipment and tap Request Settlement Review for a recorded verdict with a Lora proof link.\nUse the Voice tab in the assistant if your server has ElevenLabs configured.`;
 }
-
-const QUICK_PILLS = [
-  'Why is Chennai frozen?',
-  'How does the 4-agent jury work?',
-  'What is a jury hash?',
-  'How much ALGO is at stake?',
-];
 
 export function NaviBotPanel({
   shipmentId,
@@ -61,6 +57,7 @@ export function NaviBotPanel({
   onClose,
   defaultOpen = true,
   variant = 'fixed',
+  embedded = false,
   role = 'stakeholder',
   onRequestRunJury,
 }: Props) {
@@ -120,9 +117,17 @@ export function NaviBotPanel({
           wallet_address: walletAddress?.trim() || readWallet(),
           role,
         });
-        const reply =
+        let reply =
           (res.text || res.reply || '').trim() ||
           'Here is what I can share: check the dashboard cards for live escrow and shipment status.';
+        const genericFallback =
+          reply.startsWith('Try:') ||
+          reply.includes('how does escrow work · supplier vs shipment') ||
+          res.fallback === true;
+        if (genericFallback) {
+          const local = matchAssistantFaq(text);
+          if (local) reply = local;
+        }
         setLines((prev) => [...prev, { role: 'assistant' as const, text: reply, at: Date.now() }].slice(-MAX_MESSAGES));
         const act = res.action;
         const sid = (res.shipment_id || '').trim();
@@ -130,12 +135,15 @@ export function NaviBotPanel({
           setSuggest({ action: act, shipmentId: sid });
         }
       } catch {
+        const local = matchAssistantFaq(text);
         setLines((prev) =>
           [
             ...prev,
             {
               role: 'assistant' as const,
-              text: 'Request timed out or the server was busy. Please try again in a moment.',
+              text:
+                local ||
+                'The server is not reachable right now. Start the API on port 8000, or try one of the suggested questions below.',
               at: Date.now(),
             },
           ].slice(-MAX_MESSAGES),
@@ -177,36 +185,38 @@ export function NaviBotPanel({
   const fixed = variant === 'fixed';
   const showQuickPills = !lines.some((l) => l.role === 'user');
 
+  const panelClass = [
+    'navibot-panel',
+    fixed ? 'navibot-panel--fixed' : 'navibot-panel--inline',
+    embedded ? 'navibot-panel--embedded' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
   return (
-    <aside
-      className={fixed ? 'navibot-panel navibot-panel--fixed' : 'navibot-panel navibot-panel--inline'}
-      aria-label={`${PRAMANIK_BOT_NAME} chat`}
-    >
-      <header className="navibot-panel__head">
-        <div className="navibot-panel__title">
-          <Bot size={20} className="navibot-panel__icon" />
-          <div>
-            <div className="navibot-panel__name">{PRAMANIK_BOT_NAME}</div>
-            <div className="navibot-panel__sub">
-              Text Q&amp;A ·{' '}
-              <Link to="/pramanik-bot" style={{ color: 'var(--accent)', fontWeight: 600 }}>
-                <Mic size={12} style={{ verticalAlign: 'middle' }} /> Voice agent
-              </Link>
+    <aside className={panelClass} aria-label={`${PRAMANIK_BOT_NAME} chat`}>
+      {!embedded ? (
+        <header className="navibot-panel__head">
+          <div className="navibot-panel__title">
+            <Bot size={20} className="navibot-panel__icon" />
+            <div>
+              <div className="navibot-panel__name">{PRAMANIK_BOT_NAME}</div>
+              <div className="navibot-panel__sub">Text Q&amp;A · escrow, jury, GST checks</div>
             </div>
           </div>
-        </div>
-        <button
-          type="button"
-          className="navibot-panel__close"
-          onClick={() => {
-            setOpen(false);
-            onClose?.();
-          }}
-          aria-label="Close"
-        >
-          <X size={18} />
-        </button>
-      </header>
+          <button
+            type="button"
+            className="navibot-panel__close"
+            onClick={() => {
+              setOpen(false);
+              onClose?.();
+            }}
+            aria-label="Close"
+          >
+            <X size={18} />
+          </button>
+        </header>
+      ) : null}
 
       <div ref={listRef} className="navibot-panel__messages">
         {lines.map((m, i) => (
@@ -244,7 +254,7 @@ export function NaviBotPanel({
 
       {showQuickPills ? (
         <div className="navibot-panel__pills">
-          {QUICK_PILLS.map((p) => (
+          {ASSISTANT_STARTER_QUESTIONS.map((p) => (
             <button key={p} type="button" className="navibot-pill" disabled={isTyping} onClick={() => void send(p)}>
               {p}
             </button>

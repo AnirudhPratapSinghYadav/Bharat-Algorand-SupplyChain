@@ -56,6 +56,14 @@ body {
   color: var(--text);
 }
 
+/* Original pramanik-landing marketing page (see components/landing/pramanik-landing.css) */
+html:has(.pm-landing),
+body:has(.pm-landing) {
+  background: #faf8f4 !important;
+  color: #1a1a1a !important;
+  color-scheme: light;
+}
+
 #root {
   width: 100%;
 }
@@ -318,18 +326,11 @@ code {
 }
 
 
-/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-   Authenticated dashboard â€” dark â€œmission controlâ€ shell
-   â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+/* Authenticated dashboard shell: theme in styles/pramanik-warm.css (cream/light). */
 
 .dashboard-shell {
   min-height: 100vh;
   padding-bottom: 120px;
-  background:
-    radial-gradient(ellipse 100% 80% at 50% -30%, rgba(99, 102, 241, 0.22), transparent 55%),
-    radial-gradient(ellipse 70% 50% at 100% 50%, rgba(14, 165, 233, 0.08), transparent 45%),
-    linear-gradient(165deg, #070b14 0%, #0f172a 38%, #1a1030 72%, #0a0f1a 100%);
-  color: #cbd5e1;
 }
 
 .dashboard-shell .dashboard-container {
@@ -574,46 +575,7 @@ code {
   color: #e0f2fe;
 }
 
-.dashboard-shell .dash-subtitle {
-  text-align: left;
-  margin-top: 12px;
-  margin-bottom: 0;
-  font-size: 0.875rem;
-  color: #94a3b8;
-}
-
-.dashboard-shell .card {
-  background: linear-gradient(155deg, rgba(30, 41, 59, 0.92), rgba(15, 23, 42, 0.96)) !important;
-  border: 1px solid rgba(148, 163, 184, 0.16) !important;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.04) !important;
-  color: #e2e8f0;
-}
-
-.dashboard-shell .card:hover {
-  box-shadow: 0 16px 48px rgba(56, 189, 248, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
-}
-
-.dashboard-shell .dash-kpi-num {
-  color: #f1f5f9 !important;
-}
-
-.dashboard-shell .dash-kpi-label {
-  color: #94a3b8 !important;
-}
-
-.dashboard-shell .dash-chart-title {
-  color: #f1f5f9 !important;
-}
-
-.dashboard-shell .skeleton-card {
-  background: rgba(30, 41, 59, 0.6) !important;
-  border-color: rgba(148, 163, 184, 0.12) !important;
-}
-
-.dashboard-shell .skeleton {
-  background: linear-gradient(90deg, rgba(51, 65, 85, 0.4) 25%, rgba(71, 85, 105, 0.5) 50%, rgba(51, 65, 85, 0.4) 75%) !important;
-  background-size: 800px 100% !important;
-}
+/* Dashboard shell theming lives in styles/pramanik-warm.css (cream/light). Do not force dark cards here. */
 
 .dashboard-shell .ticker-wrap {
   background: rgba(15, 23, 42, 0.55) !important;
@@ -622,11 +584,7 @@ code {
   padding: 10px 14px;
 }
 
-.dashboard-shell h1,
-.dashboard-shell h2,
-.dashboard-shell h3 {
-  color: #f1f5f9;
-}
+/* Headings on dashboard use pramanik-warm.css (dark ink on light cards). */
 
 .dashboard-shell code {
   background: rgba(15, 23, 42, 0.9);

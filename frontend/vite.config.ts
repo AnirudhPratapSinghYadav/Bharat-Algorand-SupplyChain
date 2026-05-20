@@ -9,10 +9,11 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     build: {
+      chunkSizeWarningLimit: 700,
       rollupOptions: {
         output: {
           manualChunks: {
-            vendor: ['react', 'react-dom'],
+            vendor: ['react', 'react-dom', 'react-router-dom'],
             algorand: ['algosdk', '@algorandfoundation/algokit-utils'],
             charts: ['recharts'],
             wallet: ['@perawallet/connect'],
@@ -44,6 +45,11 @@ export default defineConfig(({ mode }) => {
             const stripped = path.replace(/^\/api/, '')
             return stripped.length > 0 ? stripped : '/'
           },
+        },
+        '/ws': {
+          target: apiTarget.replace(/^http/, 'ws'),
+          ws: true,
+          changeOrigin: true,
         },
       },
     },

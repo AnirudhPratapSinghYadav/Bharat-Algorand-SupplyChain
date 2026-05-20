@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import axios from 'axios';
+import { BACKEND_URL } from '../constants/api';
 
 type ShipmentLike = {
     shipment_id: string;
@@ -20,6 +22,7 @@ const DEFAULT_VERIFY =
 
 export function ShipmentReportActions({ shipment, appId, verifyBaseUrl = DEFAULT_VERIFY }: Props) {
     const [copied, setCopied] = useState(false);
+    const [pdfBusy, setPdfBusy] = useState(false);
 
     const risk =
         typeof shipment.last_jury?.sentinel?.risk_score === 'number' ? shipment.last_jury!.sentinel!.risk_score! : null;
@@ -33,7 +36,27 @@ export function ShipmentReportActions({ shipment, appId, verifyBaseUrl = DEFAULT
               })
             : '';
 
-    async function downloadPDF() {
+    async function downloadServerPDF() {
+        setPdfBusy(true);
+        try {
+            const res = await axios.get(`${BACKEND_URL}/shipments/${encodeURIComponent(shipment.shipment_id)}/pdf`, {
+                responseType: 'blob',
+                timeout: 45_000,
+            });
+            const url = URL.createObjectURL(res.data);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `pramanik_${shipment.shipment_id}_certificate.pdf`;
+            a.click();
+            URL.revokeObjectURL(url);
+        } catch {
+            await downloadClientPDF();
+        } finally {
+            setPdfBusy(false);
+        }
+    }
+
+    async function downloadClientPDF() {
         const { jsPDF } = await import('jspdf');
         const doc = new jsPDF();
         doc.setFontSize(20);
@@ -103,8 +126,14 @@ export function ShipmentReportActions({ shipment, appId, verifyBaseUrl = DEFAULT
 
     return (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
-            <button type="button" className="primary-btn" style={{ fontSize: '0.72rem', padding: '6px 10px' }} onClick={() => void downloadPDF()}>
-                Download report (PDF)
+            <button
+                type="button"
+                className="primary-btn"
+                style={{ fontSize: '0.72rem', padding: '6px 10px' }}
+                disabled={pdfBusy}
+                onClick={() => void downloadServerPDF()}
+            >
+                {pdfBusy ? 'Building PDF…' : 'Download certificate PDF'}
             </button>
             <button
                 type="button"

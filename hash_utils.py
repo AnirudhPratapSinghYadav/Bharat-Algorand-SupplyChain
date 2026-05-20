@@ -12,6 +12,13 @@ import json
 from typing import Any, Optional
 
 
+def safe_int(v: Any) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
 def safe_float(v: Any) -> Optional[float]:
     try:
         f = float(v)
@@ -53,7 +60,7 @@ def compute_jury_hash(
             "city": str(weather.get("city") or ""),
             "precipitation_mm": safe_float(weather.get("precipitation_mm")),
             "wind_kmh": safe_float(weather.get("wind_kmh")),
-            "weather_code": int(weather.get("weather_code") or 0),
+            "weather_code": safe_int(weather.get("weather_code")),
         },
         "agents": {
             "sentinel_risk_score": int(sentinel.get("risk_score") or 0),

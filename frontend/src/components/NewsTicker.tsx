@@ -24,18 +24,7 @@ export function NewsTicker() {
     if (!items.length) return null;
 
     return (
-        <div
-            className="nt-news-ticker"
-            style={{
-                marginBottom: 12,
-                borderRadius: 8,
-                border: '1px solid rgba(56,189,248,0.25)',
-                background: 'rgba(15,23,42,0.55)',
-                display: 'flex',
-                alignItems: 'stretch',
-                minHeight: 36,
-            }}
-        >
+        <div className="nt-news-ticker" style={{ marginBottom: 12, borderRadius: 8, display: 'flex', alignItems: 'stretch', minHeight: 36 }}>
             <span
                 style={{
                     flexShrink: 0,
@@ -43,13 +32,13 @@ export function NewsTicker() {
                     fontSize: '0.65rem',
                     fontWeight: 800,
                     letterSpacing: '0.08em',
-                    color: '#38bdf8',
-                    borderRight: '1px solid rgba(56,189,248,0.2)',
+                    color: 'var(--accent)',
+                    borderRight: '1px solid var(--border)',
                     display: 'flex',
                     alignItems: 'center',
                 }}
             >
-                LIVE
+                NEWS
             </span>
             <div
                 style={{
@@ -57,16 +46,16 @@ export function NewsTicker() {
                     overflowX: 'auto',
                     whiteSpace: 'nowrap',
                     fontSize: '0.78rem',
-                    color: '#cbd5e1',
+                    color: 'var(--muted)',
                     padding: '8px 12px',
                     scrollbarWidth: 'thin',
                 }}
             >
                 {items.map((i, idx) => (
                     <span key={`${i.title}-${idx}`}>
-                        {idx > 0 ? <span style={{ color: '#64748b' }}> · </span> : null}
+                        {idx > 0 ? <span style={{ color: 'var(--dim)' }}> · </span> : null}
                         {i.link ? (
-                            <a href={i.link} target="_blank" rel="noreferrer" style={{ color: '#7dd3fc', textDecoration: 'none' }}>
+                            <a href={i.link} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', textDecoration: 'none' }}>
                                 {i.title}
                             </a>
                         ) : (

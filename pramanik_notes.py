@@ -35,6 +35,24 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _encode_note_dict(note_dict: dict[str, Any]) -> bytes:
+    """Prefer readable JSON for Lora Note tab; fall back to compact under AVM limit."""
+    pretty = json.dumps(note_dict, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    if len(pretty) <= MAX_NOTE_BYTES:
+        return pretty
+    compact = json.dumps(note_dict, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
+    if len(compact) <= MAX_NOTE_BYTES:
+        return compact
+    trimmed = dict(note_dict)
+    for key in ("reasoning", "route", "arc69", "weather", "verdict", "hash", "reason"):
+        if key in trimmed and len(compact) > MAX_NOTE_BYTES:
+            trimmed.pop(key, None)
+            compact = json.dumps(trimmed, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
+    if len(compact) > MAX_NOTE_BYTES:
+        raise ValueError(f"Transaction note exceeds {MAX_NOTE_BYTES} bytes ({len(compact)})")
+    return compact
+
+
 def build_note(event_type: str, shipment_id: str, **extra_fields: Any) -> bytes:
     """
     Build a pramanik/v1 JSON note (UTF-8 bytes). event_type must be in VALID_TYPES (uppercase).
@@ -54,15 +72,7 @@ def build_note(event_type: str, shipment_id: str, **extra_fields: Any) -> bytes:
     for k, v in extra_fields.items():
         if v is not None and k not in ("standard", "type", "shipment_id", "timestamp"):
             note_dict[k] = v
-    encoded = json.dumps(note_dict, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    if len(encoded) > MAX_NOTE_BYTES:
-        for key in ("reasoning", "route", "arc69", "weather", "verdict", "hash"):
-            if key in note_dict and len(encoded) > MAX_NOTE_BYTES:
-                note_dict.pop(key, None)
-                encoded = json.dumps(note_dict, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    if len(encoded) > MAX_NOTE_BYTES:
-        raise ValueError(f"Transaction note exceeds {MAX_NOTE_BYTES} bytes ({len(encoded)})")
-    return encoded
+    return _encode_note_dict(note_dict)
 
 
 def parse_note(raw: bytes) -> Optional[dict[str, Any]]:
@@ -97,10 +107,7 @@ def build_arc69_note(shipment_id: str, verdict_tx_id: str, app_id: int) -> bytes
         "external_url": f"{get_verify_public_base_url()}/verify/{shipment_id}",
         "properties": {"app_id": app_id, "shipment_id": shipment_id},
     }
-    encoded = json.dumps(note_dict, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    if len(encoded) > MAX_NOTE_BYTES:
-        raise ValueError(f"ARC-69 note exceeds {MAX_NOTE_BYTES} bytes")
-    return encoded
+    return _encode_note_dict(note_dict)
 
 
 _TYPE_ALIASES = {
@@ -147,5 +154,8 @@ def merge_pramanik_note(legacy: dict[str, Any], event_type: str, shipment_id: st
         if k in ("standard", "type", "shipment_id", "timestamp"):
             continue
         merged[k] = v
-    raw = json.dumps(merged, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    return raw[:MAX_NOTE_BYTES]
+    try:
+        return _encode_note_dict(merged)
+    except ValueError:
+        raw = json.dumps(merged, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return raw[:MAX_NOTE_BYTES]

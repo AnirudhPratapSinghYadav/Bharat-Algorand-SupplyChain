@@ -1,8 +1,11 @@
 /**
  * Legacy demo API host — often cold/offline on free tiers. For production, set `VITE_API_URL` to your deployed `app.py`.
  */
-/** Fallback when `VITE_API_URL` is unset in the Vercel build (must be a live `app.py` root, no trailing slash). */
-export const PUBLIC_DEFAULT_API_URL = 'https://bharat-algorand-supplychain.onrender.com';
+/**
+ * Fallback when `VITE_API_URL` is unset at Vercel build time.
+ * Set `VITE_API_URL` in Vercel env to your Render service URL instead of relying on this.
+ */
+export const PUBLIC_DEFAULT_API_URL = 'https://pramanik-api.onrender.com';
 
 /**
  * API base for axios/fetch.

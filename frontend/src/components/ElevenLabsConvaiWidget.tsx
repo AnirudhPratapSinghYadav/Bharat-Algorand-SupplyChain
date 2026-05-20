@@ -75,9 +75,9 @@ export function ElevenLabsConvaiWidget({
         setCfg(r.data as ConvaiConfig);
         setError(null);
       })
-      .catch((e) => {
+      .catch(() => {
         setCfg({ enabled: false });
-        setError(e instanceof Error ? e.message : 'Could not load voice agent config');
+        setError(null);
       })
       .finally(() => setLoading(false));
   }, []);
@@ -113,41 +113,31 @@ export function ElevenLabsConvaiWidget({
   if (loading) {
     return (
       <div className={`el-convai ${className || ''}`}>
-        <p className="el-convai__loading">Loading voice agent from API…</p>
+        <p className="el-convai__loading">Opening trade assistant…</p>
       </div>
     );
   }
 
   if (!enabled) {
-    return (
-      <div className={`el-convai el-convai--disabled ${className || ''}`}>
-        <p className="el-convai__hint">
-          Voice agent not configured on the server. Set <code>ELEVENLABS_AGENT_ID</code> and{' '}
-          <code>ELEVENLABS_API_KEY</code> in the API <code>.env</code>, then restart the backend.
-        </p>
-        {error ? <p className="el-convai__error">{error}</p> : null}
-      </div>
-    );
+    return null;
   }
 
   return (
     <div className={`el-convai ${className || ''}`}>
       <div className="el-convai__head">
         <span className="el-convai__title">{title}</span>
-        <span className="el-convai__badge">Voice + Chat</span>
+        <span className="el-convai__badge">Voice and chat</span>
       </div>
       {shipmentContextLabel ? (
         <p className="el-convai__ctx">
-          Shipment context: <strong>{shipmentContextLabel}</strong>
+          Shipment: <strong>{shipmentContextLabel}</strong>
         </p>
       ) : null}
       <p className="el-convai__mic-hint">
-        Use the panel below: <strong>type</strong> in the chat box or <strong>tap the microphone</strong> for voice — same
-        Pramanik agent, same shipment context.
+        Ask about escrow, payment release, or how to verify a shipment. Type a question or use the microphone.
       </p>
-      {error ? <p className="el-convai__error">{error}</p> : null}
-      <div ref={hostRef} className="el-convai__host" aria-label="ElevenLabs voice assistant" />
-      {!scriptReady && !error ? <p className="el-convai__loading">Starting voice session…</p> : null}
+      <div ref={hostRef} className="el-convai__host" aria-label="Trade assistant" />
+      {!scriptReady && !error ? <p className="el-convai__loading">Connecting…</p> : null}
     </div>
   );
 }

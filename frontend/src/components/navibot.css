@@ -293,6 +293,20 @@
   max-height: min(560px, 72vh);
 }
 
+.navibot-panel--embedded {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  max-width: none;
+  max-height: min(52vh, 480px);
+  flex: 1;
+  min-height: 0;
+}
+
+.navibot-panel--embedded .navibot-panel__messages {
+  max-height: min(36vh, 320px);
+}
+
 .navibot-panel__head {
   display: flex;
   align-items: center;
@@ -320,7 +334,7 @@
 
 .navibot-panel__sub {
   font-size: 0.62rem;
-  color: #94a3b8;
+  color: #5c564f;
 }
 
 .navibot-panel__close {
@@ -359,8 +373,9 @@
 
 .navibot-bubble--assistant {
   align-self: flex-start;
-  background: #f1f5f9;
-  color: #0f172a;
+  background: #f5f1eb;
+  color: #1a1a1a;
+  border: 1px solid #e8e0d5;
 }
 
 .navibot-bubble__time {

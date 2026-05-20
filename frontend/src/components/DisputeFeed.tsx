@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import axios from 'axios';
 import { ExternalLink, Radio } from 'lucide-react';
 
@@ -41,15 +41,19 @@ export function DisputeFeed() {
     },
     refetchInterval: 30_000,
     staleTime: 15_000,
+    placeholderData: keepPreviousData,
   });
 
   const items = Array.isArray(q.data?.items) ? q.data!.items! : [];
+  const initialLoad = q.isLoading && items.length === 0;
+  const refreshing = q.isFetching && items.length > 0;
 
   return (
-    <div>
+    <div className={refreshing ? 'dispute-feed--refreshing' : ''} style={{ opacity: refreshing ? 0.92 : 1 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
         <div style={{ fontSize: '0.72rem', color: 'var(--muted)' }}>
           Auto-refresh every 30s · {q.data?.generated_at ? `Updated ${q.data.generated_at}` : '—'}
+          {refreshing ? <span className="async-panel__badge" style={{ marginLeft: 8 }}>Updating</span> : null}
         </div>
         {q.data?.counts ? (
           <div style={{ fontSize: '0.72rem', color: 'var(--muted)' }}>
@@ -59,13 +63,13 @@ export function DisputeFeed() {
         ) : null}
       </div>
 
-      {q.isLoading ? <p style={{ color: 'var(--muted)' }}>Loading feed…</p> : null}
+      {initialLoad ? <p style={{ color: 'var(--muted)' }}>Loading feed…</p> : null}
       {q.isError ? (
         <p style={{ color: 'var(--danger)', fontSize: '0.85rem' }}>Feed unavailable (check API / CORS).</p>
       ) : null}
       {q.data?.error ? <p style={{ color: 'var(--warning)', fontSize: '0.82rem' }}>{q.data.error}</p> : null}
 
-      {!q.isLoading && !items.length ? (
+      {!initialLoad && !items.length ? (
         <p style={{ color: 'var(--muted)', fontSize: '0.88rem' }}>No jury verdicts or active disputes to show yet.</p>
       ) : null}
 
